@@ -9,6 +9,7 @@ import {
 } from "@actyx/sdk";
 
 import * as Reality from "./reality.js";
+export { Reality };
 
 export type Params<E> = {
   actyx: Parameters<(typeof Actyx)["of"]>;

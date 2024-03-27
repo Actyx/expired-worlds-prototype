@@ -95,7 +95,6 @@ describe("witness", () => {
     witness.see(event5);
 
     const reality = await witness.canonReality();
-    console.log(reality.history());
     const snap4 = reality.previous();
     expect(snap4?.latest()).toBe(event4);
     const snap3 = snap4?.previous();
