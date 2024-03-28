@@ -1,17 +1,16 @@
 import { describe, expect, it } from "@jest/globals";
 import { v4 as uuidv4 } from "uuid";
 
-const Enum = <
-  T extends readonly string[],
-  Res = Readonly<{ [S in T[number] as S]: Readonly<S> }>
->(
+const sleep = (x: number) => new Promise((res) => setTimeout(res, x));
+
+const Enum = <T extends ReadonlyArray<string>>(
   strs: T
-): Res =>
+): Readonly<{ [S in T[number] as S]: Readonly<S> }> =>
   strs.reduce((acc, x) => {
     acc[x] = x;
     return acc;
   }, {} as any);
-type Enum<T extends object> = (typeof Ev)[keyof typeof Ev];
+type Enum<T extends object> = T[keyof T];
 
 const Ev = Enum([
   "request",
@@ -49,65 +48,80 @@ type Ev = Enum<typeof Ev>;
 
 // Code
 
-type CItem = CAnti | CEvent | CRetry | CTimeout; // | CAnti;
-type CAnti = CAntiRetry | CAntiTimeout; //;
+type CItem = CAnti | CEvent | CRetry | CTimeout | CParallel; // | CAnti;
+type CAnti = CAntiRetry | CAntiTimeout | CAntiParallel; //;
 
 type CEventBinding = { var: string; index: string };
 type CEvent = {
   t: "event";
   name: Ev;
   bindings?: CEventBinding[];
-  control?: "fail" | "return";
+  control?: Code.Control;
 };
+type CParallel = { t: "par" };
 type CRetry = { t: "retry" };
 type CTimeout = { t: "timeout"; duration: number; consequence: CEvent };
 
 type CAntiRetry = { t: "anti"; c: { t: "retry" } };
 type CAntiTimeout = { t: "anti"; c: { t: "timeout" } };
+type CAntiParallel = { t: "anti"; c: { t: "par" } };
 
-const Code: CItem[] = [
-  {
-    t: "event",
-    name: Ev.request,
-    bindings: [
-      { var: "src", index: "from" },
-      { var: "dst", index: "to" },
-    ],
-  },
-  { t: "retry" },
-  // {
-  //   t: "timeout",
-  //   duration: 5 * 60000,
-  //   consequence: {
-  //     t: "event",
-  //     name: "cancelled",
-  //   },
-  // },
-  {
-    t: "event",
-    name: Ev.bid,
-  },
-  // { t: "anti", c: { t: "timeout" } },
-  { t: "anti", c: { t: "retry" } },
-];
+namespace Code {
+  export const Control = Enum(["fail", "return"] as const);
+  export type Control = Enum<typeof Control>;
+
+  export const binding = (name: string, index: string): CEventBinding => ({
+    index,
+    var: name,
+  });
+
+  export const event = (
+    name: Ev,
+    x?: Pick<CEvent, "bindings" | "control">
+  ): CEvent => ({ t: "event", name, ...(x || {}) });
+
+  export const retry = (workflow: CItem[]): CItem[] => [
+    { t: "retry" },
+    ...workflow,
+    { t: "anti", c: { t: "retry" } },
+  ];
+
+  export const timeout = (
+    duration: number,
+    workflow: CItem[],
+    consequence: CEvent
+  ): CItem[] => [
+    { t: "timeout", duration, consequence },
+    ...workflow,
+    { t: "anti", c: { t: "timeout" } },
+  ];
+}
 
 // Stack
 type StackItem = SEvent | SRetry | STimeout | SAntiTimeout;
-type SEvent = CEvent & { payload: PEvent["payload"] };
+type SEvent = CEvent & { payload: EEvent["payload"] };
 type SRetry = CRetry;
 type STimeout = CTimeout & { startedAt: Date; pairIndex: number };
 type SAntiTimeout = CAntiTimeout & {
   consequence: STimeout["consequence"];
-  data: PEvent;
+  data: EEvent;
 };
 
 // Payload
 
-type PEvent = { t: "event"; name: Ev; payload: Record<string, unknown> };
+type EEvent = { t: "event"; name: Ev; payload: Record<string, unknown> };
+namespace Emit {
+  export const event = (
+    name: Ev,
+    payload: Record<string, unknown>
+  ): EEvent => ({
+    t: "event",
+    name,
+    payload,
+  });
+}
 
-const WFMachine = <FirstCEvent extends CEvent>(
-  workflow: [FirstCEvent, ...CItem[]]
-) => {
+const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
   const data = {
     stack: [] as (StackItem | null)[],
     executionIndex: 0,
@@ -138,8 +152,6 @@ const WFMachine = <FirstCEvent extends CEvent>(
 
   const recalculate = () => {
     while (data.contextCalculationIndex < data.executionIndex) {
-      if (data.returned) break;
-
       const code = workflow.at(data.contextCalculationIndex);
       const stackItem = data.stack.at(data.contextCalculationIndex);
       if (code?.t === "event" && stackItem?.t === "event") {
@@ -169,6 +181,7 @@ const WFMachine = <FirstCEvent extends CEvent>(
             throw new Error("cannot find retry while dealing with ");
           }
           resetIndex(retryIndex + 1);
+          continue; // important
         } else if (consequence.control === "return") {
           data.returned = true;
         }
@@ -198,11 +211,30 @@ const WFMachine = <FirstCEvent extends CEvent>(
     return null;
   };
 
+  const nullifyMatchingTimeout = (indexInput: number) => {
+    const foundPair = Array.from(data.activeTimeout)
+      .map(
+        (timeoutIndex) => [timeoutIndex, data.stack.at(timeoutIndex)] as const
+      )
+      .find(
+        (x): x is [number, STimeout] =>
+          x[1]?.t === "timeout" && x[1].pairIndex === indexInput
+      );
+
+    if (foundPair) {
+      const [timeoutIndex, _] = foundPair;
+      data.activeTimeout.delete(timeoutIndex);
+      data.stack[timeoutIndex] = null;
+    } else {
+      throw new Error("timeout not found on stack");
+    }
+  };
+
   const findMatchingRetryIndex = (indexInput: number) => {
     let counter = 1;
     let index = indexInput;
 
-    while (index >= 0) {
+    while (index > 0) {
       index -= 1;
       const code = workflow.at(index);
       if (code?.t === "anti" && code.c.t === "retry") {
@@ -221,9 +253,9 @@ const WFMachine = <FirstCEvent extends CEvent>(
 
   const findRetryOnStack = (indexInput: number) => {
     let index = indexInput;
-    while (index >= 0) {
+    while (index > 0) {
       index -= 1;
-      const stackItem = data.stack.at(indexInput);
+      const stackItem = data.stack.at(index);
       if (stackItem?.t === "retry") {
         return index;
       }
@@ -268,86 +300,99 @@ const WFMachine = <FirstCEvent extends CEvent>(
     }
   };
 
+  type Continue = boolean;
+  const evaluateImpl = (indexer: { index: number }): Continue => {
+    // Handle Retry Code
+    const code = workflow.at(indexer.index);
+    if (!code) {
+      data.returned = true;
+      return false;
+    }
+
+    if (code.t === "retry") {
+      data.stack[indexer.index] = { t: "retry" };
+      indexer.index += 1;
+      return true;
+    }
+
+    if (code.t === "anti" && code.c.t == "retry") {
+      const matchingRetryIndex = findMatchingRetryIndex(indexer.index);
+      if (typeof matchingRetryIndex !== "number") {
+        throw new Error("retry not found");
+      }
+      data.stack[matchingRetryIndex] = null;
+      indexer.index += 1;
+      return true;
+    }
+
+    // Handle timeout code
+
+    if (code.t === "timeout") {
+      const pair = findMatchingAntiTimeout(indexer.index);
+      if (typeof pair !== "number") {
+        throw new Error("anti-timeout not found");
+      }
+      data.stack[indexer.index] = {
+        t: "timeout",
+        pairIndex: pair,
+        consequence: code.consequence,
+        duration: code.duration,
+        startedAt: new Date(),
+      };
+      data.activeTimeout.add(indexer.index);
+      indexer.index += 1;
+      return true;
+    }
+
+    if (code.t === "anti" && code.c.t === "timeout") {
+      nullifyMatchingTimeout(indexer.index);
+      indexer.index += 1;
+      return true;
+    }
+
+    return false;
+  };
+
   const evaluate = () => {
     while (true) {
       attemptTimeout();
       recalculate();
       if (data.returned) break;
 
-      const code = workflow.at(data.executionIndex);
-      if (!code) {
-        data.returned = true;
-        break;
-      }
+      const mutableIndexer = { index: data.executionIndex };
+      const shouldContinue = evaluateImpl(mutableIndexer);
+      data.executionIndex = mutableIndexer.index;
 
-      // Handle Retry Code
-
-      if (code.t === "retry") {
-        data.stack[data.executionIndex] = { t: "retry" };
-        data.executionIndex += 1;
-        continue;
-      }
-
-      if (code.t === "anti" && code.c.t == "retry") {
-        const matchingRetryIndex = findMatchingRetryIndex(data.executionIndex);
-        if (typeof matchingRetryIndex !== "number") {
-          throw new Error("retry not found");
-        }
-        data.stack[matchingRetryIndex] = null;
-        data.executionIndex += 1;
-        continue;
-      }
-
-      if (code.t === "timeout") {
-        const pair = findMatchingAntiTimeout(data.executionIndex);
-        if (typeof pair !== "number") {
-          throw new Error("anti-timeout not found");
-        }
-        data.stack[data.executionIndex] = {
-          t: "timeout",
-          pairIndex: pair,
-          consequence: code.consequence,
-          duration: code.duration,
-          startedAt: new Date(),
-        };
-        data.activeTimeout.add(data.executionIndex);
-        data.executionIndex += 1;
-        continue;
-      }
+      if (shouldContinue) continue;
 
       break;
     }
   };
 
-  const feed = (e: PEvent) => {
-    const code = workflow.at(data.executionIndex);
-    if (code?.t === "event" && e.name === code.name) {
-      data.stack[data.executionIndex] = {
-        t: "event",
-        name: e.name,
-        payload: e.payload,
-        bindings: code.bindings,
-      };
-      data.executionIndex += 1;
-      evaluate();
+  const tick = (e: EEvent | null) => {
+    if (e) {
+      const code = workflow.at(data.executionIndex);
+      if (code?.t === "event" && e.name === code.name) {
+        data.stack[data.executionIndex] = {
+          t: "event",
+          name: e.name,
+          payload: e.payload,
+          bindings: code.bindings,
+        };
+        data.executionIndex += 1;
+      }
     }
+    evaluate();
   };
 
-  const state = () => {
-    const ev = (data.stack
-      .slice(0)
-      .reverse()
-      .find((item) => item && item.t === "event") || null) as SEvent | null;
-
-    return {
-      state: ev?.name || null,
-      context: data.context,
-    };
-  };
+  const state = () => ({
+    state: data.returnValue,
+    context: data.context,
+  });
 
   const returned = () => data.returned;
 
-  return { feed, state, returned, evaluate };
+  return { tick, state, returned, evaluate };
 };
 
 describe("enums", () => {
@@ -363,26 +408,147 @@ describe("enums", () => {
 describe("machine", () => {
   it("event", () => {
     const machine = WFMachine([
-      {
-        t: "event",
-        name: Ev.request,
-        bindings: [
-          { var: "src", index: "from" },
-          { var: "dst", index: "to" },
-        ],
-      },
+      Code.event(Ev.request, {
+        bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
+      }),
     ]);
 
-    machine.feed({
-      t: "event",
-      name: Ev.request,
-      payload: { from: "storage-1", to: "storage-2" },
-    });
+    expect(machine.returned()).toBe(false);
+
+    machine.tick(
+      Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+    );
 
     expect(machine.returned()).toBe(true);
     expect(machine.state()).toEqual({
       state: Ev.request,
       context: { src: "storage-1", dst: "storage-2" },
+    });
+  });
+
+  describe("retry-timeout", () => {
+    it("retry-timeout FAIL", async () => {
+      const TIMEOUT_DURATION = 3000;
+
+      const machine = WFMachine([
+        Code.event(Ev.request, {
+          bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
+        }),
+        ...Code.retry([
+          Code.event(Ev.reqStorage, {
+            bindings: [Code.binding("somevar", "somefield")],
+          }),
+          ...Code.timeout(
+            TIMEOUT_DURATION,
+            [Code.event(Ev.bid)],
+            Code.event(Ev.cancelled, { control: Code.Control.fail })
+          ),
+        ]),
+      ]);
+
+      expect(machine.returned()).toBe(false);
+      machine.tick(
+        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+      );
+      expect(machine.returned()).toBe(false);
+
+      machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
+      expect(machine.returned()).toBe(false);
+      expect(machine.state()).toEqual({
+        state: Ev.reqStorage,
+        context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
+      });
+
+      await sleep(TIMEOUT_DURATION + 100);
+      machine.tick(null);
+      expect(machine.returned()).toBe(false);
+      expect(machine.state()).toEqual({
+        state: Ev.request,
+        context: { src: "storage-1", dst: "storage-2" },
+      });
+    });
+
+    it.only("retry-timeout RETURN", async () => {
+      const TIMEOUT_DURATION = 3000;
+
+      const machine = WFMachine([
+        Code.event(Ev.request, {
+          bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
+        }),
+        ...Code.retry([
+          Code.event(Ev.reqStorage, {
+            bindings: [Code.binding("somevar", "somefield")],
+          }),
+          ...Code.timeout(
+            TIMEOUT_DURATION,
+            [Code.event(Ev.bid)],
+            Code.event(Ev.cancelled, { control: Code.Control.return })
+          ),
+        ]),
+      ]);
+
+      expect(machine.returned()).toBe(false);
+      machine.tick(
+        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+      );
+      expect(machine.returned()).toBe(false);
+
+      machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
+      expect(machine.returned()).toBe(false);
+      expect(machine.state()).toEqual({
+        state: Ev.reqStorage,
+        context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
+      });
+
+      await sleep(TIMEOUT_DURATION + 100);
+      machine.tick(null);
+      expect(machine.returned()).toBe(true);
+      expect(machine.state()).toEqual({
+        state: Ev.cancelled,
+        context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
+      });
+    });
+
+    it("retry-timeout PASS", async () => {
+      const TIMEOUT_DURATION = 3000;
+
+      const machine = WFMachine([
+        Code.event(Ev.request, {
+          bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
+        }),
+        ...Code.retry([
+          Code.event(Ev.reqStorage, {
+            bindings: [Code.binding("somevar", "somefield")],
+          }),
+          ...Code.timeout(
+            TIMEOUT_DURATION,
+            [Code.event(Ev.bid)],
+            Code.event(Ev.cancelled, { control: Code.Control.fail })
+          ),
+        ]),
+      ]);
+
+      expect(machine.returned()).toBe(false);
+      machine.tick(
+        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+      );
+      expect(machine.returned()).toBe(false);
+
+      machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
+      expect(machine.returned()).toBe(false);
+      expect(machine.state()).toEqual({
+        state: Ev.reqStorage,
+        context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
+      });
+
+      machine.tick(Emit.event(Ev.bid, {}));
+
+      await sleep(TIMEOUT_DURATION + 100);
+      machine.tick(null);
+      expect(machine.state()).toEqual({
+        state: Ev.bid,
+        context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
+      });
     });
   });
 });
