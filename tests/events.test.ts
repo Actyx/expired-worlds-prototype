@@ -468,7 +468,7 @@ describe("machine", () => {
       });
     });
 
-    it.only("retry-timeout RETURN", async () => {
+    it("retry-timeout RETURN", async () => {
       const TIMEOUT_DURATION = 3000;
 
       const machine = WFMachine([
