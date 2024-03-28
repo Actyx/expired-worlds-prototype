@@ -428,7 +428,7 @@ describe("machine", () => {
 
   describe("retry-timeout", () => {
     it("retry-timeout FAIL", async () => {
-      const TIMEOUT_DURATION = 3000;
+      const TIMEOUT_DURATION = 300;
 
       const machine = WFMachine([
         Code.event(Ev.request, {
@@ -469,7 +469,7 @@ describe("machine", () => {
     });
 
     it("retry-timeout RETURN", async () => {
-      const TIMEOUT_DURATION = 3000;
+      const TIMEOUT_DURATION = 300;
 
       const machine = WFMachine([
         Code.event(Ev.request, {
@@ -510,7 +510,7 @@ describe("machine", () => {
     });
 
     it("retry-timeout PASS", async () => {
-      const TIMEOUT_DURATION = 3000;
+      const TIMEOUT_DURATION = 300;
 
       const machine = WFMachine([
         Code.event(Ev.request, {
