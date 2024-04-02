@@ -58,13 +58,32 @@ type CEvent = {
   bindings?: CEventBinding[];
   control?: Code.Control;
 };
-type CParallel = { t: "par" };
-type CRetry = { t: "retry" };
-type CTimeout = { t: "timeout"; duration: number; consequence: CEvent };
+type CParallel = {
+  t: "par";
+  count:
+    | {
+        max: number;
+        min?: number;
+      }
+    | {
+        max?: number;
+        min: number;
+      }
+    | { max: number; min: number };
+  pairOffsetIndex: number;
+  firstEventIndex: number;
+};
+type CRetry = { t: "retry"; pairOffsetIndex: number };
+type CTimeout = {
+  t: "timeout";
+  duration: number;
+  consequence: CEvent;
+  pairOffsetIndex: number;
+};
 
-type CAntiRetry = { t: "anti"; c: { t: "retry" } };
-type CAntiTimeout = { t: "anti"; c: { t: "timeout" } };
-type CAntiParallel = { t: "anti"; c: { t: "par" } };
+type CAntiRetry = { t: "anti-retry"; pairOffsetIndex: number };
+type CAntiTimeout = { t: "anti-timeout"; pairOffsetIndex: number };
+type CAntiParallel = { t: "anti-par"; pairOffsetIndex: number };
 
 namespace Code {
   export const Control = Enum(["fail", "return"] as const);
@@ -81,9 +100,27 @@ namespace Code {
   ): CEvent => ({ t: "event", name, ...(x || {}) });
 
   export const retry = (workflow: CItem[]): CItem[] => [
-    { t: "retry" },
+    { t: "retry", pairOffsetIndex: workflow.length + 1 },
     ...workflow,
-    { t: "anti", c: { t: "retry" } },
+    { t: "anti-retry", pairOffsetIndex: (workflow.length + 1) * -1 },
+  ];
+
+  export const parallel = (
+    workflow: CEvent[],
+    count: CParallel["count"]
+  ): CItem[] => [
+    {
+      t: "par",
+      count,
+      pairOffsetIndex: workflow.length + 1,
+      firstEventIndex: (() => {
+        const firstEventIndex = workflow.findIndex((e) => e.t === "event");
+        if (firstEventIndex === -1) throw new Error("ev not found");
+        return firstEventIndex + 1;
+      })(),
+    },
+    ...workflow,
+    { t: "anti-par", pairOffsetIndex: workflow.length + 1 },
   ];
 
   export const timeout = (
@@ -91,21 +128,41 @@ namespace Code {
     workflow: CItem[],
     consequence: CEvent
   ): CItem[] => [
-    { t: "timeout", duration, consequence },
+    {
+      t: "timeout",
+      duration,
+      consequence,
+      pairOffsetIndex: workflow.length + 1,
+    },
     ...workflow,
-    { t: "anti", c: { t: "timeout" } },
+    { t: "anti-timeout", pairOffsetIndex: (workflow.length + 1) * -1 },
   ];
 }
 
 // Stack
-type StackItem = SEvent | SRetry | STimeout | SAntiTimeout;
+type StackItem =
+  | SEvent
+  | SRetry
+  | STimeout
+  | SAntiTimeout
+  | SParallel
+  | SAntiParallel;
 type SEvent = CEvent & { payload: EEvent["payload"] };
-type SRetry = CRetry;
-type STimeout = CTimeout & { startedAt: Date; pairIndex: number };
-type SAntiTimeout = CAntiTimeout & {
-  consequence: STimeout["consequence"];
+type SRetry = Pick<CRetry, "t">;
+type SParallelExecution = { executionIndex: number };
+type SParallel = Pick<CParallel, "t"> & {
+  fulfilled: boolean;
+  nextEvalIndex: number;
+  instances: SParallelExecution[];
+};
+type STimeout = Pick<CTimeout, "t"> & {
+  startedAt: Date;
+};
+type SAntiTimeout = Pick<CAntiTimeout, "t"> & {
+  consequence: CTimeout["consequence"];
   data: EEvent;
 };
+type SAntiParallel = Pick<CAntiParallel, "t"> & {};
 
 // Payload
 
@@ -133,10 +190,11 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     returned: false,
   };
 
-  const resetIndex = (targetIndex: number) => {
+  const resetIndex = (evalContext: EvalContext, targetIndex: number) => {
     // set execution back at the index
     data.stack.length = targetIndex;
     data.executionIndex = targetIndex;
+    evalContext.index = targetIndex;
 
     // remove timeouts after the last item index in stack
     data.activeTimeout = new Set(
@@ -145,13 +203,16 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
       )
     );
 
-    // recalculate context
+    // force recalculate context
     data.contextCalculationIndex = 0;
     data.context = {};
   };
 
-  const recalculate = () => {
-    while (data.contextCalculationIndex < data.executionIndex) {
+  /**
+   * Catch up with execution index
+   */
+  const recalculateResult = (evalContext: EvalContext) => {
+    while (data.contextCalculationIndex < evalContext.index) {
       const code = workflow.at(data.contextCalculationIndex);
       const stackItem = data.stack.at(data.contextCalculationIndex);
       if (code?.t === "event" && stackItem?.t === "event") {
@@ -165,22 +226,17 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
         }
       }
 
-      if (
-        code?.t === "anti" &&
-        code.c.t === "timeout" &&
-        stackItem?.t === "anti" &&
-        stackItem.c.t === "timeout"
-      ) {
+      if (code?.t === "anti-timeout" && stackItem?.t === "anti-timeout") {
         const consequenceData = stackItem.data;
         data.returnValue = consequenceData.name;
 
         const consequence = stackItem.consequence;
-        if (consequence.control === "fail") {
+        if (consequence.control === Code.Control.fail) {
           const retryIndex = findRetryOnStack(data.contextCalculationIndex);
           if (retryIndex === null) {
             throw new Error("cannot find retry while dealing with ");
           }
-          resetIndex(retryIndex + 1);
+          resetIndex(evalContext, retryIndex + 1);
           continue; // important
         } else if (consequence.control === "return") {
           data.returned = true;
@@ -191,38 +247,27 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     }
   };
 
-  const findMatchingAntiTimeout = (indexInput: number) => {
-    let counter = 1;
-    let index = indexInput;
-    while (index < workflow.length) {
-      index += 1;
-      const code = workflow.at(index);
-      if (code?.t === "timeout") {
-        counter += 1;
-      }
-      if (code?.t === "anti" && code.c.t === "timeout") {
-        counter -= 1;
-        if (counter === 0) {
-          return index;
-        }
-      }
-    }
+  // Finders helpers
 
+  const findMatchingAntiTimeout = (timeout: CTimeout, currentIndex: number) => {
+    const pairOffset = timeout.pairOffsetIndex;
+    const pairIndex = currentIndex + pairOffset;
+    const code = workflow.at(pairIndex);
+    if (code?.t === "anti-timeout") {
+      return pairIndex;
+    }
     return null;
   };
 
-  const nullifyMatchingTimeout = (indexInput: number) => {
-    const foundPair = Array.from(data.activeTimeout)
-      .map(
-        (timeoutIndex) => [timeoutIndex, data.stack.at(timeoutIndex)] as const
-      )
-      .find(
-        (x): x is [number, STimeout] =>
-          x[1]?.t === "timeout" && x[1].pairIndex === indexInput
-      );
+  const nullifyMatchingTimeout = (
+    antiTimeout: CAntiTimeout,
+    indexInput: number
+  ) => {
+    const timeoutIndex = antiTimeout.pairOffsetIndex + indexInput;
+    const maybeTimeout = data.stack.at(timeoutIndex);
 
-    if (foundPair) {
-      const [timeoutIndex, _] = foundPair;
+    if (data.activeTimeout.has(timeoutIndex) && maybeTimeout?.t === "timeout") {
+      data.activeTimeout.delete(timeoutIndex);
       data.activeTimeout.delete(timeoutIndex);
       data.stack[timeoutIndex] = null;
     } else {
@@ -230,24 +275,12 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     }
   };
 
-  const findMatchingRetryIndex = (indexInput: number) => {
-    let counter = 1;
-    let index = indexInput;
-
-    while (index > 0) {
-      index -= 1;
-      const code = workflow.at(index);
-      if (code?.t === "anti" && code.c.t === "retry") {
-        counter += 1;
-      }
-      if (code?.t === "retry") {
-        counter -= 1;
-        if (counter === 0) {
-          return index;
-        }
-      }
+  const findMatchingRetryIndex = (retry: CAntiRetry, indexInput: number) => {
+    const pairIndex = retry.pairOffsetIndex + indexInput;
+    const code = workflow.at(pairIndex);
+    if (code?.t === "retry") {
+      return pairIndex;
     }
-
     return null;
   };
 
@@ -264,104 +297,111 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     return null;
   };
 
-  const attemptTimeout = () => {
+  // Timeout helpers
+
+  const attemptTimeout = (evalContext: EvalContext) => {
     const timedout = Array.from(data.activeTimeout)
       .map((index) => {
-        const timeout = data.stack.at(index);
-        if (timeout?.t !== "timeout") {
+        const ctimeout = workflow.at(index);
+        const stimeout = data.stack.at(index);
+        if (ctimeout?.t !== "timeout") {
           throw new Error(
-            `attempt timeout fatal error: timeout not found at index ${index}`
+            `attempt timeout fatal error: ctimeout not found at index ${index}`
+          );
+        }
+        if (stimeout?.t !== "timeout") {
+          throw new Error(
+            `attempt timeout fatal error: stimeout not found at index ${index}`
           );
         }
 
-        const dueDate = timeout.startedAt.getTime() + timeout.duration;
+        const antiIndex = index + ctimeout.pairOffsetIndex;
+        const dueDate = stimeout.startedAt.getTime() + ctimeout.duration;
         const lateness = Date.now() - dueDate;
 
-        return { item: timeout, lateness };
+        return { stimeout, ctimeout, lateness, antiIndex };
       })
-      .filter(({ lateness }) => lateness > 0)
-      .map((x) => x.item);
+      .filter(({ lateness }) => lateness > 0);
 
     if (timedout.length > 0) {
       const lastTimedout = timedout.sort(
-        (a, b) => b.pairIndex - a.pairIndex
+        (a, b) => b.antiIndex - a.antiIndex
       )[0];
-      data.stack[lastTimedout.pairIndex] = {
-        t: "anti",
-        c: { t: "timeout" },
-        consequence: lastTimedout.consequence,
+      data.stack[lastTimedout.antiIndex] = {
+        t: "anti-timeout",
+        consequence: lastTimedout.ctimeout.consequence,
         data: {
           t: "event",
-          name: lastTimedout.consequence.name,
+          name: lastTimedout.ctimeout.consequence.name,
           payload: {},
         },
       };
-      data.executionIndex = lastTimedout.pairIndex + 1;
+      evalContext.index = lastTimedout.antiIndex + 1;
+      data.executionIndex = lastTimedout.antiIndex + 1;
     }
   };
 
   type Continue = boolean;
-  const evaluateImpl = (indexer: { index: number }): Continue => {
+  type EvalContext = { index: number };
+  const evaluateImpl = (evalContext: EvalContext): Continue => {
     // Handle Retry Code
-    const code = workflow.at(indexer.index);
+    const code = workflow.at(evalContext.index);
     if (!code) {
       data.returned = true;
       return false;
     }
 
     if (code.t === "retry") {
-      data.stack[indexer.index] = { t: "retry" };
-      indexer.index += 1;
+      data.stack[evalContext.index] = { t: "retry" };
+      evalContext.index += 1;
       return true;
     }
 
-    if (code.t === "anti" && code.c.t == "retry") {
-      const matchingRetryIndex = findMatchingRetryIndex(indexer.index);
+    if (code.t === "anti-retry") {
+      const matchingRetryIndex = findMatchingRetryIndex(
+        code,
+        evalContext.index
+      );
       if (typeof matchingRetryIndex !== "number") {
         throw new Error("retry not found");
       }
       data.stack[matchingRetryIndex] = null;
-      indexer.index += 1;
+      evalContext.index += 1;
       return true;
     }
 
     // Handle timeout code
 
     if (code.t === "timeout") {
-      const pair = findMatchingAntiTimeout(indexer.index);
+      const pair = findMatchingAntiTimeout(code, evalContext.index);
       if (typeof pair !== "number") {
         throw new Error("anti-timeout not found");
       }
-      data.stack[indexer.index] = {
+      data.stack[evalContext.index] = {
         t: "timeout",
-        pairIndex: pair,
-        consequence: code.consequence,
-        duration: code.duration,
         startedAt: new Date(),
       };
-      data.activeTimeout.add(indexer.index);
-      indexer.index += 1;
+      data.activeTimeout.add(evalContext.index);
+      evalContext.index += 1;
       return true;
     }
 
-    if (code.t === "anti" && code.c.t === "timeout") {
-      nullifyMatchingTimeout(indexer.index);
-      indexer.index += 1;
+    if (code.t === "anti-timeout") {
+      nullifyMatchingTimeout(code, evalContext.index);
+      evalContext.index += 1;
       return true;
     }
 
     return false;
   };
 
-  const evaluate = () => {
+  const evaluate = (evalContext: EvalContext) => {
     while (true) {
-      attemptTimeout();
-      recalculate();
+      attemptTimeout(evalContext);
+      recalculateResult(evalContext);
       if (data.returned) break;
 
-      const mutableIndexer = { index: data.executionIndex };
-      const shouldContinue = evaluateImpl(mutableIndexer);
-      data.executionIndex = mutableIndexer.index;
+      const shouldContinue = evaluateImpl(evalContext);
 
       if (shouldContinue) continue;
 
@@ -369,20 +409,121 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     }
   };
 
-  const tick = (e: EEvent | null) => {
-    if (e) {
-      const code = workflow.at(data.executionIndex);
-      if (code?.t === "event" && e.name === code.name) {
-        data.stack[data.executionIndex] = {
-          t: "event",
-          name: e.name,
-          payload: e.payload,
-          bindings: code.bindings,
+  const feedEvent = (evalContext: EvalContext, code: CEvent, e: EEvent) => {
+    if (e.name === code.name) {
+      data.stack[evalContext.index] = {
+        t: "event",
+        name: e.name,
+        payload: e.payload,
+        bindings: code.bindings,
+      };
+      evalContext.index += 1;
+      return true;
+    }
+    return false;
+  };
+
+  const tickParallel = (code: CParallel, e: EEvent | null) => {
+    let eIsFed = false;
+    const atStack = ((): SParallel => {
+      const atStack = data.stack.at(data.executionIndex);
+      if (!atStack) {
+        const newAtStack: SParallel = {
+          t: "par",
+          fulfilled: false,
+          instances: [],
+          nextEvalIndex: data.executionIndex + code.pairOffsetIndex + 1,
         };
-        data.executionIndex += 1;
+        data.stack[data.executionIndex] = newAtStack;
+        return newAtStack;
+      }
+      if (atStack.t !== "par") {
+        throw new Error("stack type not par");
+      }
+      return atStack;
+    })();
+
+    if (e) {
+      // new instance
+      const eventCode = workflow.at(data.executionIndex + code.firstEventIndex);
+      if (eventCode?.t !== "event") {
+        throw new Error("parallel.firstEventIndex is not event code");
+      }
+      const evalContext = {
+        index: data.executionIndex + code.firstEventIndex,
+      };
+      if (feedEvent(evalContext, eventCode, e)) {
+        atStack.instances.push({ executionIndex: evalContext.index });
+        eIsFed = true;
+      }
+
+      // instances resumption
+      if (!eIsFed) {
+        const firstMatching = atStack.instances
+          .map(
+            (instance) =>
+              [instance, workflow.at(instance.executionIndex)] as const
+          )
+          .filter(
+            (pair): pair is [SParallelExecution, CEvent] =>
+              pair[1]?.t === "event" && pair[1]?.name === e.name
+          )
+          .at(0);
+
+        if (firstMatching) {
+          const [instance, code] = firstMatching;
+          const evalContext = {
+            index: data.executionIndex + instance.executionIndex,
+          };
+          feedEvent(evalContext, code, e);
+          instance.executionIndex = evalContext.index;
+          eIsFed = true;
+        }
       }
     }
-    evaluate();
+
+    // fulfilled calculation
+    const execDoneCount = atStack.instances.filter(
+      (x) => x.executionIndex >= code.pairOffsetIndex
+    ).length;
+    const minCriteria = Math.max(code.count?.min || 1, 1);
+    if (execDoneCount >= minCriteria) {
+      atStack.fulfilled = true;
+    }
+
+    if (atStack.fulfilled) {
+      const evalContext = { index: atStack.nextEvalIndex };
+      const maybeEv = workflow.at(atStack.nextEvalIndex);
+      const eventFed = (() => {
+        if (!eIsFed && maybeEv?.t === "event" && e) {
+          return feedEvent(evalContext, maybeEv, e);
+        }
+        return false;
+      })();
+
+      evaluate(evalContext);
+
+      // if some next event is fed
+      atStack.nextEvalIndex = evalContext.index;
+      if (eventFed) {
+        data.executionIndex = evalContext.index;
+        return;
+      }
+    }
+  };
+
+  const tick = (e: EEvent | null) => {
+    const evalContext = { index: data.executionIndex };
+    const code = workflow.at(evalContext.index);
+    if (code?.t === "par") {
+      return tickParallel(code, e);
+    }
+
+    if (code?.t === "event" && e) {
+      feedEvent(evalContext, code, e);
+    }
+    evaluate(evalContext);
+    data.executionIndex = evalContext.index;
   };
 
   const state = () => ({
