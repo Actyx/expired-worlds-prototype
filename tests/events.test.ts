@@ -106,8 +106,8 @@ namespace Code {
   ];
 
   export const parallel = (
-    workflow: CEvent[],
-    count: CParallel["count"]
+    count: CParallel["count"],
+    workflow: CEvent[]
   ): CItem[] => [
     {
       t: "par",
@@ -149,7 +149,7 @@ type StackItem =
   | SAntiParallel;
 type SEvent = CEvent & { payload: EEvent["payload"] };
 type SRetry = Pick<CRetry, "t">;
-type SParallelExecution = { executionIndex: number };
+type SParallelExecution = { entry: EEvent[] };
 type SParallel = Pick<CParallel, "t"> & {
   fulfilled: boolean;
   nextEvalIndex: number;
@@ -178,15 +178,22 @@ namespace Emit {
   });
 }
 
+const One: unique symbol = Symbol("One");
+const Parallel: unique symbol = Symbol("Parallel");
+type One<T = unknown> = [typeof One, T];
+type Parallel<T = unknown> = [typeof Parallel, T[]];
+type State<T> = One<T> | Parallel<T>;
+
 const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
   const data = {
-    stack: [] as (StackItem | null)[],
     executionIndex: 0,
-    contextCalculationIndex: 0,
+    stack: [] as (StackItem | null)[],
+
     activeTimeout: new Set() as Set<number>,
 
+    resultCalcIndex: 0,
     context: {} as Record<string, unknown>,
-    returnValue: null as Ev | null,
+    returnValue: null as State<Ev> | null,
     returned: false,
   };
 
@@ -204,7 +211,7 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     );
 
     // force recalculate context
-    data.contextCalculationIndex = 0;
+    data.resultCalcIndex = 0;
     data.context = {};
   };
 
@@ -212,14 +219,14 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
    * Catch up with execution index
    */
   const recalculateResult = (evalContext: EvalContext) => {
-    while (data.contextCalculationIndex < evalContext.index) {
-      const code = workflow.at(data.contextCalculationIndex);
-      const stackItem = data.stack.at(data.contextCalculationIndex);
+    while (data.resultCalcIndex < evalContext.index) {
+      const code = workflow.at(data.resultCalcIndex);
+      const stackItem = data.stack.at(data.resultCalcIndex);
       if (code?.t === "event" && stackItem?.t === "event") {
         code.bindings?.forEach((x) => {
           data.context[x.var] = stackItem.payload[x.index];
         });
-        data.returnValue = stackItem.name;
+        data.returnValue = [One, stackItem.name];
 
         if (code.control === "return") {
           data.returned = true;
@@ -228,11 +235,11 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
       if (code?.t === "anti-timeout" && stackItem?.t === "anti-timeout") {
         const consequenceData = stackItem.data;
-        data.returnValue = consequenceData.name;
+        data.returnValue = [One, consequenceData.name];
 
         const consequence = stackItem.consequence;
         if (consequence.control === Code.Control.fail) {
-          const retryIndex = findRetryOnStack(data.contextCalculationIndex);
+          const retryIndex = findRetryOnStack(data.resultCalcIndex);
           if (retryIndex === null) {
             throw new Error("cannot find retry while dealing with ");
           }
@@ -243,7 +250,19 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
         }
       }
 
-      data.contextCalculationIndex += 1;
+      data.resultCalcIndex += 1;
+    }
+
+    // Handle parallel code
+    const code = workflow.at(data.resultCalcIndex);
+    const stack = data.stack.at(data.resultCalcIndex);
+    if (code?.t === "par" && stack?.t === "par") {
+      data.returnValue = [
+        Parallel,
+        stack.instances.map(
+          (instance) => instance.entry[instance.entry.length - 1]?.name
+        ),
+      ];
     }
   };
 
@@ -423,7 +442,7 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     return false;
   };
 
-  const tickParallel = (code: CParallel, e: EEvent | null) => {
+  const tickParallel = (parallelCode: CParallel, e: EEvent | null) => {
     let eIsFed = false;
     const atStack = ((): SParallel => {
       const atStack = data.stack.at(data.executionIndex);
@@ -432,7 +451,7 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
           t: "par",
           fulfilled: false,
           instances: [],
-          nextEvalIndex: data.executionIndex + code.pairOffsetIndex + 1,
+          nextEvalIndex: data.executionIndex + parallelCode.pairOffsetIndex + 1,
         };
         data.stack[data.executionIndex] = newAtStack;
         return newAtStack;
@@ -445,15 +464,16 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
     if (e) {
       // new instance
-      const eventCode = workflow.at(data.executionIndex + code.firstEventIndex);
+      const eventCode = workflow.at(
+        data.executionIndex + parallelCode.firstEventIndex
+      );
       if (eventCode?.t !== "event") {
         throw new Error("parallel.firstEventIndex is not event code");
       }
-      const evalContext = {
-        index: data.executionIndex + code.firstEventIndex,
-      };
-      if (feedEvent(evalContext, eventCode, e)) {
-        atStack.instances.push({ executionIndex: evalContext.index });
+
+      if (eventCode.name === e.name) {
+        const newInstance: SParallelExecution = { entry: [e] };
+        atStack.instances.push(newInstance);
         eIsFed = true;
       }
 
@@ -462,7 +482,14 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
         const firstMatching = atStack.instances
           .map(
             (instance) =>
-              [instance, workflow.at(instance.executionIndex)] as const
+              [
+                instance,
+                workflow.at(
+                  data.executionIndex +
+                    parallelCode.firstEventIndex +
+                    instance.entry.length
+                ),
+              ] as const
           )
           .filter(
             (pair): pair is [SParallelExecution, CEvent] =>
@@ -471,12 +498,8 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
           .at(0);
 
         if (firstMatching) {
-          const [instance, code] = firstMatching;
-          const evalContext = {
-            index: data.executionIndex + instance.executionIndex,
-          };
-          feedEvent(evalContext, code, e);
-          instance.executionIndex = evalContext.index;
+          const [instance, _] = firstMatching;
+          instance.entry.push(e);
           eIsFed = true;
         }
       }
@@ -484,9 +507,13 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
     // fulfilled calculation
     const execDoneCount = atStack.instances.filter(
-      (x) => x.executionIndex >= code.pairOffsetIndex
+      (instance) =>
+        data.executionIndex +
+          parallelCode.firstEventIndex +
+          instance.entry.length >=
+        parallelCode.pairOffsetIndex
     ).length;
-    const minCriteria = Math.max(code.count?.min || 1, 1);
+    const minCriteria = Math.max(parallelCode.count?.min || 1, 1);
     if (execDoneCount >= minCriteria) {
       atStack.fulfilled = true;
     }
@@ -501,15 +528,16 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
         return false;
       })();
 
-      evaluate(evalContext);
-
       // if some next event is fed
       atStack.nextEvalIndex = evalContext.index;
       if (eventFed) {
         data.executionIndex = evalContext.index;
-        return;
       }
     }
+
+    const evalContext = { index: data.executionIndex };
+    evaluate(evalContext);
+    data.executionIndex = evalContext.index;
   };
 
   const tick = (e: EEvent | null) => {
@@ -526,6 +554,7 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
     data.executionIndex = evalContext.index;
   };
 
+  // TODO: introduce parallel state
   const state = () => ({
     state: data.returnValue,
     context: data.context,
@@ -562,7 +591,7 @@ describe("machine", () => {
 
     expect(machine.returned()).toBe(true);
     expect(machine.state()).toEqual({
-      state: Ev.request,
+      state: [One, Ev.request],
       context: { src: "storage-1", dst: "storage-2" },
     });
   });
@@ -596,7 +625,7 @@ describe("machine", () => {
       machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
-        state: Ev.reqStorage,
+        state: [One, Ev.reqStorage],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
       });
 
@@ -604,7 +633,7 @@ describe("machine", () => {
       machine.tick(null);
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
-        state: Ev.request,
+        state: [One, Ev.request],
         context: { src: "storage-1", dst: "storage-2" },
       });
     });
@@ -637,7 +666,7 @@ describe("machine", () => {
       machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
-        state: Ev.reqStorage,
+        state: [One, Ev.reqStorage],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
       });
 
@@ -645,7 +674,7 @@ describe("machine", () => {
       machine.tick(null);
       expect(machine.returned()).toBe(true);
       expect(machine.state()).toEqual({
-        state: Ev.cancelled,
+        state: [One, Ev.cancelled],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
       });
     });
@@ -678,7 +707,7 @@ describe("machine", () => {
       machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
-        state: Ev.reqStorage,
+        state: [One, Ev.reqStorage],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
       });
 
@@ -687,8 +716,48 @@ describe("machine", () => {
       await sleep(TIMEOUT_DURATION + 100);
       machine.tick(null);
       expect(machine.state()).toEqual({
-        state: Ev.bid,
+        state: [One, Ev.bid],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
+      });
+    });
+  });
+
+  describe("parallel", () => {
+    it("works", () => {
+      const machine = WFMachine([
+        Code.event(Ev.request),
+        ...Code.parallel({ min: 2 }, [Code.event(Ev.bid)]), // minimum of two bids
+        Code.event(Ev.accept),
+      ]);
+
+      machine.tick(Emit.event(Ev.request, {}));
+      expect(machine.state()).toEqual({
+        state: [One, Ev.request],
+        context: {},
+      });
+
+      machine.tick(Emit.event(Ev.bid, {}));
+      expect(machine.state()).toEqual({
+        state: [Parallel, [Ev.bid]],
+        context: {},
+      });
+
+      machine.tick(Emit.event(Ev.accept, {})); // attempt to accept will fail because parallel count isn't fulfilled
+      expect(machine.state()).toEqual({
+        state: [Parallel, [Ev.bid]],
+        context: {},
+      });
+
+      machine.tick(Emit.event(Ev.bid, {})); // the second bid
+      expect(machine.state()).toEqual({
+        state: [Parallel, [Ev.bid, Ev.bid]],
+        context: {},
+      });
+
+      machine.tick(Emit.event(Ev.accept, {})); // finally accept should work
+      expect(machine.state()).toEqual({
+        state: [One, Ev.accept],
+        context: {},
       });
     });
   });
