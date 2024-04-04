@@ -48,8 +48,15 @@ type Ev = Enum<typeof Ev>;
 
 // Code
 
-type CItem = CAnti | CEvent | CRetry | CTimeout | CParallel; // | CAnti;
-type CAnti = CAntiRetry | CAntiTimeout | CAntiParallel; //;
+type CItem =
+  | CAnti
+  | CEvent
+  | CRetry
+  | CTimeout
+  | CParallel
+  | CCompensate
+  | CCompensateWith;
+type CAnti = CAntiRetry | CAntiTimeout | CAntiParallel | CAntiCompensate;
 
 type CEventBinding = { var: string; index: string };
 type CEvent = {
@@ -58,6 +65,9 @@ type CEvent = {
   bindings?: CEventBinding[];
   control?: Code.Control;
 };
+type CCompensate = { t: "compensate" };
+type CCompensateWith = { t: "compensate-with" };
+type CAntiCompensate = { t: "anti-compensate" };
 type CParallel = {
   t: "par";
   count:
@@ -103,6 +113,17 @@ namespace Code {
     { t: "retry", pairOffsetIndex: workflow.length + 1 },
     ...workflow,
     { t: "anti-retry", pairOffsetIndex: (workflow.length + 1) * -1 },
+  ];
+
+  export const compensate = (
+    main: [CEvent, ...CItem[]],
+    compensation: [CEvent, ...CItem[]]
+  ): CItem[] => [
+    { t: "compensate" },
+    ...main,
+    { t: "compensate-with" },
+    ...compensation,
+    { t: "anti-compensate" },
   ];
 
   export const parallel = (
@@ -184,12 +205,13 @@ type One<T = unknown> = [typeof One, T];
 type Parallel<T = unknown> = [typeof Parallel, T[]];
 type State<T> = One<T> | Parallel<T>;
 
-const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
+const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
   const data = {
     executionIndex: 0,
     stack: [] as (StackItem | null)[],
 
     activeTimeout: new Set() as Set<number>,
+    activeCompensation: new Set() as Set<number>,
 
     resultCalcIndex: 0,
     context: {} as Record<string, unknown>,
@@ -318,8 +340,8 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
   // Timeout helpers
 
-  const attemptTimeout = (evalContext: EvalContext) => {
-    const timedout = Array.from(data.activeTimeout)
+  const availableTimeout = () =>
+    Array.from(data.activeTimeout)
       .map((index) => {
         const ctimeout = workflow.at(index);
         const stimeout = data.stack.at(index);
@@ -340,25 +362,11 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
         return { stimeout, ctimeout, lateness, antiIndex };
       })
-      .filter(({ lateness }) => lateness > 0);
-
-    if (timedout.length > 0) {
-      const lastTimedout = timedout.sort(
-        (a, b) => b.antiIndex - a.antiIndex
-      )[0];
-      data.stack[lastTimedout.antiIndex] = {
-        t: "anti-timeout",
-        consequence: lastTimedout.ctimeout.consequence,
-        data: {
-          t: "event",
-          name: lastTimedout.ctimeout.consequence.name,
-          payload: {},
-        },
-      };
-      evalContext.index = lastTimedout.antiIndex + 1;
-      data.executionIndex = lastTimedout.antiIndex + 1;
-    }
-  };
+      .filter(({ lateness }) => lateness > 0)
+      .sort((a, b) => {
+        // in case of nested timeouts: sorted by last / outermost timeout
+        return b.antiIndex - a.antiIndex;
+      });
 
   type Continue = boolean;
   type EvalContext = { index: number };
@@ -416,7 +424,6 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
   const evaluate = (evalContext: EvalContext) => {
     while (true) {
-      attemptTimeout(evalContext);
       recalculateResult(evalContext);
       if (data.returned) break;
 
@@ -426,6 +433,30 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
       break;
     }
+  };
+
+  const feedTimeout = (evalContext: EvalContext, e: EEvent) => {
+    const lastMatching = availableTimeout()
+      .filter((x) => x.ctimeout.consequence.name === e.name)
+      .at(0);
+
+    if (lastMatching) {
+      data.stack[lastMatching.antiIndex] = {
+        t: "anti-timeout",
+        consequence: lastMatching.ctimeout.consequence,
+        data: {
+          t: "event",
+          name: lastMatching.ctimeout.consequence.name,
+          payload: {},
+        },
+      };
+
+      evalContext.index = lastMatching.antiIndex + 1;
+      data.executionIndex = lastMatching.antiIndex + 1;
+
+      return true;
+    }
+    return false;
   };
 
   const feedEvent = (evalContext: EvalContext, code: CEvent, e: EEvent) => {
@@ -547,14 +578,23 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
       return tickParallel(code, e);
     }
 
-    if (code?.t === "event" && e) {
-      feedEvent(evalContext, code, e);
+    if (e) {
+      const isFed = (() => {
+        if (code?.t === "event" && e) {
+          return feedEvent(evalContext, code, e);
+        }
+        return false;
+      })();
+
+      if (!isFed) {
+        feedTimeout(evalContext, e);
+      }
     }
+
     evaluate(evalContext);
     data.executionIndex = evalContext.index;
   };
 
-  // TODO: introduce parallel state
   const state = () => ({
     state: data.returnValue,
     context: data.context,
@@ -562,7 +602,26 @@ const WFMachine = (workflow: [CEvent, ...CItem[]]) => {
 
   const returned = () => data.returned;
 
-  return { tick, state, returned, evaluate };
+  const availableTimeoutExternal = () =>
+    availableTimeout().map(
+      ({
+        ctimeout: {
+          consequence: { name, control },
+        },
+        lateness,
+      }) => ({
+        consequence: { name, control },
+        dueFor: lateness,
+      })
+    );
+
+  return {
+    tick,
+    state,
+    returned,
+    evaluate,
+    availableTimeout: availableTimeoutExternal,
+  };
 };
 
 describe("enums", () => {
@@ -628,9 +687,29 @@ describe("machine", () => {
         state: [One, Ev.reqStorage],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
       });
+      expect(machine.availableTimeout()).toEqual([]);
 
+      // attempt timeout will fail
+      machine.tick(Emit.event(Ev.cancelled, {}));
+      expect(machine.returned()).toBe(false);
+      expect(machine.state()).toEqual({
+        state: [One, Ev.reqStorage],
+        context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
+      });
+
+      // after some moments some timeouts are available
       await sleep(TIMEOUT_DURATION + 100);
-      machine.tick(null);
+      expect(
+        machine
+          .availableTimeout()
+          .findIndex(
+            ({ consequence: { name, control } }) =>
+              name === Ev.cancelled && control === Code.Control.fail
+          ) !== -1
+      ).toBe(true);
+
+      // trigger timeout - state will be wound back to when RETRY
+      machine.tick(Emit.event(Ev.cancelled, {}));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
         state: [One, Ev.request],
@@ -671,7 +750,8 @@ describe("machine", () => {
       });
 
       await sleep(TIMEOUT_DURATION + 100);
-      machine.tick(null);
+      // trigger timeout - also triggering return
+      machine.tick(Emit.event(Ev.cancelled, {}));
       expect(machine.returned()).toBe(true);
       expect(machine.state()).toEqual({
         state: [One, Ev.cancelled],
