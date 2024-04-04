@@ -65,9 +65,17 @@ type CEvent = {
   bindings?: CEventBinding[];
   control?: Code.Control;
 };
-type CCompensate = { t: "compensate" };
-type CCompensateWith = { t: "compensate-with" };
-type CAntiCompensate = { t: "anti-compensate" };
+type CCompensate = {
+  t: "compensate";
+  withIndexOffset: number;
+  antiIndexOffset: number;
+};
+type CCompensateWith = {
+  t: "compensate-with";
+  baseIndexOffset: number;
+  antiIndexOffset: number;
+};
+type CAntiCompensate = { t: "anti-compensate"; baseIndexOffset: number };
 type CParallel = {
   t: "par";
   count:
@@ -118,13 +126,28 @@ namespace Code {
   export const compensate = (
     main: [CEvent, ...CItem[]],
     compensation: [CEvent, ...CItem[]]
-  ): CItem[] => [
-    { t: "compensate" },
-    ...main,
-    { t: "compensate-with" },
-    ...compensation,
-    { t: "anti-compensate" },
-  ];
+  ): CItem[] => {
+    const withOffset = main.length + 1;
+    const antiOffset = main.length + 1 + compensation.length + 1;
+    return [
+      {
+        t: "compensate",
+        withIndexOffset: withOffset,
+        antiIndexOffset: antiOffset,
+      },
+      ...main,
+      {
+        t: "compensate-with",
+        baseIndexOffset: withOffset * -1,
+        antiIndexOffset: compensation.length + 1,
+      },
+      ...compensation,
+      {
+        t: "anti-compensate",
+        baseIndexOffset: antiOffset * -1,
+      },
+    ];
+  };
 
   export const parallel = (
     count: CParallel["count"],
@@ -338,7 +361,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
     return null;
   };
 
-  // Timeout helpers
+  // Helpers
 
   const availableTimeout = () =>
     Array.from(data.activeTimeout)
@@ -352,7 +375,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
         }
         if (stimeout?.t !== "timeout") {
           throw new Error(
-            `attempt timeout fatal error: stimeout not found at index ${index}`
+            `timeout query fatal error: stimeout not found at index ${index}`
           );
         }
 
@@ -366,6 +389,37 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
       .sort((a, b) => {
         // in case of nested timeouts: sorted by last / outermost timeout
         return b.antiIndex - a.antiIndex;
+      });
+
+  const availableCompensations = () =>
+    Array.from(data.activeTimeout)
+      .map((index) => {
+        const ctimeout = workflow.at(index);
+        if (ctimeout?.t !== "compensate") {
+          throw new Error(
+            `compensate query fatal error: ctimeout not found at index ${index}`
+          );
+        }
+
+        const antiIndex = index + ctimeout.antiIndexOffset;
+        const firstCompensationIndex = index + ctimeout.withIndexOffset + 1;
+        const firstCompensation = workflow.at(firstCompensationIndex);
+        if (firstCompensation?.t !== "event") {
+          throw new Error(
+            `compensate query fatal error: compensation's first code is not of type event`
+          );
+        }
+
+        return {
+          ctimeout,
+          firstCompensation,
+          firstCompensationIndex,
+          antiTimeoutIndex: antiIndex,
+        };
+      })
+      .sort((a, b) => {
+        // in case of nested timeouts: sort by first/deepest-most timeout
+        return a.antiTimeoutIndex - b.antiTimeoutIndex;
       });
 
   type Continue = boolean;
@@ -419,6 +473,29 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
       return true;
     }
 
+    if (code.t === "compensate") {
+      data.activeCompensation.add(evalContext.index);
+      evalContext.index += 1;
+      return true;
+    }
+
+    if (code.t === "compensate-with") {
+      const compensateIndex = evalContext.index + code.baseIndexOffset;
+      const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
+      data.activeCompensation.delete(compensateIndex);
+      evalContext.index = rightAfterAntiIndex;
+      return true;
+    }
+
+    if (code.t === "anti-compensate") {
+      const compensateIndex = evalContext.index + code.baseIndexOffset;
+      data.activeCompensation.delete(compensateIndex);
+      // NOTE: do nothing else now
+      // we might need to put a marker in the "compensate"'s stack counterpart
+      evalContext.index += 1;
+      return true;
+    }
+
     return false;
   };
 
@@ -433,6 +510,20 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
 
       break;
     }
+  };
+
+  const feedCompensation = (evalContext: EvalContext, e: EEvent) => {
+    const firstMatching = availableCompensations()
+      .filter((x) => x.firstCompensation.name === e.name)
+      .at(0);
+
+    if (firstMatching) {
+      const firstMatchingIndex = firstMatching.firstCompensationIndex;
+      evalContext.index = firstMatchingIndex;
+      data.executionIndex = firstMatchingIndex;
+      return feedEvent(evalContext, firstMatching.firstCompensation, e);
+    }
+    return false;
   };
 
   const feedTimeout = (evalContext: EvalContext, e: EEvent) => {
@@ -588,6 +679,10 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
 
       if (!isFed) {
         feedTimeout(evalContext, e);
+      }
+
+      if (!isFed) {
+        feedCompensation(evalContext, e);
       }
     }
 
