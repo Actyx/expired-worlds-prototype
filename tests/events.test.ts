@@ -169,6 +169,11 @@ namespace Code {
     ];
   };
 
+  export const matchCase = (
+    t: CMatchCaseType,
+    item: readonly CItem[]
+  ): [CMatchCaseType, readonly CItem[]] => [t, item];
+
   export const match = (
     workflow: readonly [CEvent, ...CItem[]],
     cases: [CMatchCaseType, readonly CItem[]][]
@@ -499,6 +504,19 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
         return a.antiTimeoutIndex - b.antiTimeoutIndex;
       });
 
+  const getMatchAtIndex = (index: number) => {
+    const atStack = data.stack.at(index);
+    if (!atStack) {
+      return null;
+    }
+
+    if (atStack.t !== "match") {
+      throw new Error("match stack position filled with non-match");
+    }
+
+    return atStack;
+  };
+
   type Continue = boolean;
   type EvalContext = { index: number };
   const evaluateImpl = (evalContext: EvalContext): Continue => {
@@ -574,10 +592,11 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     }
 
     if (code.t === "match") {
-      const atStack = getMatchAtIndex(evalContext.index);
-      if (!atStack?.inner) {
-        throw new Error("missing match at stack on evaluation");
-      }
+      const atStack = getMatchAtIndex(evalContext.index) || {
+        t: "match",
+        inner: WFMachine(code.subworkflow),
+      };
+      data.stack[evalContext.index] = atStack;
       if (!atStack.inner.returned()) return false;
 
       // calculate returned
@@ -612,12 +631,13 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
         throw new Error(`no case matches for ${oneStateOrNull} at ${code}`);
       }
 
-      evalContext.index = firstMatch.offset + 1;
+      evalContext.index += firstMatch.offset + 1;
       return true;
     }
 
     if (code.t === "anti-match-case") {
-      evalContext.index = code.afterIndexOffset;
+      evalContext.index += code.afterIndexOffset;
+      return true;
     }
 
     return false;
@@ -787,27 +807,14 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     data.executionIndex = evalContext.index;
   };
 
-  const getMatchAtIndex = (index: number) => {
-    const atStack = data.stack.at(index);
-    if (!atStack) {
-      return null;
-    }
-
-    if (atStack.t !== "match") {
-      throw new Error("match stack position filled with non-match");
-    }
-
-    return atStack;
-  };
-
-  const tickMatch = (matchCode: CMatch, e: EEvent | null) => {
+  const tickMatch = (_: CMatch, e: EEvent | null) => {
     const evalContext = { index: data.executionIndex };
-    const { inner } = getMatchAtIndex(evalContext.index) || {
-      t: "match",
-      inner: WFMachine(matchCode.subworkflow),
-    };
-
-    inner.tick(e);
+    const atStack = getMatchAtIndex(evalContext.index);
+    if (!atStack) {
+      throw new Error("missing match at stack on evaluation");
+    }
+    data.stack[evalContext.index] = atStack;
+    atStack.inner.tick(e);
 
     evaluate(evalContext);
     data.executionIndex = evalContext.index;
@@ -1134,7 +1141,7 @@ describe("machine", () => {
       expect(machine.returned()).toEqual(true);
     });
 
-    it("passing without compensation", () => {
+    it("passing with compensation", () => {
       const machine = WFMachine([
         Code.event(Ev.inside, {}),
         ...Code.compensate(
@@ -1168,6 +1175,90 @@ describe("machine", () => {
       machine.tick(Emit.event(Ev.withdrawn, {}));
       expect(machine.state().state).toEqual([One, Ev.withdrawn]);
       expect(machine.returned()).toEqual(true);
+    });
+  });
+
+  describe("match", () => {
+    it("named match should work", () => {
+      const machine = WFMachine([
+        Code.event(Ev.request),
+        ...Code.match(
+          [
+            Code.event(Ev.inside),
+            ...Code.compensate(
+              [
+                Code.event(Ev.reqLeave),
+                Code.event(Ev.doLeave),
+                Code.event(Ev.success),
+              ],
+              [
+                Code.event(Ev.withdraw),
+                Code.event(Ev.doLeave),
+                Code.event(Ev.withdrawn),
+              ]
+            ),
+          ],
+          [
+            Code.matchCase([Name, Ev.success], []),
+            Code.matchCase(
+              [Otherwise],
+              [Code.event(Ev.cancelled, { control: Code.Control.return })]
+            ),
+          ]
+        ),
+        Code.event(Ev.done),
+      ]);
+
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.inside, {}));
+      machine.tick(Emit.event(Ev.reqLeave, {}));
+      machine.tick(Emit.event(Ev.doLeave, {}));
+      machine.tick(Emit.event(Ev.success, {}));
+      machine.tick(Emit.event(Ev.done, {}));
+      expect(machine.returned()).toBe(true);
+      expect(machine.state().state).toEqual([One, Ev.done]);
+    });
+
+    it("otherwise match should work", () => {
+      const machine = WFMachine([
+        Code.event(Ev.request),
+        ...Code.match(
+          [
+            Code.event(Ev.inside),
+            ...Code.compensate(
+              [
+                Code.event(Ev.reqLeave),
+                Code.event(Ev.doLeave),
+                Code.event(Ev.success),
+              ],
+              [
+                Code.event(Ev.withdraw),
+                Code.event(Ev.doLeave),
+                Code.event(Ev.withdrawn),
+              ]
+            ),
+          ],
+          [
+            Code.matchCase([Name, Ev.success], []),
+            Code.matchCase(
+              [Otherwise],
+              [Code.event(Ev.cancelled, { control: Code.Control.return })]
+            ),
+          ]
+        ),
+        Code.event(Ev.done),
+      ]);
+
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.inside, {}));
+      machine.tick(Emit.event(Ev.reqLeave, {}));
+      machine.tick(Emit.event(Ev.doLeave, {}));
+      machine.tick(Emit.event(Ev.withdraw, {}));
+      machine.tick(Emit.event(Ev.doLeave, {}));
+      machine.tick(Emit.event(Ev.withdrawn, {}));
+      machine.tick(Emit.event(Ev.cancelled, {}));
+      expect(machine.returned()).toBe(true);
+      expect(machine.state().state).toEqual([One, Ev.cancelled]);
     });
   });
 });
