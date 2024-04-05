@@ -55,8 +55,15 @@ type CItem =
   | CTimeout
   | CParallel
   | CCompensate
-  | CCompensateWith;
-type CAnti = CAntiRetry | CAntiTimeout | CAntiParallel | CAntiCompensate;
+  | CCompensateWith
+  | CMatch
+  | CMatchCase;
+type CAnti =
+  | CAntiRetry
+  | CAntiTimeout
+  | CAntiParallel
+  | CAntiCompensate
+  | CAntiMatchCase;
 
 type CEventBinding = { var: string; index: string };
 type CEvent = {
@@ -65,6 +72,19 @@ type CEvent = {
   bindings?: CEventBinding[];
   control?: Code.Control;
 };
+type CMatch = {
+  t: "match";
+  subworkflow: readonly [CEvent, ...CItem[]];
+  casesIndexOffsets: number[];
+};
+const Name: unique symbol = Symbol("Name");
+const Otherwise: unique symbol = Symbol("Otherwise");
+type CMatchCaseType = [typeof Name, string] | [typeof Otherwise];
+type CMatchCase = {
+  t: "match-case";
+  case: [typeof Name, string] | [typeof Otherwise];
+};
+type CAntiMatchCase = { t: "anti-match-case"; afterIndexOffset: number };
 type CCompensate = {
   t: "compensate";
   withIndexOffset: number;
@@ -149,6 +169,40 @@ namespace Code {
     ];
   };
 
+  export const match = (
+    workflow: readonly [CEvent, ...CItem[]],
+    cases: [CMatchCaseType, readonly CItem[]][]
+  ): CItem[] => {
+    let index = 0;
+    const inlinedCases: CItem[] = [];
+    const offsets: number[] = [];
+
+    const afterIndexOffset =
+      cases.map((x) => x[1].length).reduce((a, b) => a + b, 0) +
+      cases.length * 2 +
+      1;
+
+    cases.forEach((c) => {
+      index += 1;
+      inlinedCases.push({ t: "match-case", case: c[0] });
+      offsets.push(index);
+
+      index += c[1].length;
+      inlinedCases.push(...c[1]);
+
+      index += 1;
+      inlinedCases.push({
+        t: "anti-match-case",
+        afterIndexOffset: afterIndexOffset - index,
+      });
+    });
+
+    return [
+      { t: "match", casesIndexOffsets: offsets, subworkflow: workflow },
+      ...inlinedCases,
+    ];
+  };
+
   export const parallel = (
     count: CParallel["count"],
     workflow: CEvent[]
@@ -185,12 +239,17 @@ namespace Code {
 
 // Stack
 type StackItem =
+  | SMatch
   | SEvent
   | SRetry
   | STimeout
   | SAntiTimeout
   | SParallel
   | SAntiParallel;
+
+type SMatch = Pick<CMatch, "t"> & {
+  inner: WFMachine;
+};
 type SEvent = CEvent & { payload: EEvent["payload"] };
 type SRetry = Pick<CRetry, "t">;
 type SParallelExecution = { entry: EEvent[] };
@@ -228,7 +287,23 @@ type One<T = unknown> = [typeof One, T];
 type Parallel<T = unknown> = [typeof Parallel, T[]];
 type State<T> = One<T> | Parallel<T>;
 
-const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
+type WFMachine = {
+  tick: (state: EEvent | null) => void;
+  state: () => { state: State<Ev> | null; context: Record<string, unknown> };
+  returned: () => boolean;
+  availableTimeout: () => {
+    consequence: {
+      name: Ev;
+      control: Code.Control | undefined;
+    };
+    dueFor: number;
+  }[];
+  availableCompensations: () => {
+    name: Ev;
+  }[];
+};
+
+const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
   const data = {
     executionIndex: 0,
     stack: [] as (StackItem | null)[],
@@ -392,7 +467,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
       });
 
   const availableCompensations = () =>
-    Array.from(data.activeTimeout)
+    Array.from(data.activeCompensation)
       .map((index) => {
         const ctimeout = workflow.at(index);
         if (ctimeout?.t !== "compensate") {
@@ -401,6 +476,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
           );
         }
 
+        const compensationIndex = index;
         const antiIndex = index + ctimeout.antiIndexOffset;
         const firstCompensationIndex = index + ctimeout.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
@@ -411,6 +487,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
         }
 
         return {
+          compensationIndex,
           ctimeout,
           firstCompensation,
           firstCompensationIndex,
@@ -496,6 +573,53 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
       return true;
     }
 
+    if (code.t === "match") {
+      const atStack = getMatchAtIndex(evalContext.index);
+      if (!atStack?.inner) {
+        throw new Error("missing match at stack on evaluation");
+      }
+      if (!atStack.inner.returned()) return false;
+
+      // calculate returned
+      const { state } = atStack.inner.state();
+      const oneStateOrNull = (() => {
+        if (state === null) return null;
+        if (state[0] === One) return state[1];
+        throw new Error("submachine returns parallel, which is invalid");
+      })();
+
+      const firstMatch = code.casesIndexOffsets
+        .map((offset) => {
+          const index = evalContext.index + offset;
+          const matchCase = workflow.at(index);
+          if (matchCase?.t !== "match-case") {
+            throw new Error(
+              `case index offset points to the wrong code type: ${matchCase?.t}`
+            );
+          }
+
+          return { offset, matchCase };
+        })
+        .find(
+          (x) =>
+            x.matchCase.case[0] === Otherwise ||
+            (x.matchCase.case[0] === Name &&
+              oneStateOrNull &&
+              x.matchCase.case[1] === oneStateOrNull)
+        );
+
+      if (!firstMatch) {
+        throw new Error(`no case matches for ${oneStateOrNull} at ${code}`);
+      }
+
+      evalContext.index = firstMatch.offset + 1;
+      return true;
+    }
+
+    if (code.t === "anti-match-case") {
+      evalContext.index = code.afterIndexOffset;
+    }
+
     return false;
   };
 
@@ -519,6 +643,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
 
     if (firstMatching) {
       const firstMatchingIndex = firstMatching.firstCompensationIndex;
+      data.activeCompensation.delete(firstMatching.compensationIndex);
       evalContext.index = firstMatchingIndex;
       data.executionIndex = firstMatchingIndex;
       return feedEvent(evalContext, firstMatching.firstCompensation, e);
@@ -662,9 +787,39 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
     data.executionIndex = evalContext.index;
   };
 
+  const getMatchAtIndex = (index: number) => {
+    const atStack = data.stack.at(index);
+    if (!atStack) {
+      return null;
+    }
+
+    if (atStack.t !== "match") {
+      throw new Error("match stack position filled with non-match");
+    }
+
+    return atStack;
+  };
+
+  const tickMatch = (matchCode: CMatch, e: EEvent | null) => {
+    const evalContext = { index: data.executionIndex };
+    const { inner } = getMatchAtIndex(evalContext.index) || {
+      t: "match",
+      inner: WFMachine(matchCode.subworkflow),
+    };
+
+    inner.tick(e);
+
+    evaluate(evalContext);
+    data.executionIndex = evalContext.index;
+  };
+
   const tick = (e: EEvent | null) => {
     const evalContext = { index: data.executionIndex };
     const code = workflow.at(evalContext.index);
+    if (code?.t === "match") {
+      return tickMatch(code, e);
+    }
+
     if (code?.t === "par") {
       return tickParallel(code, e);
     }
@@ -714,8 +869,11 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>) => {
     tick,
     state,
     returned,
-    evaluate,
     availableTimeout: availableTimeoutExternal,
+    availableCompensations: () =>
+      availableCompensations().map(({ firstCompensation }) => ({
+        name: firstCompensation.name,
+      })),
   };
 };
 
@@ -934,6 +1092,82 @@ describe("machine", () => {
         state: [One, Ev.accept],
         context: {},
       });
+    });
+  });
+
+  describe("compensation", () => {
+    it("passing without compensation", () => {
+      const machine = WFMachine([
+        Code.event(Ev.inside, {}),
+        ...Code.compensate(
+          [
+            Code.event(Ev.reqLeave),
+            Code.event(Ev.doLeave),
+            Code.event(Ev.success),
+          ],
+          [
+            Code.event(Ev.withdraw),
+            Code.event(Ev.doLeave),
+            Code.event(Ev.withdrawn),
+          ]
+        ),
+      ]);
+
+      machine.tick(Emit.event(Ev.inside, {}));
+      expect(machine.state().state).toEqual([One, Ev.inside]);
+
+      machine.tick(Emit.event(Ev.reqLeave, {}));
+      expect(machine.state().state).toEqual([One, Ev.reqLeave]);
+      expect(machine.availableCompensations()).toEqual(
+        [Ev.withdraw].map((name) => ({ name }))
+      );
+
+      machine.tick(Emit.event(Ev.doLeave, {}));
+      expect(machine.state().state).toEqual([One, Ev.doLeave]);
+      expect(machine.availableCompensations()).toEqual(
+        [Ev.withdraw].map((name) => ({ name }))
+      );
+
+      machine.tick(Emit.event(Ev.success, {}));
+      expect(machine.state().state).toEqual([One, Ev.success]);
+      expect(machine.availableCompensations()).toEqual([]);
+      expect(machine.returned()).toEqual(true);
+    });
+
+    it("passing without compensation", () => {
+      const machine = WFMachine([
+        Code.event(Ev.inside, {}),
+        ...Code.compensate(
+          [
+            Code.event(Ev.reqLeave),
+            Code.event(Ev.doLeave),
+            Code.event(Ev.success),
+          ],
+          [
+            Code.event(Ev.withdraw),
+            Code.event(Ev.doLeave),
+            Code.event(Ev.withdrawn),
+          ]
+        ),
+      ]);
+
+      machine.tick(Emit.event(Ev.inside, {}));
+      expect(machine.state().state).toEqual([One, Ev.inside]);
+
+      machine.tick(Emit.event(Ev.reqLeave, {}));
+      expect(machine.state().state).toEqual([One, Ev.reqLeave]);
+      expect(machine.availableCompensations()).toEqual(
+        [Ev.withdraw].map((name) => ({ name }))
+      );
+
+      machine.tick(Emit.event(Ev.withdraw, {}));
+      expect(machine.state().state).toEqual([One, Ev.withdraw]);
+      expect(machine.availableCompensations()).toEqual([]);
+      machine.tick(Emit.event(Ev.doLeave, {}));
+      expect(machine.state().state).toEqual([One, Ev.doLeave]);
+      machine.tick(Emit.event(Ev.withdrawn, {}));
+      expect(machine.state().state).toEqual([One, Ev.withdrawn]);
+      expect(machine.returned()).toEqual(true);
     });
   });
 });
