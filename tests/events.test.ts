@@ -57,13 +57,15 @@ type CItem =
   | CCompensate
   | CCompensateWith
   | CMatch
-  | CMatchCase;
+  | CMatchCase
+  | CChoice;
 type CAnti =
   | CAntiRetry
   | CAntiTimeout
   | CAntiParallel
   | CAntiCompensate
-  | CAntiMatchCase;
+  | CAntiMatchCase
+  | CAntiChoice;
 
 type CEventBinding = { var: string; index: string };
 type CEvent = {
@@ -72,6 +74,8 @@ type CEvent = {
   bindings?: CEventBinding[];
   control?: Code.Control;
 };
+type CChoice = { t: "choice"; antiIndexOffset: number };
+type CAntiChoice = { t: "anti-choice" };
 type CMatch = {
   t: "match";
   subworkflow: readonly [CEvent, ...CItem[]];
@@ -141,6 +145,12 @@ namespace Code {
     { t: "retry", pairOffsetIndex: workflow.length + 1 },
     ...workflow,
     { t: "anti-retry", pairOffsetIndex: (workflow.length + 1) * -1 },
+  ];
+
+  export const choice = (events: [CEvent, CEvent, ...CEvent[]]): CItem[] => [
+    { t: "choice", antiIndexOffset: events.length + 1 },
+    ...events,
+    { t: "anti-choice" },
   ];
 
   export const compensate = (
@@ -591,6 +601,15 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
       return true;
     }
 
+    if (code.t === "anti-choice") {
+      // pointing the index into the anti-choice before the next code is
+      // important because it allows the machine to process a new state
+      // recalculation up to this point which may result in a return or a fail,
+      // without continuing with other codes which may be automatic (e.g. retry, timeout, etc)
+      evalContext.index += 1;
+      return true;
+    }
+
     if (code.t === "match") {
       const atStack = getMatchAtIndex(evalContext.index) || {
         t: "match",
@@ -709,6 +728,35 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     return false;
   };
 
+  const feedChoice = (evalContext: EvalContext, code: CChoice, e: EEvent) => {
+    const eventStartIndex = evalContext.index + 1;
+    const antiIndex = evalContext.index + code.antiIndexOffset;
+    const firstMatching = workflow
+      .slice(eventStartIndex, antiIndex) // take the CEvent between the choice and anti-choice
+      .map((x, index) => {
+        if (x.t !== "event") {
+          // defensive measure, should not exist
+          throw new Event("codes inside are not CEvent");
+        }
+        return [index, x] as const;
+      })
+      .find(([_, x]) => x.name === e.name);
+
+    if (firstMatching) {
+      const [indexOffset, eventCode] = firstMatching;
+      const eventIndex = eventStartIndex + indexOffset;
+      data.stack[eventIndex] = {
+        t: "event",
+        name: e.name,
+        payload: e.payload,
+        bindings: eventCode.bindings,
+      };
+      evalContext.index = antiIndex;
+      return true;
+    }
+    return false;
+  };
+
   const tickParallel = (parallelCode: CParallel, e: EEvent | null) => {
     let eIsFed = false;
     const atStack = ((): SParallel => {
@@ -792,6 +840,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
         if (!eIsFed && maybeEv?.t === "event" && e) {
           return feedEvent(evalContext, maybeEv, e);
         }
+
         return false;
       })();
 
@@ -832,19 +881,22 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     }
 
     if (e) {
-      const isFed = (() => {
-        if (code?.t === "event" && e) {
-          return feedEvent(evalContext, code, e);
-        }
-        return false;
-      })();
+      let isFed = false;
 
-      if (!isFed) {
-        feedTimeout(evalContext, e);
+      if (code?.t === "event") {
+        isFed = feedEvent(evalContext, code, e);
+      }
+
+      if (!isFed && code?.t === "choice") {
+        isFed = feedChoice(evalContext, code, e);
       }
 
       if (!isFed) {
-        feedCompensation(evalContext, e);
+        isFed = feedTimeout(evalContext, e);
+      }
+
+      if (!isFed) {
+        isFed = feedCompensation(evalContext, e);
       }
     }
 
@@ -1259,6 +1311,46 @@ describe("machine", () => {
       machine.tick(Emit.event(Ev.cancelled, {}));
       expect(machine.returned()).toBe(true);
       expect(machine.state().state).toEqual([One, Ev.cancelled]);
+    });
+  });
+
+  describe("choice", () => {
+    const prepare = () =>
+      WFMachine([
+        Code.event(Ev.request),
+        ...Code.choice([
+          Code.event(Ev.accept),
+          Code.event(Ev.deny, { control: Code.Control.return }),
+          Code.event(Ev.assistanceNeeded, { control: Code.Control.return }),
+        ]),
+        Code.event(Ev.doEnter),
+      ]);
+
+    it("should work for any event inside the choice - 1", () => {
+      const machine = prepare();
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.accept, {}));
+      expect(machine.returned()).toEqual(false);
+      expect(machine.state().state).toEqual([One, Ev.accept]);
+      machine.tick(Emit.event(Ev.doEnter, {}));
+      expect(machine.returned()).toEqual(true);
+      expect(machine.state().state).toEqual([One, Ev.doEnter]);
+    });
+
+    it("should work for any event inside the choice - 2", () => {
+      const machine = prepare();
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.deny, {}));
+      expect(machine.returned()).toEqual(true);
+      expect(machine.state().state).toEqual([One, Ev.deny]);
+    });
+
+    it("should work for any event inside the choice - 3", () => {
+      const machine = prepare();
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.assistanceNeeded, {}));
+      expect(machine.returned()).toEqual(true);
+      expect(machine.state().state).toEqual([One, Ev.assistanceNeeded]);
     });
   });
 });
