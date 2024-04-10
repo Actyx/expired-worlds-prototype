@@ -1,5 +1,9 @@
 import { describe, expect, it } from "@jest/globals";
-import { v4 as uuidv4 } from "uuid";
+
+// TODO:
+// - Role
+// - Identity
+// - Participations?
 
 const sleep = (x: number) => new Promise((res) => setTimeout(res, x));
 
@@ -47,16 +51,20 @@ const Ev = Enum([
 type Ev = Enum<typeof Ev>;
 
 // Code
-
-type CItem =
+type makeCType<CType extends CTypeProto> = CType;
+type CTypeProto = {
+  ev: string;
+  role: string;
+};
+type CItem<CType extends CTypeProto> =
   | CAnti
-  | CEvent
+  | CEvent<CType>
   | CRetry
-  | CTimeout
+  | CTimeout<CType>
   | CParallel
   | CCompensate
   | CCompensateWith
-  | CMatch
+  | CMatch<CType>
   | CMatchCase
   | CChoice;
 type CAnti =
@@ -68,17 +76,18 @@ type CAnti =
   | CAntiChoice;
 
 type CEventBinding = { var: string; index: string };
-type CEvent = {
+type CEvent<CType extends CTypeProto> = {
   t: "event";
-  name: Ev;
+  name: CType["ev"];
+  role: CType["role"];
   bindings?: CEventBinding[];
   control?: Code.Control;
 };
 type CChoice = { t: "choice"; antiIndexOffset: number };
 type CAntiChoice = { t: "anti-choice" };
-type CMatch = {
+type CMatch<CType extends CTypeProto> = {
   t: "match";
-  subworkflow: readonly [CEvent, ...CItem[]];
+  subworkflow: readonly [CEvent<CType>, ...CItem<CType>[]];
   casesIndexOffsets: number[];
 };
 const Name: unique symbol = Symbol("Name");
@@ -116,10 +125,10 @@ type CParallel = {
   firstEventIndex: number;
 };
 type CRetry = { t: "retry"; pairOffsetIndex: number };
-type CTimeout = {
+type CTimeout<CType extends CTypeProto> = {
   t: "timeout";
   duration: number;
-  consequence: CEvent;
+  consequence: CEvent<CType>;
   pairOffsetIndex: number;
 };
 
@@ -131,32 +140,65 @@ namespace Code {
   export const Control = Enum(["fail", "return"] as const);
   export type Control = Enum<typeof Control>;
 
-  export const binding = (name: string, index: string): CEventBinding => ({
+  export type CodeMaker<CType extends CTypeProto> = {
+    binding: typeof binding;
+    event: typeof event<CType>;
+    retry: typeof retry<CType>;
+    choice: typeof choice<CType>;
+    compensate: typeof compensate<CType>;
+    matchCase: typeof matchCase<CType>;
+    match: typeof match<CType>;
+    parallel: typeof parallel<CType>;
+    timeout: typeof timeout<CType>;
+
+    Control: typeof Control;
+  };
+
+  export const make = <CType extends CTypeProto>(): CodeMaker<CType> => ({
+    binding,
+    choice,
+    compensate,
+    event,
+    match,
+    matchCase,
+    parallel,
+    retry,
+    timeout,
+
+    Control,
+  });
+
+  const binding = (name: string, index: string): CEventBinding => ({
     index,
     var: name,
   });
 
-  export const event = (
-    name: Ev,
-    x?: Pick<CEvent, "bindings" | "control">
-  ): CEvent => ({ t: "event", name, ...(x || {}) });
+  const event = <CType extends CTypeProto>(
+    role: CType["role"],
+    name: CType["ev"],
+    x?: Pick<CEvent<CType>, "bindings" | "control">
+  ): CEvent<CType> => ({ t: "event", role, name, ...(x || {}) });
 
-  export const retry = (workflow: CItem[]): CItem[] => [
+  const retry = <CType extends CTypeProto>(
+    workflow: CItem<CType>[]
+  ): CItem<CType>[] => [
     { t: "retry", pairOffsetIndex: workflow.length + 1 },
     ...workflow,
     { t: "anti-retry", pairOffsetIndex: (workflow.length + 1) * -1 },
   ];
 
-  export const choice = (events: [CEvent, CEvent, ...CEvent[]]): CItem[] => [
+  const choice = <CType extends CTypeProto>(
+    events: [CEvent<CType>, CEvent<CType>, ...CEvent<CType>[]]
+  ): CItem<CType>[] => [
     { t: "choice", antiIndexOffset: events.length + 1 },
     ...events,
     { t: "anti-choice" },
   ];
 
-  export const compensate = (
-    main: [CEvent, ...CItem[]],
-    compensation: [CEvent, ...CItem[]]
-  ): CItem[] => {
+  const compensate = <CType extends CTypeProto>(
+    main: [CEvent<CType>, ...CItem<CType>[]],
+    compensation: [CEvent<CType>, ...CItem<CType>[]]
+  ): CItem<CType>[] => {
     const withOffset = main.length + 1;
     const antiOffset = main.length + 1 + compensation.length + 1;
     return [
@@ -179,17 +221,17 @@ namespace Code {
     ];
   };
 
-  export const matchCase = (
+  const matchCase = <CType extends CTypeProto>(
     t: CMatchCaseType,
-    item: readonly CItem[]
-  ): [CMatchCaseType, readonly CItem[]] => [t, item];
+    item: readonly CItem<CType>[]
+  ): [CMatchCaseType, readonly CItem<CType>[]] => [t, item];
 
-  export const match = (
-    workflow: readonly [CEvent, ...CItem[]],
-    cases: [CMatchCaseType, readonly CItem[]][]
-  ): CItem[] => {
+  const match = <CType extends CTypeProto>(
+    workflow: readonly [CEvent<CType>, ...CItem<CType>[]],
+    cases: [CMatchCaseType, readonly CItem<CType>[]][]
+  ): CItem<CType>[] => {
     let index = 0;
-    const inlinedCases: CItem[] = [];
+    const inlinedCases: CItem<CType>[] = [];
     const offsets: number[] = [];
 
     const afterIndexOffset =
@@ -218,10 +260,10 @@ namespace Code {
     ];
   };
 
-  export const parallel = (
+  const parallel = <CType extends CTypeProto>(
     count: CParallel["count"],
-    workflow: CEvent[]
-  ): CItem[] => [
+    workflow: CEvent<CType>[]
+  ): CItem<CType>[] => [
     {
       t: "par",
       count,
@@ -236,11 +278,11 @@ namespace Code {
     { t: "anti-par", pairOffsetIndex: workflow.length + 1 },
   ];
 
-  export const timeout = (
+  const timeout = <CType extends CTypeProto>(
     duration: number,
-    workflow: CItem[],
-    consequence: CEvent
-  ): CItem[] => [
+    workflow: CItem<CType>[],
+    consequence: CEvent<CType>
+  ): CItem<CType>[] => [
     {
       t: "timeout",
       duration,
@@ -253,43 +295,49 @@ namespace Code {
 }
 
 // Stack
-type StackItem =
-  | SMatch
-  | SEvent
+type StackItem<CType extends CTypeProto> =
+  | SMatch<CType>
+  | SEvent<CType>
   | SRetry
-  | STimeout
-  | SAntiTimeout
-  | SParallel
+  | STimeout<CType>
+  | SAntiTimeout<CType>
+  | SParallel<CType>
   | SAntiParallel;
 
-type SMatch = Pick<CMatch, "t"> & {
-  inner: WFMachine;
+type SMatch<CType extends CTypeProto> = Pick<CMatch<CType>, "t"> & {
+  inner: WFMachine<CType>;
 };
-type SEvent = CEvent & { payload: EEvent["payload"] };
+type SEvent<CType extends CTypeProto> = Pick<CEvent<CType>, "t"> & {
+  payload: EEvent<CType>["payload"];
+};
 type SRetry = Pick<CRetry, "t">;
-type SParallelExecution = { entry: EEvent[] };
-type SParallel = Pick<CParallel, "t"> & {
+type SParallelExecution<CType extends CTypeProto> = { entry: EEvent<CType>[] };
+type SParallel<CType extends CTypeProto> = Pick<CParallel, "t"> & {
   fulfilled: boolean;
   nextEvalIndex: number;
-  instances: SParallelExecution[];
+  instances: SParallelExecution<CType>[];
 };
-type STimeout = Pick<CTimeout, "t"> & {
+type STimeout<CType extends CTypeProto> = Pick<CTimeout<CType>, "t"> & {
   startedAt: Date;
 };
-type SAntiTimeout = Pick<CAntiTimeout, "t"> & {
-  consequence: CTimeout["consequence"];
-  data: EEvent;
+type SAntiTimeout<CType extends CTypeProto> = Pick<CAntiTimeout, "t"> & {
+  consequence: CTimeout<CType>["consequence"];
+  data: EEvent<CType>;
 };
 type SAntiParallel = Pick<CAntiParallel, "t"> & {};
 
 // Payload
 
-type EEvent = { t: "event"; name: Ev; payload: Record<string, unknown> };
+type EEvent<CType extends CTypeProto> = {
+  t: "event";
+  name: CType["ev"];
+  payload: Record<string, unknown>;
+};
 namespace Emit {
-  export const event = (
-    name: Ev,
+  export const event = <CType extends CTypeProto>(
+    name: CType["ev"],
     payload: Record<string, unknown>
-  ): EEvent => ({
+  ): EEvent<CType> => ({
     t: "event",
     name,
     payload,
@@ -300,35 +348,49 @@ const One: unique symbol = Symbol("One");
 const Parallel: unique symbol = Symbol("Parallel");
 type One<T = unknown> = [typeof One, T];
 type Parallel<T = unknown> = [typeof Parallel, T[]];
+
 type State<T> = One<T> | Parallel<T>;
 
-type WFMachine = {
-  tick: (state: EEvent | null) => void;
-  state: () => { state: State<Ev> | null; context: Record<string, unknown> };
+type WFMachine<CType extends CTypeProto> = {
+  tick: (state: EEvent<CType> | null) => void;
+  state: () => {
+    state: State<CType["ev"]> | null;
+    context: Record<string, unknown>;
+  };
   returned: () => boolean;
   availableTimeout: () => {
     consequence: {
-      name: Ev;
+      name: CType["ev"];
       control: Code.Control | undefined;
     };
     dueFor: number;
   }[];
   availableCompensations: () => {
-    name: Ev;
+    name: CType["ev"];
+  }[];
+  availableCommands: () => {
+    name: CType["ev"];
+    control?: Code.Control;
+    reason: null | "compensation" | "timeout";
   }[];
 };
 
-const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
+const WFMachine = <CType extends CTypeProto>(
+  self: {
+    role: CType["role"];
+  },
+  workflow: Readonly<[CEvent<CType>, ...CItem<CType>[]]>
+): WFMachine<CType> => {
   const data = {
     executionIndex: 0,
-    stack: [] as (StackItem | null)[],
+    stack: [] as (StackItem<CType> | null)[],
 
     activeTimeout: new Set() as Set<number>,
     activeCompensation: new Set() as Set<number>,
 
     resultCalcIndex: 0,
     context: {} as Record<string, unknown>,
-    returnValue: null as State<Ev> | null,
+    returnValue: null as State<CType["ev"]> | null,
     returned: false,
   };
 
@@ -350,6 +412,265 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     data.context = {};
   };
 
+  // Finders helpers
+
+  const nullifyMatchingTimeout = (
+    antiTimeout: CAntiTimeout,
+    indexInput: number
+  ) => {
+    const timeoutIndex = antiTimeout.pairOffsetIndex + indexInput;
+    const maybeTimeout = data.stack.at(timeoutIndex);
+
+    if (data.activeTimeout.has(timeoutIndex) && maybeTimeout?.t === "timeout") {
+      data.activeTimeout.delete(timeoutIndex);
+      data.activeTimeout.delete(timeoutIndex);
+      data.stack[timeoutIndex] = null;
+    } else {
+      throw new Error("timeout not found on stack");
+    }
+  };
+
+  const findMatchingAntiTimeout = (
+    timeout: CTimeout<CType>,
+    currentIndex: number
+  ) => {
+    const pairOffset = timeout.pairOffsetIndex;
+    const pairIndex = currentIndex + pairOffset;
+    const code = workflow.at(pairIndex);
+    if (code?.t === "anti-timeout") {
+      return pairIndex;
+    }
+    return null;
+  };
+
+  const findMatchingRetryIndex = (retry: CAntiRetry, indexInput: number) => {
+    const pairIndex = retry.pairOffsetIndex + indexInput;
+    const code = workflow.at(pairIndex);
+    if (code?.t === "retry") {
+      return pairIndex;
+    }
+    return null;
+  };
+
+  const findRetryOnStack = (indexInput: number) => {
+    let index = indexInput;
+    while (index > 0) {
+      index -= 1;
+      const stackItem = data.stack.at(index);
+      if (stackItem?.t === "retry") {
+        return index;
+      }
+    }
+
+    return null;
+  };
+
+  const getSMatchAtIndex = (index: number) => {
+    const atStack = data.stack.at(index);
+    if (!atStack) {
+      return null;
+    }
+
+    if (atStack.t !== "match") {
+      throw new Error("match stack position filled with non-match");
+    }
+
+    return atStack;
+  };
+
+  // Helpers
+
+  /**
+   * Find all active timeouts
+   */
+  const availableTimeout = () =>
+    Array.from(data.activeTimeout)
+      .map((index) => {
+        const ctimeout = workflow.at(index);
+        const stimeout = data.stack.at(index);
+        if (ctimeout?.t !== "timeout") {
+          throw new Error(
+            `attempt timeout fatal error: ctimeout not found at index ${index}`
+          );
+        }
+        if (stimeout?.t !== "timeout") {
+          throw new Error(
+            `timeout query fatal error: stimeout not found at index ${index}`
+          );
+        }
+
+        const antiIndex = index + ctimeout.pairOffsetIndex;
+        const dueDate = stimeout.startedAt.getTime() + ctimeout.duration;
+        const lateness = Date.now() - dueDate;
+
+        return { stimeout, ctimeout, lateness, antiIndex };
+      })
+      .filter(({ lateness }) => lateness > 0)
+      .sort((a, b) => {
+        // in case of nested timeouts: sorted by last / outermost timeout
+        return b.antiIndex - a.antiIndex;
+      });
+
+  /**
+   * Find all active compensations
+   */
+  const availableCompensations = () =>
+    Array.from(data.activeCompensation)
+      .map((index) => {
+        const ctimeout = workflow.at(index);
+        if (ctimeout?.t !== "compensate") {
+          throw new Error(
+            `compensate query fatal error: ctimeout not found at index ${index}`
+          );
+        }
+
+        const compensationIndex = index;
+        const antiIndex = index + ctimeout.antiIndexOffset;
+        const firstCompensationIndex = index + ctimeout.withIndexOffset + 1;
+        const firstCompensation = workflow.at(firstCompensationIndex);
+        if (firstCompensation?.t !== "event") {
+          throw new Error(
+            `compensate query fatal error: compensation's first code is not of type event`
+          );
+        }
+
+        return {
+          compensationIndex,
+          ctimeout,
+          firstCompensation,
+          firstCompensationIndex,
+          antiTimeoutIndex: antiIndex,
+        };
+      })
+      .sort((a, b) => {
+        // in case of nested timeouts: sort by first/deepest-most timeout
+        return a.antiTimeoutIndex - b.antiTimeoutIndex;
+      });
+
+  /**
+   * extract available commands, recursesively when needed
+   */
+  const extractAvailableCommandFromSingularCode = (
+    result: ReturnType<WFMachine<CType>["availableCommands"]>,
+    code: CItem<CType>
+  ) => {
+    if (code?.t === "par") {
+      const { atStack, maxReached, minReached } = fetchParallelCriteria(code);
+
+      if (!maxReached) {
+        const eventCode = workflow.at(
+          data.executionIndex + code.firstEventIndex
+        );
+        if (eventCode) {
+          extractAvailableCommandFromSingularCode(result, eventCode);
+        }
+      }
+
+      atStack.instances.map((instance) => {
+        const eventCode = workflow.at(
+          data.executionIndex + code.firstEventIndex + instance.entry.length
+        );
+        if (eventCode) {
+          extractAvailableCommandFromSingularCode(result, eventCode);
+        }
+      });
+
+      if (minReached) {
+        const maybeCEv = workflow.at(atStack.nextEvalIndex);
+        if (maybeCEv) {
+          extractAvailableCommandFromSingularCode(result, maybeCEv);
+        }
+      }
+    }
+
+    if (code?.t === "match") {
+      const smatch = data.stack.at(data.executionIndex);
+      if (smatch && smatch.t === "match") {
+        result.push(...smatch.inner.availableCommands());
+      }
+    }
+
+    if (code?.t === "event" && code.role === self.role) {
+      const { name, control } = code;
+      result.push({ name, control, reason: null });
+    }
+
+    if (code?.t === "choice") {
+      const eventStartIndex = data.executionIndex + 1;
+      const antiIndex = data.executionIndex + code.antiIndexOffset;
+      workflow
+        .slice(eventStartIndex, antiIndex) // take the CEvent between the choice and anti-choice
+        .forEach((x) => {
+          if (x.t !== "event") {
+            // defensive measure, should not exist
+            throw new Event("codes inside are not CEvent");
+          }
+
+          extractAvailableCommandFromSingularCode(result, x);
+        });
+    }
+
+    availableTimeout().forEach((timeout) => {
+      extractAvailableCommandFromSingularCode(
+        result,
+        timeout.ctimeout.consequence
+      );
+    });
+
+    availableCompensations().forEach((compensation) => {
+      extractAvailableCommandFromSingularCode(
+        result,
+        compensation.firstCompensation
+      );
+    });
+  };
+
+  const availableCommands = (): ReturnType<
+    WFMachine<CType>["availableCommands"]
+  > => {
+    const code = workflow.at(data.executionIndex);
+    const result: ReturnType<WFMachine<CType>["availableCommands"]> = [];
+
+    if (code) {
+      extractAvailableCommandFromSingularCode(result, code);
+    }
+
+    return result;
+  };
+
+  const fetchParallelCriteria = (parallelCode: CParallel) => {
+    const minCriteria = Math.max(parallelCode.count?.min || 1, 1);
+    const maxCriteria = Math.min(parallelCode.count?.max || Infinity, Infinity);
+    const atStack = ((): SParallel<CType> => {
+      const atStack = data.stack.at(data.executionIndex);
+      if (!atStack) {
+        const newAtStack: SParallel<CType> = {
+          t: "par",
+          fulfilled: false,
+          instances: [],
+          nextEvalIndex: data.executionIndex + parallelCode.pairOffsetIndex + 1,
+        };
+        data.stack[data.executionIndex] = newAtStack;
+        return newAtStack;
+      }
+      if (atStack.t !== "par") {
+        throw new Error("stack type not par");
+      }
+      return atStack;
+    })();
+    const execDoneCount = atStack.instances.filter(
+      (instance) =>
+        data.executionIndex +
+          parallelCode.firstEventIndex +
+          instance.entry.length >=
+        parallelCode.pairOffsetIndex
+    ).length;
+    const maxReached = execDoneCount >= maxCriteria;
+    const minReached = execDoneCount >= minCriteria;
+
+    return { atStack, maxReached, minReached };
+  };
+
   /**
    * Catch up with execution index
    */
@@ -361,7 +682,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
         code.bindings?.forEach((x) => {
           data.context[x.var] = stackItem.payload[x.index];
         });
-        data.returnValue = [One, stackItem.name];
+        data.returnValue = [One, code.name];
 
         if (code.control === "return") {
           data.returned = true;
@@ -399,132 +720,6 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
         ),
       ];
     }
-  };
-
-  // Finders helpers
-
-  const findMatchingAntiTimeout = (timeout: CTimeout, currentIndex: number) => {
-    const pairOffset = timeout.pairOffsetIndex;
-    const pairIndex = currentIndex + pairOffset;
-    const code = workflow.at(pairIndex);
-    if (code?.t === "anti-timeout") {
-      return pairIndex;
-    }
-    return null;
-  };
-
-  const nullifyMatchingTimeout = (
-    antiTimeout: CAntiTimeout,
-    indexInput: number
-  ) => {
-    const timeoutIndex = antiTimeout.pairOffsetIndex + indexInput;
-    const maybeTimeout = data.stack.at(timeoutIndex);
-
-    if (data.activeTimeout.has(timeoutIndex) && maybeTimeout?.t === "timeout") {
-      data.activeTimeout.delete(timeoutIndex);
-      data.activeTimeout.delete(timeoutIndex);
-      data.stack[timeoutIndex] = null;
-    } else {
-      throw new Error("timeout not found on stack");
-    }
-  };
-
-  const findMatchingRetryIndex = (retry: CAntiRetry, indexInput: number) => {
-    const pairIndex = retry.pairOffsetIndex + indexInput;
-    const code = workflow.at(pairIndex);
-    if (code?.t === "retry") {
-      return pairIndex;
-    }
-    return null;
-  };
-
-  const findRetryOnStack = (indexInput: number) => {
-    let index = indexInput;
-    while (index > 0) {
-      index -= 1;
-      const stackItem = data.stack.at(index);
-      if (stackItem?.t === "retry") {
-        return index;
-      }
-    }
-
-    return null;
-  };
-
-  // Helpers
-
-  const availableTimeout = () =>
-    Array.from(data.activeTimeout)
-      .map((index) => {
-        const ctimeout = workflow.at(index);
-        const stimeout = data.stack.at(index);
-        if (ctimeout?.t !== "timeout") {
-          throw new Error(
-            `attempt timeout fatal error: ctimeout not found at index ${index}`
-          );
-        }
-        if (stimeout?.t !== "timeout") {
-          throw new Error(
-            `timeout query fatal error: stimeout not found at index ${index}`
-          );
-        }
-
-        const antiIndex = index + ctimeout.pairOffsetIndex;
-        const dueDate = stimeout.startedAt.getTime() + ctimeout.duration;
-        const lateness = Date.now() - dueDate;
-
-        return { stimeout, ctimeout, lateness, antiIndex };
-      })
-      .filter(({ lateness }) => lateness > 0)
-      .sort((a, b) => {
-        // in case of nested timeouts: sorted by last / outermost timeout
-        return b.antiIndex - a.antiIndex;
-      });
-
-  const availableCompensations = () =>
-    Array.from(data.activeCompensation)
-      .map((index) => {
-        const ctimeout = workflow.at(index);
-        if (ctimeout?.t !== "compensate") {
-          throw new Error(
-            `compensate query fatal error: ctimeout not found at index ${index}`
-          );
-        }
-
-        const compensationIndex = index;
-        const antiIndex = index + ctimeout.antiIndexOffset;
-        const firstCompensationIndex = index + ctimeout.withIndexOffset + 1;
-        const firstCompensation = workflow.at(firstCompensationIndex);
-        if (firstCompensation?.t !== "event") {
-          throw new Error(
-            `compensate query fatal error: compensation's first code is not of type event`
-          );
-        }
-
-        return {
-          compensationIndex,
-          ctimeout,
-          firstCompensation,
-          firstCompensationIndex,
-          antiTimeoutIndex: antiIndex,
-        };
-      })
-      .sort((a, b) => {
-        // in case of nested timeouts: sort by first/deepest-most timeout
-        return a.antiTimeoutIndex - b.antiTimeoutIndex;
-      });
-
-  const getMatchAtIndex = (index: number) => {
-    const atStack = data.stack.at(index);
-    if (!atStack) {
-      return null;
-    }
-
-    if (atStack.t !== "match") {
-      throw new Error("match stack position filled with non-match");
-    }
-
-    return atStack;
   };
 
   type Continue = boolean;
@@ -611,9 +806,9 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     }
 
     if (code.t === "match") {
-      const atStack = getMatchAtIndex(evalContext.index) || {
+      const atStack = getSMatchAtIndex(evalContext.index) || {
         t: "match",
-        inner: WFMachine(code.subworkflow),
+        inner: WFMachine<CType>(self, code.subworkflow),
       };
       data.stack[evalContext.index] = atStack;
       if (!atStack.inner.returned()) return false;
@@ -675,7 +870,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     }
   };
 
-  const feedCompensation = (evalContext: EvalContext, e: EEvent) => {
+  const feedCompensation = (evalContext: EvalContext, e: EEvent<CType>) => {
     const firstMatching = availableCompensations()
       .filter((x) => x.firstCompensation.name === e.name)
       .at(0);
@@ -690,7 +885,7 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     return false;
   };
 
-  const feedTimeout = (evalContext: EvalContext, e: EEvent) => {
+  const feedTimeout = (evalContext: EvalContext, e: EEvent<CType>) => {
     const lastMatching = availableTimeout()
       .filter((x) => x.ctimeout.consequence.name === e.name)
       .at(0);
@@ -714,13 +909,15 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     return false;
   };
 
-  const feedEvent = (evalContext: EvalContext, code: CEvent, e: EEvent) => {
+  const feedEvent = (
+    evalContext: EvalContext,
+    code: CEvent<CType>,
+    e: EEvent<CType>
+  ) => {
     if (e.name === code.name) {
       data.stack[evalContext.index] = {
         t: "event",
-        name: e.name,
         payload: e.payload,
-        bindings: code.bindings,
       };
       evalContext.index += 1;
       return true;
@@ -728,7 +925,11 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     return false;
   };
 
-  const feedChoice = (evalContext: EvalContext, code: CChoice, e: EEvent) => {
+  const feedChoice = (
+    evalContext: EvalContext,
+    code: CChoice,
+    e: EEvent<CType>
+  ) => {
     const eventStartIndex = evalContext.index + 1;
     const antiIndex = evalContext.index + code.antiIndexOffset;
     const firstMatching = workflow
@@ -743,13 +944,11 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
       .find(([_, x]) => x.name === e.name);
 
     if (firstMatching) {
-      const [indexOffset, eventCode] = firstMatching;
+      const [indexOffset, _] = firstMatching;
       const eventIndex = eventStartIndex + indexOffset;
       data.stack[eventIndex] = {
         t: "event",
-        name: e.name,
         payload: e.payload,
-        bindings: eventCode.bindings,
       };
       evalContext.index = antiIndex;
       return true;
@@ -757,129 +956,11 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
     return false;
   };
 
-  const tickParallel = (parallelCode: CParallel, e: EEvent | null) => {
-    let eIsFed = false;
-    const atStack = ((): SParallel => {
-      const atStack = data.stack.at(data.executionIndex);
-      if (!atStack) {
-        const newAtStack: SParallel = {
-          t: "par",
-          fulfilled: false,
-          instances: [],
-          nextEvalIndex: data.executionIndex + parallelCode.pairOffsetIndex + 1,
-        };
-        data.stack[data.executionIndex] = newAtStack;
-        return newAtStack;
-      }
-      if (atStack.t !== "par") {
-        throw new Error("stack type not par");
-      }
-      return atStack;
-    })();
-
-    if (e) {
-      // new instance
-      const eventCode = workflow.at(
-        data.executionIndex + parallelCode.firstEventIndex
-      );
-      if (eventCode?.t !== "event") {
-        throw new Error("parallel.firstEventIndex is not event code");
-      }
-
-      if (eventCode.name === e.name) {
-        const newInstance: SParallelExecution = { entry: [e] };
-        atStack.instances.push(newInstance);
-        eIsFed = true;
-      }
-
-      // instances resumption
-      if (!eIsFed) {
-        const firstMatching = atStack.instances
-          .map(
-            (instance) =>
-              [
-                instance,
-                workflow.at(
-                  data.executionIndex +
-                    parallelCode.firstEventIndex +
-                    instance.entry.length
-                ),
-              ] as const
-          )
-          .filter(
-            (pair): pair is [SParallelExecution, CEvent] =>
-              pair[1]?.t === "event" && pair[1]?.name === e.name
-          )
-          .at(0);
-
-        if (firstMatching) {
-          const [instance, _] = firstMatching;
-          instance.entry.push(e);
-          eIsFed = true;
-        }
-      }
-    }
-
-    // fulfilled calculation
-    const execDoneCount = atStack.instances.filter(
-      (instance) =>
-        data.executionIndex +
-          parallelCode.firstEventIndex +
-          instance.entry.length >=
-        parallelCode.pairOffsetIndex
-    ).length;
-    const minCriteria = Math.max(parallelCode.count?.min || 1, 1);
-    if (execDoneCount >= minCriteria) {
-      atStack.fulfilled = true;
-    }
-
-    if (atStack.fulfilled) {
-      const evalContext = { index: atStack.nextEvalIndex };
-      const maybeEv = workflow.at(atStack.nextEvalIndex);
-      const eventFed = (() => {
-        if (!eIsFed && maybeEv?.t === "event" && e) {
-          return feedEvent(evalContext, maybeEv, e);
-        }
-
-        return false;
-      })();
-
-      // if some next event is fed
-      atStack.nextEvalIndex = evalContext.index;
-      if (eventFed) {
-        data.executionIndex = evalContext.index;
-      }
-    }
-
-    const evalContext = { index: data.executionIndex };
-    evaluate(evalContext);
-    data.executionIndex = evalContext.index;
-  };
-
-  const tickMatch = (_: CMatch, e: EEvent | null) => {
-    const evalContext = { index: data.executionIndex };
-    const atStack = getMatchAtIndex(evalContext.index);
-    if (!atStack) {
-      throw new Error("missing match at stack on evaluation");
-    }
-    data.stack[evalContext.index] = atStack;
-    atStack.inner.tick(e);
-
-    evaluate(evalContext);
-    data.executionIndex = evalContext.index;
-  };
-
-  const tick = (e: EEvent | null) => {
-    const evalContext = { index: data.executionIndex };
-    const code = workflow.at(evalContext.index);
-    if (code?.t === "match") {
-      return tickMatch(code, e);
-    }
-
-    if (code?.t === "par") {
-      return tickParallel(code, e);
-    }
-
+  const feed = (
+    evalContext: EvalContext,
+    code: CItem<CType>,
+    e: EEvent<CType>
+  ) => {
     if (e) {
       let isFed = false;
 
@@ -898,6 +979,106 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
       if (!isFed) {
         isFed = feedCompensation(evalContext, e);
       }
+    }
+  };
+
+  const tickParallel = (parallelCode: CParallel, e: EEvent<CType> | null) => {
+    let eIsFed = false;
+
+    const { maxReached, minReached, atStack } =
+      fetchParallelCriteria(parallelCode);
+
+    // new instance
+    if (e && !maxReached) {
+      const eventCode = workflow.at(
+        data.executionIndex + parallelCode.firstEventIndex
+      );
+      if (eventCode?.t !== "event") {
+        throw new Error("parallel.firstEventIndex is not event code");
+      }
+
+      if (eventCode.name === e.name) {
+        const newInstance: SParallelExecution<CType> = { entry: [e] };
+        atStack.instances.push(newInstance);
+        eIsFed = true;
+      }
+    }
+
+    // instances resumption
+    // TODO: this doesn't handle non-events on parallel
+    if (e && !eIsFed) {
+      const firstMatching = atStack.instances
+        .map(
+          (instance) =>
+            [
+              instance,
+              workflow.at(
+                data.executionIndex +
+                  parallelCode.firstEventIndex +
+                  instance.entry.length
+              ),
+            ] as const
+        )
+        .filter(
+          (pair): pair is [SParallelExecution<CType>, CEvent<CType>] =>
+            pair[1]?.t === "event" && pair[1]?.name === e.name
+        )
+        .at(0);
+
+      if (firstMatching) {
+        const [instance, _] = firstMatching;
+        instance.entry.push(e);
+        eIsFed = true;
+      }
+    }
+
+    if (minReached) {
+      const evalContext = { index: atStack.nextEvalIndex };
+      // move nextEvalIndex as far as it can
+      evaluate(evalContext);
+      atStack.nextEvalIndex = evalContext.index;
+
+      const innerCode = workflow.at(atStack.nextEvalIndex);
+      const nextEventFed =
+        (innerCode && e && feed(evalContext, innerCode, e)) || false;
+
+      // if nextEventFed then the main executionIndex takes over the nextEvalIndex
+      if (nextEventFed) {
+        data.executionIndex = evalContext.index;
+      }
+    }
+
+    const evalContext = { index: data.executionIndex };
+    evaluate(evalContext);
+    data.executionIndex = evalContext.index;
+  };
+
+  const tickMatch = (_: CMatch<CType>, e: EEvent<CType> | null) => {
+    const evalContext = { index: data.executionIndex };
+    const atStack = getSMatchAtIndex(evalContext.index);
+    if (!atStack) {
+      throw new Error("missing match at stack on evaluation");
+    }
+    data.stack[evalContext.index] = atStack;
+    atStack.inner.tick(e);
+
+    evaluate(evalContext);
+    data.executionIndex = evalContext.index;
+  };
+
+  const tick = (e: EEvent<CType> | null) => {
+    const evalContext = { index: data.executionIndex };
+    const code = workflow.at(evalContext.index);
+    if (code?.t === "match") {
+      return tickMatch(code, e);
+    }
+
+    if (code?.t === "par") {
+      return tickParallel(code, e);
+    }
+
+    if (code && e) {
+      feed(evalContext, code, e);
     }
 
     evaluate(evalContext);
@@ -933,8 +1114,11 @@ const WFMachine = (workflow: Readonly<[CEvent, ...CItem[]]>): WFMachine => {
       availableCompensations().map(({ firstCompensation }) => ({
         name: firstCompensation.name,
       })),
+    availableCommands,
   };
 };
+
+type TheType = makeCType<{ role: "a"; ev: Ev }>;
 
 describe("enums", () => {
   it("enums", () => {
@@ -947,23 +1131,26 @@ describe("enums", () => {
 });
 
 describe("machine", () => {
-  it("event", () => {
-    const machine = WFMachine([
-      Code.event(Ev.request, {
-        bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
-      }),
-    ]);
+  describe("event", () => {
+    it("event", () => {
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request, {
+          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
+        }),
+      ]);
 
-    expect(machine.returned()).toBe(false);
+      expect(machine.returned()).toBe(false);
 
-    machine.tick(
-      Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
-    );
+      machine.tick(
+        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+      );
 
-    expect(machine.returned()).toBe(true);
-    expect(machine.state()).toEqual({
-      state: [One, Ev.request],
-      context: { src: "storage-1", dst: "storage-2" },
+      expect(machine.returned()).toBe(true);
+      expect(machine.state()).toEqual({
+        state: [One, Ev.request],
+        context: { src: "storage-1", dst: "storage-2" },
+      });
     });
   });
 
@@ -971,18 +1158,22 @@ describe("machine", () => {
     it("retry-timeout FAIL", async () => {
       const TIMEOUT_DURATION = 300;
 
-      const machine = WFMachine([
-        Code.event(Ev.request, {
-          bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
+      const code = Code.make<TheType>();
+
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request, {
+          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
         }),
-        ...Code.retry([
-          Code.event(Ev.reqStorage, {
-            bindings: [Code.binding("somevar", "somefield")],
+        ...code.retry([
+          code.event("a", Ev.reqStorage, {
+            bindings: [code.binding("somevar", "somefield")],
           }),
-          ...Code.timeout(
+          ...code.timeout(
             TIMEOUT_DURATION,
-            [Code.event(Ev.bid)],
-            Code.event(Ev.cancelled, { control: Code.Control.fail })
+            [code.event("a", Ev.bid)],
+            code.event("a", Ev.cancelled, {
+              control: Code.Control.fail,
+            })
           ),
         ]),
       ]);
@@ -1031,19 +1222,20 @@ describe("machine", () => {
 
     it("retry-timeout RETURN", async () => {
       const TIMEOUT_DURATION = 300;
+      const code = Code.make<TheType>();
 
-      const machine = WFMachine([
-        Code.event(Ev.request, {
-          bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request, {
+          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
         }),
-        ...Code.retry([
-          Code.event(Ev.reqStorage, {
-            bindings: [Code.binding("somevar", "somefield")],
+        ...code.retry([
+          code.event("a", Ev.reqStorage, {
+            bindings: [code.binding("somevar", "somefield")],
           }),
-          ...Code.timeout(
+          ...code.timeout(
             TIMEOUT_DURATION,
-            [Code.event(Ev.bid)],
-            Code.event(Ev.cancelled, { control: Code.Control.return })
+            [code.event("a", Ev.bid)],
+            code.event("a", Ev.cancelled, { control: Code.Control.return })
           ),
         ]),
       ]);
@@ -1073,19 +1265,20 @@ describe("machine", () => {
 
     it("retry-timeout PASS", async () => {
       const TIMEOUT_DURATION = 300;
+      const code = Code.make<TheType>();
 
-      const machine = WFMachine([
-        Code.event(Ev.request, {
-          bindings: [Code.binding("src", "from"), Code.binding("dst", "to")],
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request, {
+          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
         }),
-        ...Code.retry([
-          Code.event(Ev.reqStorage, {
-            bindings: [Code.binding("somevar", "somefield")],
+        ...code.retry([
+          code.event("a", Ev.reqStorage, {
+            bindings: [code.binding("somevar", "somefield")],
           }),
-          ...Code.timeout(
+          ...code.timeout(
             TIMEOUT_DURATION,
-            [Code.event(Ev.bid)],
-            Code.event(Ev.cancelled, { control: Code.Control.fail })
+            [code.event("a", Ev.bid)],
+            code.event("a", Ev.cancelled, { control: Code.Control.fail })
           ),
         ]),
       ]);
@@ -1116,10 +1309,11 @@ describe("machine", () => {
 
   describe("parallel", () => {
     it("works", () => {
-      const machine = WFMachine([
-        Code.event(Ev.request),
-        ...Code.parallel({ min: 2 }, [Code.event(Ev.bid)]), // minimum of two bids
-        Code.event(Ev.accept),
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request),
+        ...code.parallel({ min: 2 }, [code.event("a", Ev.bid)]), // minimum of two bids
+        code.event("a", Ev.accept),
       ]);
 
       machine.tick(Emit.event(Ev.request, {}));
@@ -1156,18 +1350,19 @@ describe("machine", () => {
 
   describe("compensation", () => {
     it("passing without compensation", () => {
-      const machine = WFMachine([
-        Code.event(Ev.inside, {}),
-        ...Code.compensate(
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.inside, {}),
+        ...code.compensate(
           [
-            Code.event(Ev.reqLeave),
-            Code.event(Ev.doLeave),
-            Code.event(Ev.success),
+            code.event("a", Ev.reqLeave),
+            code.event("a", Ev.doLeave),
+            code.event("a", Ev.success),
           ],
           [
-            Code.event(Ev.withdraw),
-            Code.event(Ev.doLeave),
-            Code.event(Ev.withdrawn),
+            code.event("a", Ev.withdraw),
+            code.event("a", Ev.doLeave),
+            code.event("a", Ev.withdrawn),
           ]
         ),
       ]);
@@ -1194,18 +1389,19 @@ describe("machine", () => {
     });
 
     it("passing with compensation", () => {
-      const machine = WFMachine([
-        Code.event(Ev.inside, {}),
-        ...Code.compensate(
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.inside, {}),
+        ...code.compensate(
           [
-            Code.event(Ev.reqLeave),
-            Code.event(Ev.doLeave),
-            Code.event(Ev.success),
+            code.event("a", Ev.reqLeave),
+            code.event("a", Ev.doLeave),
+            code.event("a", Ev.success),
           ],
           [
-            Code.event(Ev.withdraw),
-            Code.event(Ev.doLeave),
-            Code.event(Ev.withdrawn),
+            code.event("a", Ev.withdraw),
+            code.event("a", Ev.doLeave),
+            code.event("a", Ev.withdrawn),
           ]
         ),
       ]);
@@ -1232,33 +1428,34 @@ describe("machine", () => {
 
   describe("match", () => {
     it("named match should work", () => {
-      const machine = WFMachine([
-        Code.event(Ev.request),
-        ...Code.match(
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request),
+        ...code.match(
           [
-            Code.event(Ev.inside),
-            ...Code.compensate(
+            code.event("a", Ev.inside),
+            ...code.compensate(
               [
-                Code.event(Ev.reqLeave),
-                Code.event(Ev.doLeave),
-                Code.event(Ev.success),
+                code.event("a", Ev.reqLeave),
+                code.event("a", Ev.doLeave),
+                code.event("a", Ev.success),
               ],
               [
-                Code.event(Ev.withdraw),
-                Code.event(Ev.doLeave),
-                Code.event(Ev.withdrawn),
+                code.event("a", Ev.withdraw),
+                code.event("a", Ev.doLeave),
+                code.event("a", Ev.withdrawn),
               ]
             ),
           ],
           [
-            Code.matchCase([Name, Ev.success], []),
-            Code.matchCase(
+            code.matchCase([Name, Ev.success], []),
+            code.matchCase(
               [Otherwise],
-              [Code.event(Ev.cancelled, { control: Code.Control.return })]
+              [code.event("a", Ev.cancelled, { control: Code.Control.return })]
             ),
           ]
         ),
-        Code.event(Ev.done),
+        code.event("a", Ev.done),
       ]);
 
       machine.tick(Emit.event(Ev.request, {}));
@@ -1272,33 +1469,34 @@ describe("machine", () => {
     });
 
     it("otherwise match should work", () => {
-      const machine = WFMachine([
-        Code.event(Ev.request),
-        ...Code.match(
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request),
+        ...code.match(
           [
-            Code.event(Ev.inside),
-            ...Code.compensate(
+            code.event("a", Ev.inside),
+            ...code.compensate(
               [
-                Code.event(Ev.reqLeave),
-                Code.event(Ev.doLeave),
-                Code.event(Ev.success),
+                code.event("a", Ev.reqLeave),
+                code.event("a", Ev.doLeave),
+                code.event("a", Ev.success),
               ],
               [
-                Code.event(Ev.withdraw),
-                Code.event(Ev.doLeave),
-                Code.event(Ev.withdrawn),
+                code.event("a", Ev.withdraw),
+                code.event("a", Ev.doLeave),
+                code.event("a", Ev.withdrawn),
               ]
             ),
           ],
           [
-            Code.matchCase([Name, Ev.success], []),
-            Code.matchCase(
+            code.matchCase([Name, Ev.success], []),
+            code.matchCase(
               [Otherwise],
-              [Code.event(Ev.cancelled, { control: Code.Control.return })]
+              [code.event("a", Ev.cancelled, { control: Code.Control.return })]
             ),
           ]
         ),
-        Code.event(Ev.done),
+        code.event("a", Ev.done),
       ]);
 
       machine.tick(Emit.event(Ev.request, {}));
@@ -1315,15 +1513,18 @@ describe("machine", () => {
   });
 
   describe("choice", () => {
+    const code = Code.make<TheType>();
     const prepare = () =>
-      WFMachine([
-        Code.event(Ev.request),
-        ...Code.choice([
-          Code.event(Ev.accept),
-          Code.event(Ev.deny, { control: Code.Control.return }),
-          Code.event(Ev.assistanceNeeded, { control: Code.Control.return }),
+      WFMachine<TheType>({ role: "a" }, [
+        code.event("a", Ev.request),
+        ...code.choice([
+          code.event("a", Ev.accept),
+          code.event("a", Ev.deny, { control: Code.Control.return }),
+          code.event("a", Ev.assistanceNeeded, {
+            control: Code.Control.return,
+          }),
         ]),
-        Code.event(Ev.doEnter),
+        code.event("a", Ev.doEnter),
       ]);
 
     it("should work for any event inside the choice - 1", () => {
