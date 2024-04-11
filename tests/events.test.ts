@@ -49,7 +49,7 @@ const Ev = Enum([
 type Ev = Enum<typeof Ev>;
 
 // Code
-type makeCType<CType extends CTypeProto> = CType;
+type MakeCType<CType extends CTypeProto> = CType;
 type CTypeProto = {
   ev: string;
   role: string;
@@ -88,12 +88,14 @@ type CMatch<CType extends CTypeProto> = {
   subworkflow: readonly [CEvent<CType>, ...CItem<CType>[]];
   casesIndexOffsets: number[];
 };
-const Name: unique symbol = Symbol("Name");
+const Exact: unique symbol = Symbol("Name");
 const Otherwise: unique symbol = Symbol("Otherwise");
-type CMatchCaseType = [typeof Name, string] | [typeof Otherwise];
+type CMatchCaseType<CType extends CTypeProto> =
+  | [typeof Exact, CType["ev"]]
+  | [typeof Otherwise];
 type CMatchCase = {
   t: "match-case";
-  case: [typeof Name, string] | [typeof Otherwise];
+  case: [typeof Exact, string] | [typeof Otherwise];
 };
 type CAntiMatchCase = { t: "anti-match-case"; afterIndexOffset: number };
 type CCompensate = {
@@ -220,13 +222,13 @@ namespace Code {
   };
 
   const matchCase = <CType extends CTypeProto>(
-    t: CMatchCaseType,
+    t: CMatchCaseType<CType>,
     item: readonly CItem<CType>[]
-  ): [CMatchCaseType, readonly CItem<CType>[]] => [t, item];
+  ): [CMatchCaseType<CType>, readonly CItem<CType>[]] => [t, item];
 
   const match = <CType extends CTypeProto>(
     workflow: readonly [CEvent<CType>, ...CItem<CType>[]],
-    cases: [CMatchCaseType, readonly CItem<CType>[]][]
+    cases: [CMatchCaseType<CType>, readonly CItem<CType>[]][]
   ): CItem<CType>[] => {
     let index = 0;
     const inlinedCases: CItem<CType>[] = [];
@@ -548,7 +550,8 @@ const WFMachine = <CType extends CTypeProto>(
    */
   const extractAvailableCommandFromSingularCode = (
     result: ReturnType<WFMachine<CType>["availableCommands"]>,
-    code: CItem<CType>
+    code: CItem<CType>,
+    overrideReason?: null | "compensation" | "timeout"
   ) => {
     if (code?.t === "par") {
       const { atStack, maxReached, minReached } = fetchParallelCriteria(
@@ -591,7 +594,12 @@ const WFMachine = <CType extends CTypeProto>(
 
     if (code?.t === "event") {
       const { name, control } = code;
-      result.push({ name, role: code.role, control, reason: null });
+      result.push({
+        name,
+        role: code.role,
+        control,
+        reason: overrideReason || null,
+      });
     }
 
     if (code?.t === "choice") {
@@ -608,20 +616,6 @@ const WFMachine = <CType extends CTypeProto>(
           extractAvailableCommandFromSingularCode(result, x);
         });
     }
-
-    availableTimeout().forEach((timeout) => {
-      extractAvailableCommandFromSingularCode(
-        result,
-        timeout.ctimeout.consequence
-      );
-    });
-
-    availableCompensations().forEach((compensation) => {
-      extractAvailableCommandFromSingularCode(
-        result,
-        compensation.firstCompensation
-      );
-    });
   };
 
   const availableCommands = (): ReturnType<
@@ -633,6 +627,22 @@ const WFMachine = <CType extends CTypeProto>(
     if (code) {
       extractAvailableCommandFromSingularCode(result, code);
     }
+
+    availableTimeout().forEach((timeout) => {
+      extractAvailableCommandFromSingularCode(
+        result,
+        timeout.ctimeout.consequence,
+        "timeout"
+      );
+    });
+
+    availableCompensations().forEach((compensation) => {
+      extractAvailableCommandFromSingularCode(
+        result,
+        compensation.firstCompensation,
+        "compensation"
+      );
+    });
 
     return result;
   };
@@ -853,7 +863,7 @@ const WFMachine = <CType extends CTypeProto>(
         .find(
           (x) =>
             x.matchCase.case[0] === Otherwise ||
-            (x.matchCase.case[0] === Name &&
+            (x.matchCase.case[0] === Exact &&
               oneStateOrNull &&
               x.matchCase.case[1] === oneStateOrNull)
         );
@@ -1012,6 +1022,7 @@ const WFMachine = <CType extends CTypeProto>(
 
     // new instance
     if (e && !maxReached) {
+      // TODO: how does binding work with parallel?
       const eventCode = workflow.at(
         evalContext.index + parallelCode.firstEventIndex
       );
@@ -1176,7 +1187,7 @@ const WFMachine = <CType extends CTypeProto>(
   };
 };
 
-type TheType = makeCType<{ role: "a"; ev: Ev }>;
+type TheType = MakeCType<{ role: "a"; ev: Ev }>;
 
 describe("enums", () => {
   it("enums", () => {
@@ -1556,7 +1567,7 @@ describe("machine", () => {
             ),
           ],
           [
-            code.matchCase([Name, Ev.success], []),
+            code.matchCase([Exact, Ev.success], []),
             code.matchCase(
               [Otherwise],
               [code.event("a", Ev.cancelled, { control: Code.Control.return })]
@@ -1597,7 +1608,7 @@ describe("machine", () => {
             ),
           ],
           [
-            code.matchCase([Name, Ev.success], []),
+            code.matchCase([Exact, Ev.success], []),
             code.matchCase(
               [Otherwise],
               [code.event("a", Ev.cancelled, { control: Code.Control.return })]
@@ -1660,6 +1671,195 @@ describe("machine", () => {
       machine.tick(Emit.event(Ev.assistanceNeeded, {}));
       expect(machine.returned()).toEqual(true);
       expect(machine.state().state).toEqual([One, Ev.assistanceNeeded]);
+    });
+  });
+
+  describe("commands", () => {
+    type MultiRole = MakeCType<{
+      role: "transporter" | "storage" | "manager";
+      ev: Ev;
+    }>;
+
+    it("should work with event", () => {
+      const code = Code.make<MultiRole>();
+      const machine = WFMachine([code.event("transporter", "bid")]);
+      expect(machine.availableCommands()).toContainEqual({
+        role: "transporter",
+        name: "bid",
+        reason: null,
+      });
+    });
+
+    it("should work with choice", () => {
+      const code = Code.make<MultiRole>();
+      const machine = WFMachine([
+        code.event("transporter", "bid"),
+        ...code.choice([
+          code.event("storage", "accept"),
+          code.event("manager", "deny"),
+        ]),
+      ]);
+
+      machine.tick(Emit.event(Ev.bid, {}));
+
+      expect(machine.availableCommands()).toContainEqual({
+        role: "storage",
+        name: "accept",
+        reason: null,
+      });
+
+      expect(machine.availableCommands()).toContainEqual({
+        role: "manager",
+        name: "deny",
+        reason: null,
+      });
+    });
+
+    it("should work with parallel", () => {
+      const code = Code.make<MultiRole>();
+      const machine = WFMachine([
+        code.event("manager", Ev.request),
+        ...code.parallel({ min: 1, max: 2 }, [
+          code.event("transporter", Ev.bid),
+        ]),
+        code.event("manager", Ev.accept),
+      ]);
+
+      machine.tick(Emit.event(Ev.request, {}));
+
+      // min not reached
+      expect(machine.availableCommands()).toContainEqual({
+        role: "transporter",
+        name: Ev.bid,
+        reason: null,
+      });
+
+      expect(machine.availableCommands()).not.toContainEqual({
+        role: "manager",
+        name: Ev.accept,
+        reason: null,
+      });
+
+      // min reached - maxx not reached
+      machine.tick(Emit.event(Ev.bid, {}));
+      expect(machine.availableCommands()).toContainEqual({
+        role: "transporter",
+        name: Ev.bid,
+        reason: null,
+      });
+
+      expect(machine.availableCommands()).toContainEqual({
+        role: "manager",
+        name: Ev.accept,
+        reason: null,
+      });
+
+      // max reached
+      machine.tick(Emit.event(Ev.bid, {}));
+      expect(machine.availableCommands()).not.toContainEqual({
+        role: "transporter",
+        name: Ev.bid,
+        reason: null,
+      });
+
+      expect(machine.availableCommands()).toContainEqual({
+        role: "manager",
+        name: Ev.accept,
+        reason: null,
+      });
+    });
+
+    it("should work with timeout", async () => {
+      const TIMEOUT_DURATION = 100;
+      const code = Code.make<MultiRole>();
+      const machine = WFMachine([
+        code.event("manager", Ev.request, {
+          bindings: [],
+        }),
+        ...code.timeout(
+          TIMEOUT_DURATION,
+          [...code.parallel({ max: 2 }, [code.event("transporter", Ev.bid)])],
+          code.event("manager", Ev.cancelled, { control: Code.Control.fail })
+        ),
+      ]);
+
+      expect(machine.availableCommands()).toContainEqual({
+        control: undefined,
+        role: "manager",
+        name: Ev.request,
+        reason: null,
+      });
+      machine.tick(Emit.event(Ev.request, {}));
+
+      await sleep(TIMEOUT_DURATION + 1);
+
+      expect(machine.availableCommands()).toContainEqual({
+        control: undefined,
+        role: "transporter",
+        name: Ev.bid,
+        reason: null,
+      });
+      expect(machine.availableCommands()).toContainEqual({
+        role: "manager",
+        name: Ev.cancelled,
+        control: "fail",
+        reason: "timeout",
+      });
+    });
+
+    // // TODO: alan: I'm not clear on how compensation should actually work
+    // it("should work with compensation", async () => {
+    // });
+
+    it("should work match subworkflow", () => {
+      const code = Code.make<MultiRole>();
+      const machine = WFMachine([
+        code.event("transporter", Ev.accept),
+        ...code.match(
+          [
+            code.event("transporter", Ev.reqEnter),
+            ...code.choice([
+              code.event("storage", Ev.doEnter),
+              code.event("transporter", Ev.withdraw, { control: "return" }),
+            ]),
+            code.event("transporter", Ev.inside),
+          ],
+          [
+            code.matchCase(
+              [Exact, Ev.inside],
+              [code.event("manager", Ev.success)]
+            ),
+            code.matchCase([Otherwise], [code.event("manager", Ev.cancelled)]),
+          ]
+        ),
+      ]);
+
+      machine.tick(Emit.event(Ev.accept, {}));
+      machine.tick(Emit.event(Ev.reqEnter, {}));
+
+      expect(machine.availableCommands()).toContainEqual({
+        role: "storage",
+        name: Ev.doEnter,
+        control: undefined,
+        reason: null,
+      });
+
+      expect(machine.availableCommands()).toContainEqual({
+        role: "transporter",
+        name: Ev.withdraw,
+        control: "return",
+        reason: null,
+      });
+
+      machine.tick(Emit.event(Ev.doEnter, {}));
+      machine.tick(Emit.event(Ev.inside, {}));
+
+      expect(machine.availableCommands()).toContainEqual({
+        role: "manager",
+        name: Ev.success,
+        control: undefined,
+        reason: null,
+      });
     });
   });
 });
