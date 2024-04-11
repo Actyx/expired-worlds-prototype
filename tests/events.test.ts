@@ -1,8 +1,6 @@
 import { describe, expect, it } from "@jest/globals";
 
 // TODO:
-// - Role
-// - Identity
 // - Participations?
 
 const sleep = (x: number) => new Promise((res) => setTimeout(res, x));
@@ -352,7 +350,7 @@ type Parallel<T = unknown> = [typeof Parallel, T[]];
 type State<T> = One<T> | Parallel<T>;
 
 type WFMachine<CType extends CTypeProto> = {
-  tick: (state: EEvent<CType> | null) => void;
+  tick: (state: EEvent<CType> | null) => boolean;
   state: () => {
     state: State<CType["ev"]> | null;
     context: Record<string, unknown>;
@@ -369,6 +367,7 @@ type WFMachine<CType extends CTypeProto> = {
     name: CType["ev"];
   }[];
   availableCommands: () => {
+    role: CType["role"];
     name: CType["ev"];
     control?: Code.Control;
     reason: null | "compensation" | "timeout";
@@ -376,9 +375,6 @@ type WFMachine<CType extends CTypeProto> = {
 };
 
 const WFMachine = <CType extends CTypeProto>(
-  self: {
-    role: CType["role"];
-  },
   workflow: Readonly<[CEvent<CType>, ...CItem<CType>[]]>
 ): WFMachine<CType> => {
   const data = {
@@ -555,7 +551,10 @@ const WFMachine = <CType extends CTypeProto>(
     code: CItem<CType>
   ) => {
     if (code?.t === "par") {
-      const { atStack, maxReached, minReached } = fetchParallelCriteria(code);
+      const { atStack, maxReached, minReached } = fetchParallelCriteria(
+        { index: data.executionIndex },
+        code
+      );
 
       if (!maxReached) {
         const eventCode = workflow.at(
@@ -590,9 +589,9 @@ const WFMachine = <CType extends CTypeProto>(
       }
     }
 
-    if (code?.t === "event" && code.role === self.role) {
+    if (code?.t === "event") {
       const { name, control } = code;
-      result.push({ name, control, reason: null });
+      result.push({ name, role: code.role, control, reason: null });
     }
 
     if (code?.t === "choice") {
@@ -638,19 +637,29 @@ const WFMachine = <CType extends CTypeProto>(
     return result;
   };
 
-  const fetchParallelCriteria = (parallelCode: CParallel) => {
-    const minCriteria = Math.max(parallelCode.count?.min || 1, 1);
-    const maxCriteria = Math.min(parallelCode.count?.max || Infinity, Infinity);
+  const fetchParallelCriteria = (
+    evalContext: EvalContext,
+    parallelCode: CParallel
+  ) => {
+    const {
+      count: { max, min },
+      pairOffsetIndex,
+      firstEventIndex,
+    } = parallelCode;
+
+    const minCriteria = Math.max(min !== undefined ? min : 0, 0);
+    const maxCriteria = Math.min(max !== undefined ? max : Infinity, Infinity);
+
     const atStack = ((): SParallel<CType> => {
-      const atStack = data.stack.at(data.executionIndex);
+      const atStack = data.stack.at(evalContext.index);
       if (!atStack) {
         const newAtStack: SParallel<CType> = {
           t: "par",
           fulfilled: false,
           instances: [],
-          nextEvalIndex: data.executionIndex + parallelCode.pairOffsetIndex + 1,
+          nextEvalIndex: evalContext.index + pairOffsetIndex + 1,
         };
-        data.stack[data.executionIndex] = newAtStack;
+        data.stack[evalContext.index] = newAtStack;
         return newAtStack;
       }
       if (atStack.t !== "par") {
@@ -658,17 +667,26 @@ const WFMachine = <CType extends CTypeProto>(
       }
       return atStack;
     })();
+
     const execDoneCount = atStack.instances.filter(
       (instance) =>
-        data.executionIndex +
-          parallelCode.firstEventIndex +
-          instance.entry.length >=
-        parallelCode.pairOffsetIndex
+        evalContext.index + firstEventIndex + instance.entry.length >=
+        pairOffsetIndex
     ).length;
+
     const maxReached = execDoneCount >= maxCriteria;
     const minReached = execDoneCount >= minCriteria;
 
     return { atStack, maxReached, minReached };
+  };
+
+  const recalculatePar = (stackItem: SParallel<CType>) => {
+    data.returnValue = [
+      Parallel,
+      stackItem.instances.map(
+        (instance) => instance.entry[instance.entry.length - 1]?.name
+      ),
+    ];
   };
 
   /**
@@ -706,19 +724,18 @@ const WFMachine = <CType extends CTypeProto>(
         }
       }
 
+      if (code?.t === "par" && stackItem?.t === "par") {
+        recalculatePar(stackItem);
+      }
+
       data.resultCalcIndex += 1;
     }
 
     // Handle parallel code
     const code = workflow.at(data.resultCalcIndex);
-    const stack = data.stack.at(data.resultCalcIndex);
-    if (code?.t === "par" && stack?.t === "par") {
-      data.returnValue = [
-        Parallel,
-        stack.instances.map(
-          (instance) => instance.entry[instance.entry.length - 1]?.name
-        ),
-      ];
+    const stackItem = data.stack.at(data.resultCalcIndex);
+    if (code?.t === "par" && stackItem?.t === "par") {
+      recalculatePar(stackItem);
     }
   };
 
@@ -808,7 +825,7 @@ const WFMachine = <CType extends CTypeProto>(
     if (code.t === "match") {
       const atStack = getSMatchAtIndex(evalContext.index) || {
         t: "match",
-        inner: WFMachine<CType>(self, code.subworkflow),
+        inner: WFMachine<CType>(code.subworkflow),
       };
       data.stack[evalContext.index] = atStack;
       if (!atStack.inner.returned()) return false;
@@ -961,37 +978,42 @@ const WFMachine = <CType extends CTypeProto>(
     code: CItem<CType>,
     e: EEvent<CType>
   ) => {
-    if (e) {
-      let isFed = false;
+    let isFed = false;
 
-      if (code?.t === "event") {
-        isFed = feedEvent(evalContext, code, e);
-      }
-
-      if (!isFed && code?.t === "choice") {
-        isFed = feedChoice(evalContext, code, e);
-      }
-
-      if (!isFed) {
-        isFed = feedTimeout(evalContext, e);
-      }
-
-      if (!isFed) {
-        isFed = feedCompensation(evalContext, e);
-      }
+    if (code?.t === "event") {
+      isFed = feedEvent(evalContext, code, e);
     }
+
+    if (!isFed && code?.t === "choice") {
+      isFed = feedChoice(evalContext, code, e);
+    }
+
+    if (!isFed) {
+      isFed = feedTimeout(evalContext, e);
+    }
+
+    if (!isFed) {
+      isFed = feedCompensation(evalContext, e);
+    }
+    return isFed;
   };
 
-  const tickParallel = (parallelCode: CParallel, e: EEvent<CType> | null) => {
-    let eIsFed = false;
-
-    const { maxReached, minReached, atStack } =
-      fetchParallelCriteria(parallelCode);
+  const tickInnerParallelRecursive = (
+    evalContext: EvalContext,
+    parallelCode: CParallel,
+    e: EEvent<CType> | null
+  ): { nextEvaluated: null | number; fed: boolean } => {
+    let nextEvaluated = null;
+    let fed = false;
+    const { maxReached, minReached, atStack } = fetchParallelCriteria(
+      evalContext,
+      parallelCode
+    );
 
     // new instance
     if (e && !maxReached) {
       const eventCode = workflow.at(
-        data.executionIndex + parallelCode.firstEventIndex
+        evalContext.index + parallelCode.firstEventIndex
       );
       if (eventCode?.t !== "event") {
         throw new Error("parallel.firstEventIndex is not event code");
@@ -1000,20 +1022,20 @@ const WFMachine = <CType extends CTypeProto>(
       if (eventCode.name === e.name) {
         const newInstance: SParallelExecution<CType> = { entry: [e] };
         atStack.instances.push(newInstance);
-        eIsFed = true;
+        fed = true;
       }
     }
 
     // instances resumption
     // TODO: this doesn't handle non-events on parallel
-    if (e && !eIsFed) {
+    if (e && !fed) {
       const firstMatching = atStack.instances
         .map(
           (instance) =>
             [
               instance,
               workflow.at(
-                data.executionIndex +
+                evalContext.index +
                   parallelCode.firstEventIndex +
                   instance.entry.length
               ),
@@ -1028,47 +1050,82 @@ const WFMachine = <CType extends CTypeProto>(
       if (firstMatching) {
         const [instance, _] = firstMatching;
         instance.entry.push(e);
-        eIsFed = true;
+        fed = true;
       }
     }
 
     if (minReached) {
-      const evalContext = { index: atStack.nextEvalIndex };
+      const nextEvalContext = { index: atStack.nextEvalIndex };
       // move nextEvalIndex as far as it can
-      evaluate(evalContext);
-      atStack.nextEvalIndex = evalContext.index;
+      evaluate(nextEvalContext);
 
-      const innerCode = workflow.at(atStack.nextEvalIndex);
-      const nextEventFed =
-        (innerCode && e && feed(evalContext, innerCode, e)) || false;
+      const innerCode = workflow.at(nextEvalContext.index);
+      if (!fed && innerCode && e) {
+        fed =
+          innerCode.t === "par"
+            ? tickInnerParallelRecursive(nextEvalContext, innerCode, e).fed
+            : feed(nextEvalContext, innerCode, e);
 
-      // if nextEventFed then the main executionIndex takes over the nextEvalIndex
-      if (nextEventFed) {
-        data.executionIndex = evalContext.index;
+        if (fed) {
+          nextEvaluated = nextEvalContext.index;
+        }
       }
+
+      atStack.nextEvalIndex = nextEvalContext.index;
     }
 
-    const evalContext = { index: data.executionIndex };
-    evaluate(evalContext);
-    data.executionIndex = evalContext.index;
+    if (maxReached) {
+      nextEvaluated = Math.max(
+        atStack.nextEvalIndex,
+        evalContext.index + parallelCode.pairOffsetIndex + 1
+      );
+    }
+
+    return {
+      fed,
+      nextEvaluated,
+    };
   };
 
-  const tickMatch = (_: CMatch<CType>, e: EEvent<CType> | null) => {
+  const tickParallel = (
+    parallelCode: CParallel,
+    e: EEvent<CType> | null
+  ): boolean => {
+    let evalContext = { index: data.executionIndex };
+    const tickParallelRes = tickInnerParallelRecursive(
+      evalContext,
+      parallelCode,
+      e
+    );
+    if (tickParallelRes.nextEvaluated !== null) {
+      data.executionIndex = tickParallelRes.nextEvaluated;
+    }
+
+    evalContext = { index: data.executionIndex };
+    evaluate(evalContext);
+    data.executionIndex = evalContext.index;
+
+    return tickParallelRes.fed;
+  };
+
+  const tickMatch = (_: CMatch<CType>, e: EEvent<CType> | null): boolean => {
     const evalContext = { index: data.executionIndex };
     const atStack = getSMatchAtIndex(evalContext.index);
     if (!atStack) {
       throw new Error("missing match at stack on evaluation");
     }
     data.stack[evalContext.index] = atStack;
-    atStack.inner.tick(e);
+    const res = atStack.inner.tick(e);
 
     evaluate(evalContext);
     data.executionIndex = evalContext.index;
+    return res;
   };
 
-  const tick = (e: EEvent<CType> | null) => {
+  const tick = (e: EEvent<CType> | null): boolean => {
     const evalContext = { index: data.executionIndex };
     const code = workflow.at(evalContext.index);
+    let fed = false;
     if (code?.t === "match") {
       return tickMatch(code, e);
     }
@@ -1078,11 +1135,12 @@ const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code && e) {
-      feed(evalContext, code, e);
+      fed = feed(evalContext, code, e);
     }
 
     evaluate(evalContext);
     data.executionIndex = evalContext.index;
+    return fed;
   };
 
   const state = () => ({
@@ -1134,7 +1192,7 @@ describe("machine", () => {
   describe("event", () => {
     it("event", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
           bindings: [code.binding("src", "from"), code.binding("dst", "to")],
         }),
@@ -1160,7 +1218,7 @@ describe("machine", () => {
 
       const code = Code.make<TheType>();
 
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
           bindings: [code.binding("src", "from"), code.binding("dst", "to")],
         }),
@@ -1224,7 +1282,7 @@ describe("machine", () => {
       const TIMEOUT_DURATION = 300;
       const code = Code.make<TheType>();
 
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
           bindings: [code.binding("src", "from"), code.binding("dst", "to")],
         }),
@@ -1267,7 +1325,7 @@ describe("machine", () => {
       const TIMEOUT_DURATION = 300;
       const code = Code.make<TheType>();
 
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
           bindings: [code.binding("src", "from"), code.binding("dst", "to")],
         }),
@@ -1308,12 +1366,12 @@ describe("machine", () => {
   });
 
   describe("parallel", () => {
-    it("works", () => {
+    it("produce parallel state and work the next workable code and event", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.request),
         ...code.parallel({ min: 2 }, [code.event("a", Ev.bid)]), // minimum of two bids
-        code.event("a", Ev.accept),
+        ...code.retry([code.event("a", Ev.accept)]), // test that next code is not immediately event too
       ]);
 
       machine.tick(Emit.event(Ev.request, {}));
@@ -1346,12 +1404,62 @@ describe("machine", () => {
         context: {},
       });
     });
+
+    it("works with choice", () => {
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>([
+        code.event("a", Ev.request),
+        ...code.parallel({ min: 0 }, [code.event("a", Ev.bid)]), // minimum of two bids
+        ...code.choice([code.event("a", Ev.accept), code.event("a", Ev.deny)]),
+      ]);
+
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.deny, {}));
+      expect(machine.state()).toEqual({
+        state: [One, Ev.deny],
+        context: {},
+      });
+    });
+
+    it("sequence of parallels", () => {
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>([
+        code.event("a", Ev.request),
+        ...code.parallel({ min: 2 }, [code.event("a", Ev.bid)]), // minimum of two bids
+        ...code.parallel({ min: 2 }, [code.event("a", Ev.accept)]), // minimum of two bids
+      ]);
+
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.bid, {}));
+      expect(machine.state().state).toEqual([Parallel, [Ev.bid]]);
+      machine.tick(Emit.event(Ev.bid, {}));
+      expect(machine.state().state).toEqual([Parallel, [Ev.bid, Ev.bid]]);
+      machine.tick(Emit.event(Ev.accept, {}));
+      expect(machine.state().state).toEqual([Parallel, [Ev.accept]]);
+      machine.tick(Emit.event(Ev.accept, {}));
+      expect(machine.state().state).toEqual([Parallel, [Ev.accept, Ev.accept]]);
+    });
+
+    it("max reached force next", () => {
+      const code = Code.make<TheType>();
+      const machine = WFMachine<TheType>([
+        code.event("a", Ev.request),
+        ...code.parallel({ min: 1, max: 2 }, [code.event("a", Ev.bid)]), // minimum of two bids
+      ]);
+
+      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(Ev.bid, {}));
+      expect(machine.state().state).toEqual([Parallel, [Ev.bid]]);
+      machine.tick(Emit.event(Ev.bid, {}));
+      expect(machine.state().state).toEqual([Parallel, [Ev.bid, Ev.bid]]);
+      expect(machine.returned()).toBe(true);
+    });
   });
 
   describe("compensation", () => {
     it("passing without compensation", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.inside, {}),
         ...code.compensate(
           [
@@ -1390,7 +1498,7 @@ describe("machine", () => {
 
     it("passing with compensation", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.inside, {}),
         ...code.compensate(
           [
@@ -1429,7 +1537,7 @@ describe("machine", () => {
   describe("match", () => {
     it("named match should work", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.request),
         ...code.match(
           [
@@ -1470,7 +1578,7 @@ describe("machine", () => {
 
     it("otherwise match should work", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>({ role: "a" }, [
+      const machine = WFMachine<TheType>([
         code.event("a", Ev.request),
         ...code.match(
           [
@@ -1515,7 +1623,7 @@ describe("machine", () => {
   describe("choice", () => {
     const code = Code.make<TheType>();
     const prepare = () =>
-      WFMachine<TheType>({ role: "a" }, [
+      WFMachine<TheType>([
         code.event("a", Ev.request),
         ...code.choice([
           code.event("a", Ev.accept),
