@@ -8,8 +8,7 @@
     "build": "npm run build:esm",
     "build:esm": "tsc --build tsconfig.esm.json",
     "clean": "rimraf lib",
-    "test": "npm run test:esm",
-    "test:esm": "npm run build:esm && cross-env NODE_OPTIONS=--experimental-vm-modules jest --config=tests/jest.config.ts"
+    "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest"
   },
   "repository": {
     "type": "git",
