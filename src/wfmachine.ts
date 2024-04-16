@@ -2,12 +2,12 @@ import { Enum } from "./utils.js";
 
 // Code
 
-type CTypeProto = {
+export type CTypeProto = {
   ev: string;
   role: string;
 };
 export type MakeCType<CType extends CTypeProto> = CType;
-type CItem<CType extends CTypeProto> =
+export type CItem<CType extends CTypeProto> =
   | CAnti
   | CEvent<CType>
   | CRetry
@@ -313,12 +313,14 @@ export type WFMachine<CType extends CTypeProto> = {
   returned: () => boolean;
   availableTimeout: () => {
     consequence: {
+      role: CType["role"];
       name: CType["ev"];
       control: Code.Control | undefined;
     };
     dueFor: number;
   }[];
   availableCompensations: () => {
+    role: CType["role"];
     name: CType["ev"];
   }[];
   availableCommands: () => {
@@ -329,8 +331,12 @@ export type WFMachine<CType extends CTypeProto> = {
   }[];
 };
 
+export type WFWorkflow<CType extends CTypeProto> = Readonly<
+  [CEvent<CType>, ...CItem<CType>[]]
+>;
+
 export const WFMachine = <CType extends CTypeProto>(
-  workflow: Readonly<[CEvent<CType>, ...CItem<CType>[]]>
+  workflow: WFWorkflow<CType>
 ): WFMachine<CType> => {
   const data = {
     executionIndex: 0,
@@ -1118,11 +1124,11 @@ export const WFMachine = <CType extends CTypeProto>(
     availableTimeout().map(
       ({
         ctimeout: {
-          consequence: { name, control },
+          consequence: { role, name, control },
         },
         lateness,
       }) => ({
-        consequence: { name, control },
+        consequence: { role, name, control },
         dueFor: lateness,
       })
     );
@@ -1134,6 +1140,7 @@ export const WFMachine = <CType extends CTypeProto>(
     availableTimeout: availableTimeoutExternal,
     availableCompensations: () =>
       availableCompensations().map(({ firstCompensation }) => ({
+        role: firstCompensation.role,
         name: firstCompensation.name,
       })),
     availableCommands,

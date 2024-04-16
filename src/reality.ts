@@ -46,6 +46,10 @@ export type Reality<T> = {
    * If this Reality has not converged with the old reality, it will return `AmendmentsNotReady`
    */
   amendments: () => Amendment<T>[] | AmendmentsNotReady;
+  /**
+   * Get an amendment from current one to latest one if current is not canon.
+   */
+  directAmendments: () => Amendment<T> | AmendmentsNotReady | null;
 };
 
 /**
@@ -94,6 +98,7 @@ type RealityParam<T> = {
   canon: Canon<T>;
   isCanon: () => boolean;
   amendments: () => Amendment<T>[] | AmendmentsNotReady;
+  directAmendments: () => Amendment<T> | AmendmentsNotReady | null;
 };
 
 const root = <T>(param: RealityParam<T>, current: Reality<T>) =>
@@ -140,6 +145,7 @@ const reality = <T>(param: RealityParam<T>): Reality<T> => {
     isCanon: param.isCanon,
     isExpired: () => !param.isCanon(),
     amendments: param.amendments,
+    directAmendments: param.directAmendments,
   };
 
   return reality;
@@ -226,6 +232,27 @@ export const witness = <T>(param: WitnessParams<T>): Witness<T> => {
         }
 
         return amendments;
+      },
+      directAmendments: () => {
+        let i = internal.expiredReality.indexOf(canon);
+        if (i == -1) return null;
+        const prevCanon = internal.expiredReality[i];
+        const latestCanon = internal.canonReality;
+        if (!latestCanon) return AmendmentsNotReady;
+        const prevReality = internal.realityMap.get(prevCanon);
+        const latestReality = internal.realityMap.get(latestCanon);
+        if (!prevReality || !latestReality) return AmendmentsNotReady;
+
+        const divergentPoint = latestCanon.chain.find((x) =>
+          prevCanon.map.has(x[0])
+        );
+        if (!divergentPoint) return AmendmentsNotReady;
+
+        return {
+          past: prevReality,
+          future: latestReality,
+          divergentPoint: divergentPoint[1],
+        };
       },
     });
 
