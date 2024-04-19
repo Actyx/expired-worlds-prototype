@@ -22,6 +22,7 @@ export type Params<CType extends CTypeProto> = {
 type Ev<T extends string> = {
   t: T;
   payload: Record<string, unknown>;
+  predecessorId: string;
 };
 type OnEventsOrTimetravel<E> = (data: EventsOrTimetravel<E>) => Promise<void>;
 
