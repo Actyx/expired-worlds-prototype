@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@jest/globals";
-import { Reality } from "../lib/index.js";
+import { Reality } from "./index.js";
 import { v4 as uuidv4 } from "uuid";
 
 type EventType = { id: string };
