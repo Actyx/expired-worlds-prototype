@@ -1,10 +1,15 @@
 import { describe, expect, it } from "@jest/globals";
-import { Node, Network, StreamStore } from "./index.js";
-import * as uuid from "uuid";
+import { Node, Network } from "./index.js";
+import { ActyxEvent, MsgType, Tag, Tags } from "@actyx/sdk";
+import { afterEach } from "node:test";
+import { sleep } from "../utils.js";
 
-const streamOf = (node: Node.Type) => node.api.stores().own.slice();
-const accordingToStreamOf = (observer: Node.Type, node: Node.Type) =>
+const streamOf = <E>(node: Node.Type<E>) => node.api.stores().own.slice();
+const accordingToStreamOf = <E>(observer: Node.Type<E>, node: Node.Type<E>) =>
   observer.api.stores().remote.get(node.id)?.slice() || [];
+
+const DefaultTags = Tag<string>("default");
+const tag = (p: string) => DefaultTags.applyTyped(p);
 
 describe("ax-mock", () => {
   const prepare = async () => {
@@ -24,8 +29,8 @@ describe("ax-mock", () => {
       nodes: [nodeA, nodeB, nodeC, nodeD],
     } = await prepare();
 
-    nodeA.api.publish("a");
-    nodeA.api.publish("b");
+    nodeA.api.publish(tag("a"));
+    nodeA.api.publish(tag("a"));
 
     expect(nodeA.api.offsetMap()[nodeA.id]).toBe(2);
     expect(nodeB.api.offsetMap()[nodeA.id]).toBe(2);
@@ -39,11 +44,11 @@ describe("ax-mock", () => {
       nodes: [nodeA, nodeB, nodeC, nodeD],
     } = await prepare();
 
-    nodeA.api.publish("a");
+    nodeA.api.publish(tag("a"));
 
     network.partitions.make([nodeC, nodeD]);
 
-    nodeA.api.publish("a");
+    nodeA.api.publish(tag("a"));
 
     expect(nodeA.api.offsetMap()[nodeA.id]).toBe(2);
     expect(nodeB.api.offsetMap()[nodeA.id]).toBe(2);
@@ -55,7 +60,7 @@ describe("ax-mock", () => {
     expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeD, nodeC));
     expect(streamOf(nodeD)).toEqual(accordingToStreamOf(nodeC, nodeD));
 
-    nodeC.api.publish("a");
+    nodeC.api.publish(tag("a"));
 
     expect(nodeA.api.offsetMap()[nodeC.id]).toBe(undefined);
     expect(nodeB.api.offsetMap()[nodeC.id]).toBe(undefined);
@@ -79,5 +84,64 @@ describe("ax-mock", () => {
     expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeA, nodeC));
     expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeB, nodeC));
     expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeD, nodeC));
+  });
+
+  describe("subscription", () => {
+    type Payload = string;
+    let unsubs = [] as Function[];
+    afterEach(() => {
+      unsubs.forEach((x) => x());
+      unsubs = [];
+    });
+    it.only("should work", async () => {
+      const network = Network.make<Payload>();
+      const [nodeA, nodeB] = [
+        Node.make<Payload>({ id: "A" }),
+        Node.make<Payload>({ id: "B" }),
+      ];
+      await network.join(nodeA);
+      await network.join(nodeB);
+
+      let observedEvents: ActyxEvent<Payload>[] = [];
+      nodeA.api.publish(tag("a1"));
+      nodeB.api.publish(tag("b1"));
+
+      unsubs.push(
+        nodeA.api.subscribeMonotonic((e) => {
+          if (e.type === MsgType.events) {
+            observedEvents.push(...e.events);
+          }
+          if (e.type === MsgType.timetravel) {
+            observedEvents = [];
+          }
+        })
+      );
+
+      await sleep(3);
+      expect(observedEvents.at(0)?.payload).toEqual("a1");
+      expect(observedEvents.at(1)?.payload).toEqual("b1");
+
+      network.partitions.make([nodeB]);
+      await sleep(3);
+      nodeA.api.publish(tag("a2"));
+      nodeB.api.publish(tag("b2"));
+      nodeA.api.publish(tag("a3"));
+      nodeB.api.publish(tag("b3"));
+      expect(observedEvents.at(2)?.payload).toEqual("a2");
+      expect(observedEvents.at(3)?.payload).toEqual("a3");
+
+      await network.partitions.clear();
+      await sleep(3);
+
+      expect(observedEvents.map((x) => x.payload)).toEqual([
+        "a1",
+        "b1",
+        "a2",
+        "b2",
+        "a3",
+        "b3",
+      ]);
+      await sleep(3);
+    });
   });
 });
