@@ -4,12 +4,12 @@ import {
   Code,
   Emit,
   Exact,
-  MakeCType,
   One,
   Otherwise,
   Parallel,
   WFMachine,
 } from "./wfmachine.js";
+import { MakeCType } from "./consts.js";
 
 // TODO:
 // - Participations?
@@ -352,19 +352,19 @@ describe("machine", () => {
 
       machine.tick(Emit.event(Ev.reqLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.reqLeave]);
-      expect(machine.availableCompensations()).toEqual(
-        [Ev.withdraw].map((name) => ({ name }))
-      );
+      expect(machine.availableCompensateable()).toEqual([
+        { name: Ev.withdraw, role: "a" },
+      ]);
 
       machine.tick(Emit.event(Ev.doLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.doLeave]);
-      expect(machine.availableCompensations()).toEqual(
-        [Ev.withdraw].map((name) => ({ name }))
-      );
+      expect(machine.availableCompensateable()).toEqual([
+        { name: Ev.withdraw, role: "a" },
+      ]);
 
       machine.tick(Emit.event(Ev.success, {}));
       expect(machine.state().state).toEqual([One, Ev.success]);
-      expect(machine.availableCompensations()).toEqual([]);
+      expect(machine.availableCompensateable()).toEqual([]);
       expect(machine.returned()).toEqual(true);
     });
 
@@ -391,13 +391,13 @@ describe("machine", () => {
 
       machine.tick(Emit.event(Ev.reqLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.reqLeave]);
-      expect(machine.availableCompensations()).toEqual(
-        [Ev.withdraw].map((name) => ({ name }))
-      );
+      expect(machine.availableCompensateable()).toEqual([
+        { name: Ev.withdraw, role: "a" },
+      ]);
 
       machine.tick(Emit.event(Ev.withdraw, {}));
       expect(machine.state().state).toEqual([One, Ev.withdraw]);
-      expect(machine.availableCompensations()).toEqual([]);
+      expect(machine.availableCompensateable()).toEqual([]);
       machine.tick(Emit.event(Ev.doLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.doLeave]);
       machine.tick(Emit.event(Ev.withdrawn, {}));

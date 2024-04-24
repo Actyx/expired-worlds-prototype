@@ -8,3 +8,13 @@ export const Enum = <T extends ReadonlyArray<string>>(
     return acc;
   }, {} as any);
 export type Enum<T extends object> = T[keyof T];
+
+export type ExcludeArrayMember<T extends any[], Excludable> = Exclude<
+  T[any],
+  Excludable
+>[];
+
+export namespace NumArrToCodepoint {
+  export const nts = (a: number[]) =>
+    a.map((x) => String.fromCodePoint(x)).join("");
+}

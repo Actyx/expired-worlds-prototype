@@ -10,7 +10,7 @@ export type AmendmentsNotReady = typeof AmendmentsNotReady;
 export type Amendment<T> = {
   past: Reality<T>;
   future: Reality<T>;
-  divergentPoint: T;
+  divergentPoint: T | null;
 };
 
 /**
@@ -25,13 +25,13 @@ export type Amendment<T> = {
 export type Reality<T> = {
   t: Actual;
   /** Last `T` observed in this Reality */
-  latest: () => Readonly<T>;
+  latest: () => null | Readonly<T>;
   /** All `T` observed in this Reality */
-  history: () => ReadonlyArray<T>;
+  history: () => ReadonlyHistory<T>;
   /** Previous `T` as RealitySnapshot */
   previous: () => null | RealitySnapshot<T>;
   /** First `T` as RealitySnapshot */
-  first: () => RealitySnapshot<T>;
+  first: () => null | RealitySnapshot<T>;
   /**
    * @returns true if this reality is canonical
    */
@@ -58,11 +58,11 @@ export type Reality<T> = {
  */
 export type RealitySnapshot<T> = {
   t: Snapshot;
-  latest: () => Readonly<T>;
+  latest: () => null | Readonly<T>;
   /** Previous `T` as RealitySnapshot */
   previous: () => null | RealitySnapshot<T>;
   /** First `T` as RealitySnapshot */
-  first: () => RealitySnapshot<T>;
+  first: () => null | RealitySnapshot<T>;
   /**
    * @returns true if this reality is canonical
    */
@@ -77,47 +77,48 @@ export type RealitySnapshot<T> = {
   real: () => Reality<T>;
 };
 
-type Canon<T> = {
+type History<T> = {
   map: Map<symbol, Data<T>>;
   chain: Data<T>[];
+};
+
+type ReadonlyHistory<T> = {
+  map: ReadonlyMap<symbol, Data<T>>;
+  chain: ReadonlyArray<Data<T>>;
 };
 
 type Data<T> = [symbol, T];
 
 type WitnessInternal<T> = {
-  readonly globalDataTracker: Map<string, Data<T>>;
-  canonReality: null | Canon<T>;
-  expiredReality: Canon<T>[];
-  realityMap: Map<Canon<T>, Reality<T>>;
-  canonRealityCache:
-    | { resolve: (item: Reality<T>) => void; reject: () => void }[]
-    | Reality<T>;
+  readonly multiversalDataTracker: Map<string, Data<T>>;
+  getCanonReality: () => Reality<T>;
+  expiredRealities: Reality<T>[];
 };
 
-type RealityParam<T> = {
-  canon: Canon<T>;
+type RealityInternals<T> = {
+  history: History<T>;
   isCanon: () => boolean;
   amendments: () => Amendment<T>[] | AmendmentsNotReady;
   directAmendments: () => Amendment<T> | AmendmentsNotReady | null;
 };
 
-const root = <T>(param: RealityParam<T>, current: Reality<T>) =>
-  snapshot(param, current, 0, param.canon.chain[0]);
+const root = <T>(param: RealityInternals<T>, current: Reality<T>) =>
+  snapshot(param, current, 0, param.history.chain[0]);
 
 const previous = <T>(
-  param: RealityParam<T>,
+  param: RealityInternals<T>,
   current: Reality<T>,
   currentIndex: number
 ) => {
   if (currentIndex === 0) return null;
   const previousIndex = currentIndex - 1;
-  const item = param.canon.chain.at(previousIndex);
+  const item = param.history.chain.at(previousIndex);
   if (!item) return null;
   return snapshot(param, current, previousIndex, item);
 };
 
 const snapshot = <T>(
-  param: RealityParam<T>,
+  internals: RealityInternals<T>,
   reality: Reality<T>,
   currentIndex: number,
   currentItem: Data<T>
@@ -125,30 +126,123 @@ const snapshot = <T>(
   return {
     t: Snapshot,
     latest: () => currentItem[1],
-    previous: () => previous(param, reality, currentIndex),
-    first: () => root(param, reality),
-    isCanon: param.isCanon,
-    isExpired: () => !param.isCanon(),
+    previous: () => previous(internals, reality, currentIndex),
+    first: () => root(internals, reality),
+    isCanon: internals.isCanon,
+    isExpired: () => !internals.isCanon(),
     real: () => reality,
   };
 };
 
-const reality = <T>(param: RealityParam<T>): Reality<T> => {
-  const self = () => param.canon.chain[param.canon.chain.length - 1];
+const reality = <T>(internals: RealityInternals<T>): Reality<T> => {
+  const self = () =>
+    internals.history.chain[internals.history.chain.length - 1];
 
   const reality: Reality<T> = {
     t: Actual,
     latest: () => self()[1],
-    history: () => param.canon.chain.slice(0).map((x) => x[1]),
-    previous: () => previous(param, reality, param.canon.chain.length - 1),
-    first: () => root(param, reality),
-    isCanon: param.isCanon,
-    isExpired: () => !param.isCanon(),
-    amendments: param.amendments,
-    directAmendments: param.directAmendments,
+    history: () => ({
+      chain: [...internals.history.chain],
+      map: new Map(internals.history.map),
+    }),
+    previous: () =>
+      previous(internals, reality, internals.history.chain.length - 1),
+    first: () => root(internals, reality),
+    isCanon: internals.isCanon,
+    isExpired: () => !internals.isCanon(),
+    amendments: internals.amendments,
+    directAmendments: internals.directAmendments,
   };
 
   return reality;
+};
+
+const createRealityControl = <T>(witnessInternal: WitnessInternal<T>) => {
+  const history: History<T> = { map: new Map(), chain: [] };
+  const isCanon = (): boolean =>
+    thisReality === witnessInternal.getCanonReality();
+  const thisReality = reality<T>({
+    history,
+    isCanon,
+    amendments: () => {
+      if (isCanon()) return [];
+      const amendments: Amendment<T>[] = [];
+
+      // TODO: canon is not caughtUp - AmendmentsNotReady
+
+      const indexOfThisReality =
+        witnessInternal.expiredRealities.indexOf(thisReality);
+
+      for (
+        let i = indexOfThisReality;
+        i < witnessInternal.expiredRealities.length;
+        i++
+      ) {
+        const prevReality = witnessInternal.expiredRealities[i];
+        const nextReality =
+          witnessInternal.expiredRealities.at(i + 1) ||
+          witnessInternal.getCanonReality();
+
+        // TODO: review logic, currently too confused to do it
+        if (!prevReality || !nextReality) return AmendmentsNotReady;
+        const divergentPoint =
+          history.chain.find((ev) => history.map.has(ev[0])) || null;
+
+        const amendment: Amendment<T> = {
+          past: prevReality,
+          future: nextReality,
+          divergentPoint: divergentPoint?.[1] || null,
+        };
+
+        amendments.push(amendment);
+      }
+
+      return amendments;
+    },
+    directAmendments: () => {
+      let i = witnessInternal.expiredRealities.indexOf(thisReality);
+      if (i == -1) return null;
+      const prevReality = witnessInternal.expiredRealities[i];
+      const canonReality = witnessInternal.getCanonReality();
+
+      // TODO: review logic
+      if (!canonReality) return AmendmentsNotReady;
+      if (!prevReality) return AmendmentsNotReady;
+
+      const divergentPoint =
+        history.chain.find((ev) => history.map.has(ev[0])) || null;
+
+      const amendment: Amendment<T> = {
+        past: prevReality,
+        future: canonReality,
+        divergentPoint: divergentPoint?.[1] || null,
+      };
+
+      return amendment;
+    },
+  });
+
+  return {
+    push: (data: Data<T>) => {
+      history.map.set(data[0], data);
+      history.chain.push(data);
+      // const id = param.id(t);
+      // const data: Data<T> = internal.globalDataTracker.get(param.id(t)) || [
+      //   Symbol(),
+      //   t,
+      // ];
+      // internal.globalDataTracker.set(id, data);
+      // const canon: History<T> = internal.getCanonReality || {
+      //   map: new Map(),
+      //   chain: [],
+      // };
+      // internal.getCanonReality = canon;
+      // canon.map.set(data[0], data);
+      // canon.chain.push(data);
+      // return canon;
+    },
+    reality: thisReality,
+  };
 };
 
 export type WitnessParams<T> = {
@@ -162,162 +256,56 @@ export type Witness<T> = {
   /** See a `T` */
   see: (e: T) => void;
   /** Discard current reality. A new reality will be created the next time the Witness see a `T` */
-  retrospect: () => void;
+  retrospect: () => Reality<T> | null;
   /** Return the currently canon Reality */
-  canonReality: () => Promise<Reality<T>>;
+  canonReality: () => Reality<T>;
   /** Return expired past Realities */
   pastRealities: () => Reality<T>[];
 };
 
 export const witness = <T>(param: WitnessParams<T>): Witness<T> => {
   const internal: WitnessInternal<T> = {
-    globalDataTracker: new Map(),
-    canonReality: null,
-    expiredReality: [],
-    realityMap: new Map(),
-    canonRealityCache: [],
+    multiversalDataTracker: new Map(),
+    getCanonReality: () => {
+      if (!canonRealityControl) throw new Error("should be impossible");
+      return canonRealityControl.reality;
+    },
+    expiredRealities: [],
   };
 
-  const resolvePromises = (canon: Canon<T>) => {
-    const cache = internal.canonRealityCache;
-    if (Array.isArray(cache)) {
-      const reality = initReality(canon);
-      cache.forEach((x) => x.resolve(reality));
-      internal.canonRealityCache = reality;
-    }
-  };
+  let canonRealityControl = createRealityControl<T>(internal);
 
-  const resetPromises = () => {
-    const cache = internal.canonRealityCache;
-    if (Array.isArray(cache)) {
-      cache.forEach((x) => x.reject());
-    }
-    internal.canonRealityCache = [];
-  };
+  // internal functions
 
-  const initReality = (canon: Canon<T>) => {
-    const isCanon = () => internal.canonReality === canon;
-    const res = reality({
-      canon,
-      isCanon,
-      amendments: () => {
-        if (isCanon()) return [];
-        const amendments: Amendment<T>[] = [];
-
-        // TODO: canon is not caughtUp - AmendmentsNotReady
-
-        for (
-          let i = internal.expiredReality.indexOf(canon);
-          i < internal.expiredReality.length;
-          i++
-        ) {
-          const prevCanon = internal.expiredReality[i];
-          const nextCanon =
-            internal.expiredReality.at(i + 1) || internal.canonReality;
-          if (!nextCanon) return AmendmentsNotReady;
-          const prevReality = internal.realityMap.get(prevCanon);
-          const nextReality = internal.realityMap.get(nextCanon);
-          if (!prevReality || !nextReality) return AmendmentsNotReady;
-
-          const divergentPoint = nextCanon.chain.find((x) =>
-            prevCanon.map.has(x[0])
-          );
-          if (!divergentPoint) return AmendmentsNotReady;
-
-          amendments.push({
-            past: prevReality,
-            future: nextReality,
-            divergentPoint: divergentPoint[1],
-          });
-        }
-
-        return amendments;
-      },
-      directAmendments: () => {
-        let i = internal.expiredReality.indexOf(canon);
-        if (i == -1) return null;
-        const prevCanon = internal.expiredReality[i];
-        const latestCanon = internal.canonReality;
-        if (!latestCanon) return AmendmentsNotReady;
-        const prevReality = internal.realityMap.get(prevCanon);
-        const latestReality = internal.realityMap.get(latestCanon);
-        if (!prevReality || !latestReality) return AmendmentsNotReady;
-
-        const divergentPoint = latestCanon.chain.find((x) =>
-          prevCanon.map.has(x[0])
-        );
-        if (!divergentPoint) return AmendmentsNotReady;
-
-        return {
-          past: prevReality,
-          future: latestReality,
-          divergentPoint: divergentPoint[1],
-        };
-      },
-    });
-
-    internal.realityMap.set(canon, res);
-
-    return res;
-  };
-
-  const getCanonReality = () => {
-    const cache = internal.canonRealityCache;
-    if (Array.isArray(cache)) {
-      return new Promise<Reality<T>>((resolve, reject) => {
-        cache.push({
-          resolve,
-          reject: () => reject(new Error("Failed getting Reality")), //TODO: review when it may happen
-        });
-      });
-    } else {
-      return Promise.resolve(cache);
-    }
-  };
-
-  const pushToCanon = (t: T): Canon<T> => {
+  const registerToMultiverse = (t: T): Data<T> => {
     const id = param.id(t);
-    const data: Data<T> = internal.globalDataTracker.get(param.id(t)) || [
+    const data: Data<T> = internal.multiversalDataTracker.get(param.id(t)) || [
       Symbol(),
       t,
     ];
-    internal.globalDataTracker.set(id, data);
-
-    const canon: Canon<T> = internal.canonReality || {
-      map: new Map(),
-      chain: [],
-    };
-    internal.canonReality = canon;
-
-    canon.map.set(data[0], data);
-    canon.chain.push(data);
-
-    return canon;
+    internal.multiversalDataTracker.set(id, data);
+    return data;
   };
 
-  const see: Witness<T>["see"] = (e) => {
-    const canon = pushToCanon(e);
-    resolvePromises(canon);
+  // methods
+
+  const see: Witness<T>["see"] = (t: T) => {
+    const data = registerToMultiverse(t);
+    canonRealityControl.push(data);
   };
 
   const expireCanon = () => {
-    const canon = internal.canonReality;
-    if (canon) {
-      internal.canonReality = null;
-      internal.expiredReality.push(canon);
-      resetPromises();
-    }
+    const oldRealityControl = canonRealityControl;
+    canonRealityControl = createRealityControl(internal);
+    internal.expiredRealities.push(oldRealityControl.reality);
+    return null;
   };
 
   const witness: Witness<T> = {
     see,
     retrospect: expireCanon,
-    canonReality: getCanonReality,
-    pastRealities: () =>
-      internal.expiredReality
-        .slice(0)
-        .map((x) => internal.realityMap.get(x))
-        .filter((x): x is Reality<T> => x !== null),
+    canonReality: internal.getCanonReality,
+    pastRealities: () => [...internal.expiredRealities],
   };
 
   return witness;

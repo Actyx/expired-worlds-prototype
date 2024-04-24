@@ -1,12 +1,8 @@
+import { CTypeProto } from "./consts.js";
 import { Enum } from "./utils.js";
 
 // Code
 
-export type CTypeProto = {
-  ev: string;
-  role: string;
-};
-export type MakeCType<CType extends CTypeProto> = CType;
 export type CItem<CType extends CTypeProto> =
   | CAnti
   | CEvent<CType>
@@ -302,14 +298,23 @@ export const Parallel: unique symbol = Symbol("Parallel");
 export type One<T = unknown> = [typeof One, T];
 export type Parallel<T = unknown> = [typeof Parallel, T[]];
 
-type State<T> = One<T> | Parallel<T>;
+type StateName<T> = One<T> | Parallel<T>;
+export type State<T> = {
+  state: StateName<T> | null;
+  context: Record<string, unknown>;
+};
+export const statesAreEqual = <T extends string>(a: State<T>, b: State<T>) => {
+  if (a.state !== b.state) return false;
+  const allKeys = Array.from(new Set(Object.keys(a).concat(Object.keys(b))));
+  const foundDiscrepancyIndex = allKeys.findIndex(
+    (key) => a.context[key] !== b.context[key]
+  );
+  return foundDiscrepancyIndex === -1; // -1 means not found in the context of `findIndex`
+};
 
 export type WFMachine<CType extends CTypeProto> = {
   tick: (state: EEvent<CType> | null) => boolean;
-  state: () => {
-    state: State<CType["ev"]> | null;
-    context: Record<string, unknown>;
-  };
+  state: () => State<CType["ev"]>;
   returned: () => boolean;
   availableTimeout: () => {
     consequence: {
@@ -319,7 +324,7 @@ export type WFMachine<CType extends CTypeProto> = {
     };
     dueFor: number;
   }[];
-  availableCompensations: () => {
+  availableCompensateable: () => {
     role: CType["role"];
     name: CType["ev"];
   }[];
@@ -343,11 +348,15 @@ export const WFMachine = <CType extends CTypeProto>(
     stack: [] as (StackItem<CType> | null)[],
 
     activeTimeout: new Set() as Set<number>,
+    /**
+     * block between compensate and compensate-with
+     */
+    activeCompensateable: new Set() as Set<number>,
     activeCompensation: new Set() as Set<number>,
 
     resultCalcIndex: 0,
     context: {} as Record<string, unknown>,
-    returnValue: null as State<CType["ev"]> | null,
+    returnValue: null as StateName<CType["ev"]> | null,
     returned: false,
   };
 
@@ -469,21 +478,21 @@ export const WFMachine = <CType extends CTypeProto>(
       });
 
   /**
-   * Find all active compensations
+   * Find all active compensateable
    */
-  const availableCompensations = () =>
-    Array.from(data.activeCompensation)
+  const availableCompensateable = () =>
+    Array.from(data.activeCompensateable)
       .map((index) => {
-        const ctimeout = workflow.at(index);
-        if (ctimeout?.t !== "compensate") {
+        const ccompensate = workflow.at(index);
+        if (ccompensate?.t !== "compensate") {
           throw new Error(
             `compensate query fatal error: ctimeout not found at index ${index}`
           );
         }
 
         const compensationIndex = index;
-        const antiIndex = index + ctimeout.antiIndexOffset;
-        const firstCompensationIndex = index + ctimeout.withIndexOffset + 1;
+        const antiIndex = index + ccompensate.antiIndexOffset;
+        const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
         if (firstCompensation?.t !== "event") {
           throw new Error(
@@ -493,7 +502,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
         return {
           compensationIndex,
-          ctimeout,
+          ctimeout: ccompensate,
           firstCompensation,
           firstCompensationIndex,
           antiTimeoutIndex: antiIndex,
@@ -595,7 +604,7 @@ export const WFMachine = <CType extends CTypeProto>(
       );
     });
 
-    availableCompensations().forEach((compensation) => {
+    availableCompensateable().forEach((compensation) => {
       extractAvailableCommandFromSingularCode(
         result,
         compensation.firstCompensation,
@@ -760,7 +769,7 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "compensate") {
-      data.activeCompensation.add(evalContext.index);
+      data.activeCompensateable.add(evalContext.index);
       evalContext.index += 1;
       return true;
     }
@@ -768,14 +777,14 @@ export const WFMachine = <CType extends CTypeProto>(
     if (code.t === "compensate-with") {
       const compensateIndex = evalContext.index + code.baseIndexOffset;
       const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
-      data.activeCompensation.delete(compensateIndex);
+      data.activeCompensateable.delete(compensateIndex);
       evalContext.index = rightAfterAntiIndex;
       return true;
     }
 
     if (code.t === "anti-compensate") {
       const compensateIndex = evalContext.index + code.baseIndexOffset;
-      data.activeCompensation.delete(compensateIndex);
+      data.activeCompensateable.delete(compensateIndex);
       // NOTE: do nothing else now
       // we might need to put a marker in the "compensate"'s stack counterpart
       evalContext.index += 1;
@@ -857,13 +866,13 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const feedCompensation = (evalContext: EvalContext, e: EEvent<CType>) => {
-    const firstMatching = availableCompensations()
+    const firstMatching = availableCompensateable()
       .filter((x) => x.firstCompensation.name === e.name)
       .at(0);
 
     if (firstMatching) {
       const firstMatchingIndex = firstMatching.firstCompensationIndex;
-      data.activeCompensation.delete(firstMatching.compensationIndex);
+      data.activeCompensateable.delete(firstMatching.compensationIndex);
       evalContext.index = firstMatchingIndex;
       data.executionIndex = firstMatchingIndex;
       return feedEvent(evalContext, firstMatching.firstCompensation, e);
@@ -1138,8 +1147,8 @@ export const WFMachine = <CType extends CTypeProto>(
     state,
     returned,
     availableTimeout: availableTimeoutExternal,
-    availableCompensations: () =>
-      availableCompensations().map(({ firstCompensation }) => ({
+    availableCompensateable: () =>
+      availableCompensateable().map(({ firstCompensation }) => ({
         role: firstCompensation.role,
         name: firstCompensation.name,
       })),
