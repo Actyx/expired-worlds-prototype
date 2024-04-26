@@ -10,6 +10,7 @@ export type CItem<CType extends CTypeProto> =
   | CTimeout<CType>
   | CParallel
   | CCompensate
+  | CCompensateEnd
   | CCompensateWith
   | CMatch<CType>
   | CMatchCase
@@ -50,6 +51,11 @@ type CAntiMatchCase = { t: "anti-match-case"; afterIndexOffset: number };
 type CCompensate = {
   t: "compensate";
   withIndexOffset: number;
+  antiIndexOffset: number;
+};
+type CCompensateEnd = {
+  t: "compensate-end";
+  baseIndexOffset: number;
   antiIndexOffset: number;
 };
 type CCompensateWith = {
@@ -144,12 +150,21 @@ export namespace Code {
     { t: "anti-choice" },
   ];
 
+  // [0, 1,2,3, 4]
+  // 0 - start
+  // 123 - main
+  // 4 - end
+  // 5 - with
+  // 678 - compensation
+  // 9 - anti
+
   const compensate = <CType extends CTypeProto>(
     main: [CEvent<CType>, ...CItem<CType>[]],
     compensation: [CEvent<CType>, ...CItem<CType>[]]
   ): CItem<CType>[] => {
-    const withOffset = main.length + 1;
-    const antiOffset = main.length + 1 + compensation.length + 1;
+    const endOffset = main.length + 1;
+    const withOffset = endOffset + 1;
+    const antiOffset = withOffset + compensation.length + 1;
     return [
       {
         t: "compensate",
@@ -158,9 +173,14 @@ export namespace Code {
       },
       ...main,
       {
+        t: "compensate-end",
+        baseIndexOffset: endOffset * -1,
+        antiIndexOffset: 1 + compensate.length + 1,
+      },
+      {
         t: "compensate-with",
         baseIndexOffset: withOffset * -1,
-        antiIndexOffset: compensation.length + 1,
+        antiIndexOffset: 1 + compensation.length,
       },
       ...compensation,
       {
@@ -313,7 +333,7 @@ export const statesAreEqual = <T extends string>(a: State<T>, b: State<T>) => {
 };
 
 export type WFMachine<CType extends CTypeProto> = {
-  tick: (state: EEvent<CType> | null) => boolean;
+  tick: (state: EEvent<CType>) => boolean;
   state: () => State<CType["ev"]>;
   returned: () => boolean;
   availableTimeout: () => {
@@ -324,6 +344,7 @@ export type WFMachine<CType extends CTypeProto> = {
     };
     dueFor: number;
   }[];
+  availableCompensateableRaw: () => Set<number>;
   availableCompensateable: () => {
     role: CType["role"];
     name: CType["ev"];
@@ -349,10 +370,9 @@ export const WFMachine = <CType extends CTypeProto>(
 
     activeTimeout: new Set() as Set<number>,
     /**
-     * block between compensate and compensate-with
+     * block between compensate and compensate-end
      */
     activeCompensateable: new Set() as Set<number>,
-    activeCompensation: new Set() as Set<number>,
 
     resultCalcIndex: 0,
     context: {} as Record<string, unknown>,
@@ -445,11 +465,10 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   // Helpers
-
   /**
    * Find all active timeouts
    */
-  const availableTimeout = () =>
+  const availableTimeouts = () =>
     Array.from(data.activeTimeout)
       .map((index) => {
         const ctimeout = workflow.at(index);
@@ -471,14 +490,22 @@ export const WFMachine = <CType extends CTypeProto>(
 
         return { stimeout, ctimeout, lateness, antiIndex };
       })
-      .filter(({ lateness }) => lateness > 0)
       .sort((a, b) => {
         // in case of nested timeouts: sorted by last / outermost timeout
         return b.antiIndex - a.antiIndex;
       });
 
   /**
+   * Find all active timeouts that is late. This is useful for telling which timeout commands are available to the users.
+   */
+  const availableLateTimeouts = () =>
+    availableTimeouts().filter(({ lateness }) => lateness > 0);
+
+  const availableCompensateableRaw = () => new Set(data.activeCompensateable);
+
+  /**
    * Find all active compensateable
+   * TODO: return next-events of compensate-with as compensations
    */
   const availableCompensateable = () =>
     Array.from(data.activeCompensateable)
@@ -596,7 +623,7 @@ export const WFMachine = <CType extends CTypeProto>(
       extractAvailableCommandFromSingularCode(result, code);
     }
 
-    availableTimeout().forEach((timeout) => {
+    availableLateTimeouts().forEach((timeout) => {
       extractAvailableCommandFromSingularCode(
         result,
         timeout.ctimeout.consequence,
@@ -774,7 +801,7 @@ export const WFMachine = <CType extends CTypeProto>(
       return true;
     }
 
-    if (code.t === "compensate-with") {
+    if (code.t === "compensate-end") {
       const compensateIndex = evalContext.index + code.baseIndexOffset;
       const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
       data.activeCompensateable.delete(compensateIndex);
@@ -881,7 +908,7 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const feedTimeout = (evalContext: EvalContext, e: EEvent<CType>) => {
-    const lastMatching = availableTimeout()
+    const lastMatching = availableTimeouts()
       .filter((x) => x.ctimeout.consequence.name === e.name)
       .at(0);
 
@@ -979,7 +1006,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const tickInnerParallelRecursive = (
     evalContext: EvalContext,
     parallelCode: CParallel,
-    e: EEvent<CType> | null
+    e: EEvent<CType>
   ): { nextEvaluated: null | number; fed: boolean } => {
     let nextEvaluated = null;
     let fed = false;
@@ -989,7 +1016,7 @@ export const WFMachine = <CType extends CTypeProto>(
     );
 
     // new instance
-    if (e && !maxReached) {
+    if (!maxReached) {
       // TODO: how does binding work with parallel?
       const eventCode = workflow.at(
         evalContext.index + parallelCode.firstEventIndex
@@ -1007,7 +1034,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     // instances resumption
     // TODO: this doesn't handle non-events on parallel
-    if (e && !fed) {
+    if (!fed) {
       const firstMatching = atStack.instances
         .map(
           (instance) =>
@@ -1066,10 +1093,7 @@ export const WFMachine = <CType extends CTypeProto>(
     };
   };
 
-  const tickParallel = (
-    parallelCode: CParallel,
-    e: EEvent<CType> | null
-  ): boolean => {
+  const tickParallel = (parallelCode: CParallel, e: EEvent<CType>): boolean => {
     let evalContext = { index: data.executionIndex };
     const tickParallelRes = tickInnerParallelRecursive(
       evalContext,
@@ -1087,7 +1111,7 @@ export const WFMachine = <CType extends CTypeProto>(
     return tickParallelRes.fed;
   };
 
-  const tickMatch = (_: CMatch<CType>, e: EEvent<CType> | null): boolean => {
+  const tickMatch = (_: CMatch<CType>, e: EEvent<CType>): boolean => {
     const evalContext = { index: data.executionIndex };
     const atStack = getSMatchAtIndex(evalContext.index);
     if (!atStack) {
@@ -1101,7 +1125,7 @@ export const WFMachine = <CType extends CTypeProto>(
     return res;
   };
 
-  const tick = (e: EEvent<CType> | null): boolean => {
+  const tick = (e: EEvent<CType>): boolean => {
     const evalContext = { index: data.executionIndex };
     const code = workflow.at(evalContext.index);
     let fed = false;
@@ -1113,7 +1137,7 @@ export const WFMachine = <CType extends CTypeProto>(
       return tickParallel(code, e);
     }
 
-    if (code && e) {
+    if (code) {
       fed = feed(evalContext, code, e);
     }
 
@@ -1130,7 +1154,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const returned = () => data.returned;
 
   const availableTimeoutExternal = () =>
-    availableTimeout().map(
+    availableLateTimeouts().map(
       ({
         ctimeout: {
           consequence: { role, name, control },
@@ -1153,5 +1177,6 @@ export const WFMachine = <CType extends CTypeProto>(
         name: firstCompensation.name,
       })),
     availableCommands,
+    availableCompensateableRaw,
   };
 };

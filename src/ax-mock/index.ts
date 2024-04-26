@@ -1,75 +1,24 @@
 // Alan: Making this so that visualizing states of each actyx is easier
 import {
   ActyxEvent,
-  Actyx,
-  OffsetMap,
-  Offset,
   MsgType,
   OnCompleteOrErr,
   CancelSubscription,
   EventsOrTimetravel,
   TaggedEvent,
-  TaggedTypedEvent,
 } from "@actyx/sdk";
 import { Obs } from "systemic-ts-utils";
 import * as uuid from "uuid";
+import { Ord } from "../utils.js";
 
 type NodeId = string;
 type PartitionId = string;
 type MiniOffsetMap = Record<string, number>;
 
-export namespace Ord {
-  export const Greater: unique symbol = Symbol("Greater");
-  export const Lesser: unique symbol = Symbol("Lesser");
-  export const Equal: unique symbol = Symbol("Equal");
-
-  export type Type = typeof Greater | typeof Lesser | typeof Equal;
-
-  export const OrdSym: unique symbol = Symbol("OrdTrait");
-  export type OrdSym = typeof OrdSym;
-
-  export type Cmp<T> = (a: T, b: T) => Type;
-  export const cmp = <T extends { [OrdSym]: Cmp<T> }>(a: T, b: T) =>
-    a[OrdSym](a, b);
-
-  export const toNum = (ord: Ord.Type): number => {
-    switch (ord) {
-      case Ord.Greater:
-        return 1;
-      case Ord.Lesser:
-        return -1;
-      default:
-        return 0;
-    }
-  };
-
-  export const ofString = (a: string, b: string): Type => {
-    switch (true) {
-      case a > b:
-        return Ord.Greater;
-      case a < b:
-        return Ord.Lesser;
-      default:
-        return Ord.Equal;
-    }
-  };
-
-  export const fromNum = (number: number): Type => {
-    switch (true) {
-      case number > 0:
-        return Ord.Greater;
-      case number < 0:
-        return Ord.Lesser;
-      default:
-        return Ord.Equal;
-    }
-  };
-}
-
 export const Inner: unique symbol = Symbol("Inner");
 export type Inner = typeof Inner;
 
-export namespace Lamport {
+export namespace XLamport {
   const ord: Ord.Cmp<Type> = (a, b) => {
     switch (true) {
       case a[Inner] > b[Inner]:
@@ -91,15 +40,15 @@ export namespace Lamport {
   export const make = (x: number): Type => ({
     [Ord.OrdSym]: ord,
     [Inner]: x,
-    clone: () => Lamport.make(x),
-    incr: () => Lamport.make(x + 1),
+    clone: () => XLamport.make(x),
+    incr: () => XLamport.make(x + 1),
   });
 
   export const max = (a: Type, b: Type) =>
-    Lamport.make(Math.max(a[Inner], b[Inner]));
+    XLamport.make(Math.max(a[Inner], b[Inner]));
 }
 
-export namespace EventKey {
+export namespace XEventKey {
   const ord: Ord.Cmp<Type> = (a, b) => {
     switch (Ord.cmp(a[Inner].lamport, b[Inner].lamport)) {
       case Ord.Greater:
@@ -113,20 +62,23 @@ export namespace EventKey {
 
   export type Type = {
     [Ord.OrdSym]: Ord.Cmp<Type>;
-    [Inner]: { lamport: Lamport.Type; streamId: string };
+    [Inner]: { lamport: XLamport.Type; streamId: string };
   };
 
-  export const fromMeta = (meta: ActyxEvent["meta"]) => ({
+  export const fromMeta = (meta: ActyxEvent["meta"]) =>
+    make(XLamport.make(meta.lamport), meta.stream);
+
+  export const make = (lamport: XLamport.Type, streamId: string) => ({
     [Ord.OrdSym]: ord,
     [Inner]: {
-      lamport: Lamport.make(meta.lamport),
-      streamId: meta.stream,
+      lamport,
+      streamId,
     },
   });
 }
 
 export namespace StreamStore {
-  export type Param = { lamport: Lamport.Type };
+  export type Param = { lamport: XLamport.Type };
 
   export type Type<E> = Readonly<{
     offset: () => number;
@@ -192,7 +144,7 @@ export namespace Node {
         callback: (data: EventsOrTimetravel<E>) => Promise<void> | void,
         onCompleteOrErr?: OnCompleteOrErr
       ) => CancelSubscription;
-      publish: (e: TaggedTypedEvent<E>) => void;
+      publish: (e: TaggedEvent) => void;
       offsetMap: () => MiniOffsetMap;
     };
     coord: {
@@ -212,7 +164,7 @@ export namespace Node {
     const data = {
       own: StreamStore.make<E>(),
       remote: new Map() as Map<string, StreamStore.Type<E>>,
-      nextLamport: Lamport.make(0),
+      nextLamport: XLamport.make(0),
       inToSubPipe: Obs.Obs.make<ActyxEvent<E>>(),
       timeTravelAlert: Obs.Obs.make<void>(),
     };
@@ -259,8 +211,8 @@ export namespace Node {
             const [_, oldItem] = pairOrNull;
             if (
               Ord.cmp(
-                EventKey.fromMeta(item.meta),
-                EventKey.fromMeta(oldItem.meta)
+                XEventKey.fromMeta(item.meta),
+                XEventKey.fromMeta(oldItem.meta)
               ) === Ord.Lesser
             ) {
               pairOrNull = [stream, item];
@@ -349,7 +301,7 @@ export namespace Node {
           onCompleteOrErr?.();
         };
       },
-      publish: (tagged: TaggedTypedEvent<E>) => {
+      publish: (tagged: TaggedEvent) => {
         const lamport = data.nextLamport;
         const date = new Date();
 
@@ -365,7 +317,7 @@ export namespace Node {
             timestampAsDate: () => date,
             timestampMicros: date.getTime() * 1000,
           },
-          payload: tagged.event,
+          payload: tagged.event as E,
         };
         data.own.set(e);
         data.nextLamport = data.nextLamport.incr();
@@ -379,9 +331,9 @@ export namespace Node {
       in: (e) => {
         const { stream } = e.meta;
         if (stream === params.id) return;
-        data.nextLamport = Lamport.max(
+        data.nextLamport = XLamport.max(
           data.nextLamport,
-          Lamport.make(e.meta.lamport).incr()
+          XLamport.make(e.meta.lamport).incr()
         );
         getOrCreateStream(stream).set(e);
         data.inToSubPipe.emit(e);
@@ -406,14 +358,14 @@ export namespace Node {
 
         answer.evs.forEach((e) => {
           streamStore.set(e);
-          const evLamport = Lamport.make(e.meta.lamport);
+          const evLamport = XLamport.make(e.meta.lamport);
 
           const ord = Ord.cmp(evLamport, data.nextLamport);
           if (ord === Ord.Lesser || ord === Ord.Equal) {
             timetravel = true;
           }
 
-          data.nextLamport = Lamport.max(data.nextLamport, evLamport.incr());
+          data.nextLamport = XLamport.max(data.nextLamport, evLamport.incr());
         });
 
         if (timetravel) {

@@ -1,4 +1,6 @@
 import { ActyxEvent } from "@actyx/sdk";
+import { XEventKey } from "./ax-mock/index.js";
+import { Ord } from "./utils.js";
 
 export type CTypeProto = { ev: string; role: string };
 export type MakeCType<CType extends CTypeProto> = CType;
@@ -22,13 +24,21 @@ export type WFEvent<CType extends CTypeProto> = {
  * Events emitted by the intermediate machine to take note of the meta-state of the actor.
  * e.g. in a multiverse, in which universe the actor is in
  */
-export type WFDirective = {
-  ax:
-    | InternalTag.StringOf<typeof InternalTag.CompensationNeeded>
-    | InternalTag.StringOf<typeof InternalTag.CompensationFinished>;
-  actor: string;
-  at: string;
-};
+export type WFDirective =
+  | {
+      ax: InternalTag.StringOf<typeof InternalTag.CompensationNeeded>;
+      actor: string;
+      fromTimelineOf: string;
+      toTimelineOf: string;
+      compensationIndices: number[];
+    }
+  | {
+      ax: InternalTag.StringOf<typeof InternalTag.CompensationDone>;
+      actor: string;
+      fromTimelineOf: string;
+      toTimelineOf: string;
+      compensationIndexDone: number;
+    };
 
 export type ActyxWFEvent<CType extends CTypeProto> = ActyxEvent<WFEvent<CType>>;
 export type ActyxWFDirective = ActyxEvent<WFDirective>;
@@ -36,14 +46,45 @@ export type ActyxWFEventAndDirective<CType extends CTypeProto> = ActyxEvent<
   WFEventOrDirective<CType>
 >;
 
+export type Chain<CType extends CTypeProto> = ActyxWFEvent<CType>[];
+
+/**
+ * Reads as "A diverge from B at"
+ * 0 means that the chain diverge at the first event
+ * if result === A.length it means the chain doesn't diverge
+ */
+export const divertedFromOtherChainAt = <CType extends CTypeProto>(
+  chainA: Chain<CType>,
+  chainB: Chain<CType>
+): number => {
+  let sameIndex = 0;
+  while (true) {
+    const nextA = chainA.at(sameIndex);
+    const nextB = chainB.at(sameIndex);
+    if (!nextB) return chainA.length;
+    if (!nextA) return sameIndex;
+    if (nextA.meta.eventId !== nextB.meta.eventId) return sameIndex;
+    sameIndex++;
+  }
+};
+
 export const isWFEvent = <CType extends CTypeProto>(
   x: WFEventOrDirective<CType>
 ): x is WFEvent<CType> => "t" in x;
+
+export const isWFDirective = <CType extends CTypeProto>(
+  x: WFEventOrDirective<CType>
+): x is WFDirective => "ax" in x;
 
 export const extractWFEvents = <CType extends CTypeProto>(
   evs: ActyxWFEventAndDirective<CType>[]
 ): ActyxWFEvent<CType>[] =>
   evs.filter((ev): ev is ActyxWFEvent<CType> => isWFEvent(ev.payload));
+
+export const extractWFDirective = <CType extends CTypeProto>(
+  evs: ActyxWFEventAndDirective<CType>[]
+): ActyxWFDirective[] =>
+  evs.filter((ev): ev is ActyxWFDirective => isWFDirective(ev.payload));
 
 export namespace InternalTag {
   /**
@@ -59,7 +100,7 @@ export namespace InternalTag {
 
   type String<T extends string> = `${T}${string}`;
   export type StringOf<T extends Tool<any>> = T extends Tool<infer X>
-    ? X
+    ? `${X}${string}`
     : never;
 
   const factory = <T extends string>(prefix: T): Tool<T> => {
@@ -81,9 +122,9 @@ export namespace InternalTag {
   /**
    * For marking that an actor needs to compensate for something
    */
-  export const CompensationNeeded = factory("ax:wf:compensation:start:");
+  export const CompensationNeeded = factory("ax:wf:compensation:needed:");
   /**
    * For marking that an actor doesn't need to do compensation anymore
    */
-  export const CompensationFinished = factory("ax:wf:compensation:finished:");
+  export const CompensationDone = factory("ax:wf:compensation:done:");
 }

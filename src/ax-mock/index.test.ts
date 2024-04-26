@@ -1,8 +1,8 @@
 import { describe, expect, it } from "@jest/globals";
-import { Node, Network } from "./index.js";
-import { ActyxEvent, MsgType, Tag, Tags } from "@actyx/sdk";
+import { Node, Network, XEventKey, XLamport } from "./index.js";
+import { ActyxEvent, EventKey, Lamport, MsgType, Tag, Tags } from "@actyx/sdk";
 import { afterEach } from "node:test";
-import { sleep } from "../utils.js";
+import { Ord, sleep } from "../utils.js";
 
 const streamOf = <E>(node: Node.Type<E>) => node.api.stores().own.slice();
 const accordingToStreamOf = <E>(observer: Node.Type<E>, node: Node.Type<E>) =>
@@ -143,5 +143,21 @@ describe("ax-mock", () => {
       ]);
       await sleep(3);
     });
+  });
+});
+
+describe("event-key", () => {
+  it("is orderable", () => {
+    const eventkeys: XEventKey.Type[] = [
+      XEventKey.make(XLamport.make(0), "a"),
+      XEventKey.make(XLamport.make(0), "b"),
+      XEventKey.make(XLamport.make(1), "b"),
+    ].sort((a, b) => Ord.toNum(Ord.cmp(a, b)));
+
+    expect(eventkeys).toEqual([
+      XEventKey.make(XLamport.make(0), "a"),
+      XEventKey.make(XLamport.make(0), "b"),
+      XEventKey.make(XLamport.make(1), "b"),
+    ]);
   });
 });
