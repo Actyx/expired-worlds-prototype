@@ -1,6 +1,6 @@
 import { XEventKey } from "./ax-mock/index.js";
 import { ActyxWFEvent, CTypeProto, InternalTag } from "./consts.js";
-import { ExcludeArrayMember, NumArrToCodepoint, Ord } from "./utils.js";
+import { ExcludeArrayMember, Ord } from "./utils.js";
 
 type EventId = string;
 type EventInfo<CType extends CTypeProto> = ActyxWFEvent<CType>;
