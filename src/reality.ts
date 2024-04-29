@@ -14,9 +14,11 @@ export namespace MultiverseTree {
       e: ActyxWFEvent<CType>
     ) => ActyxWFEvent<CType> | UnregisteredEvent | null;
     has: (e: ActyxWFEvent<CType>) => boolean;
+    getById: (id: string) => null | ActyxWFEvent<CType>;
     isHead: (e: ActyxWFEvent<CType>) => boolean;
     isRoot: (e: ActyxWFEvent<CType>) => boolean;
     isCanon: (e: ActyxWFEvent<CType>) => boolean;
+    getChainForwards: (e: ActyxWFEvent<CType>) => null | ActyxWFEvent<CType>[];
     /**
      * Get a chain of events, both backward and forward.
      * On the forward case, it goes to the future until at the point where event branches
@@ -109,7 +111,26 @@ export namespace MultiverseTree {
       }
     };
 
+    const populateChainForwardCanon = (chain: string[]) => {
+      while (true) {
+        const nextEvents = internal.next.get(chain[chain.length - 1]);
+        if (!nextEvents) break;
+        const canonNext = Array.from(nextEvents)
+          .map((eventId) => {
+            const ev = internal.infoMap.get(eventId);
+            if (!ev) return null;
+            return { ev, eventId, eventKey: XEventKey.fromMeta(ev.meta) };
+          })
+          .filter((x): x is Exclude<typeof x, null> => x !== null)
+          .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)))
+          .at(0);
+        if (!canonNext) break;
+        chain.push(canonNext?.eventId);
+      }
+    };
+
     const self: Type<CType> = {
+      getById: (id) => internal.infoMap.get(id) || null,
       register: (ev) => {
         const { eventId } = ev.meta;
         if (internal.predecessors.has(eventId)) return;
@@ -174,6 +195,15 @@ export namespace MultiverseTree {
         );
       },
       isRoot: (ev) => internal.rootOf.has(ev.meta.eventId),
+      getChainForwards: (ev) => {
+        const idChain = [ev.meta.eventId];
+        populateChainForwardCanon(idChain);
+        const infoChain = idChain.map((x) => internal.infoMap.get(x) || null);
+        // get rid of incomplete chain due to malformed query or deleted events
+        if (infoChain.findIndex((x) => x === null) !== -1) return null;
+
+        return infoChain as ExcludeArrayMember<typeof infoChain, null>;
+      },
       getChainBackwards: (ev) => {
         const idChain = [ev.meta.eventId]; // chronological event id chains
         populateChainBackwards(idChain);
@@ -198,17 +228,15 @@ export namespace MultiverseTree {
           .map(([eventId, rootData]) => {
             const rootEv = internal.infoMap.get(eventId);
             if (!rootEv) return null;
-            return { rootEv, eventId, rootData };
+            return {
+              rootEv,
+              eventId,
+              rootData,
+              eventKey: XEventKey.fromMeta(rootEv.meta),
+            };
           })
           .filter((x): x is Exclude<typeof x, null> => x !== null)
-          .sort((a, b) =>
-            Ord.toNum(
-              Ord.cmp(
-                XEventKey.fromMeta(a.rootEv.meta),
-                XEventKey.fromMeta(b.rootEv.meta)
-              )
-            )
-          )
+          .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)))
           .at(0);
 
         if (!canonRoot) return null;

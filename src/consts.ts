@@ -25,20 +25,38 @@ export type WFEvent<CType extends CTypeProto> = {
  * e.g. in a multiverse, in which universe the actor is in
  */
 export type WFDirective =
-  | {
-      ax: InternalTag.StringOf<typeof InternalTag.CompensationNeeded>;
-      actor: string;
-      fromTimelineOf: string;
-      toTimelineOf: string;
-      compensationIndices: number[];
-    }
-  | {
-      ax: InternalTag.StringOf<typeof InternalTag.CompensationDone>;
-      actor: string;
-      fromTimelineOf: string;
-      toTimelineOf: string;
-      compensationIndexDone: number;
-    };
+  | WFDirectiveCompensationNeeded
+  | WFDirectiveCompensationDone;
+export type WFDirectiveCompensationNeeded = {
+  readonly ax: InternalTag.StringOf<typeof InternalTag.CompensationNeeded>;
+  readonly actor: string;
+  /**
+   * The first event of compensation, not the last one in digested event of a
+   * particular actor Being the first event is important to be able to resolve
+   * possible competing branches inside a compensation, including one that
+   * happens during the switch between non-compensating to compensating
+   */
+  readonly fromTimelineOf: string;
+  readonly toTimelineOf: string;
+  /**
+   * Supplemental information about which index the particular compensation code
+   * exists in the workflow. IMPORTANT: a directive must be used in the same
+   * context as the workflow it originated from.
+   */
+  readonly codeIndex: number;
+};
+export type WFDirectiveCompensationDone = {
+  readonly ax: InternalTag.StringOf<typeof InternalTag.CompensationDone>;
+  readonly actor: string;
+  /**
+   * The first event of compensation, not the last one in digested event of a
+   * particular actor Being the first event is important to be able to resolve
+   * possible competing branches inside a compensation, including one that
+   * happens during the switch between non-compensating to compensating
+   */
+  readonly fromTimelineOf: string;
+  readonly toTimelineOf: string;
+};
 
 export type ActyxWFEvent<CType extends CTypeProto> = ActyxEvent<WFEvent<CType>>;
 export type ActyxWFDirective = ActyxEvent<WFDirective>;

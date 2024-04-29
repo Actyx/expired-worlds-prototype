@@ -1,4 +1,4 @@
-import { CTypeProto } from "./consts.js";
+import { ActyxWFEvent, CTypeProto } from "./consts.js";
 import { Enum } from "./utils.js";
 
 // Code
@@ -277,6 +277,7 @@ type SMatch<CType extends CTypeProto> = Pick<CMatch<CType>, "t"> & {
   inner: WFMachine<CType>;
 };
 type SEvent<CType extends CTypeProto> = Pick<CEvent<CType>, "t"> & {
+  id: string;
   payload: EEvent<CType>["payload"];
 };
 type SRetry = Pick<CRetry, "t">;
@@ -299,18 +300,25 @@ type SAntiParallel = Pick<CAntiParallel, "t"> & {};
 
 type EEvent<CType extends CTypeProto> = {
   t: "event";
+  id: string;
   name: CType["ev"];
   payload: Record<string, unknown>;
 };
 export namespace Emit {
   export const event = <CType extends CTypeProto>(
+    id: string,
     name: CType["ev"],
     payload: Record<string, unknown>
   ): EEvent<CType> => ({
+    id,
     t: "event",
     name,
     payload,
   });
+
+  export const fromWFEvent = <CType extends CTypeProto>(
+    ev: ActyxWFEvent<CType>
+  ) => Emit.event(ev.meta.eventId, ev.payload.t, ev.payload.payload);
 }
 
 export const One: unique symbol = Symbol("One");
@@ -344,7 +352,10 @@ export type WFMachine<CType extends CTypeProto> = {
     };
     dueFor: number;
   }[];
-  availableCompensateableRaw: () => Set<number>;
+  availableCompensateableCode: () => {
+    codeIndex: number;
+    firstEventId: string;
+  }[];
   availableCompensateable: () => {
     role: CType["role"];
     name: CType["ev"];
@@ -501,7 +512,39 @@ export const WFMachine = <CType extends CTypeProto>(
   const availableLateTimeouts = () =>
     availableTimeouts().filter(({ lateness }) => lateness > 0);
 
-  const availableCompensateableRaw = () => new Set(data.activeCompensateable);
+  const availableCompensateableCode = () =>
+    Array.from(data.activeCompensateable)
+      .map((codeIndex) => {
+        const ccompensate = workflow.at(codeIndex);
+        if (ccompensate?.t !== "compensate") {
+          throw new Error(
+            `compensate query fatal error: ctimeout not found at index ${codeIndex}`
+          );
+        }
+
+        const withIndex = codeIndex + ccompensate.withIndexOffset;
+        const firstEventCodeIndex = (() => {
+          let i = codeIndex;
+          while (i < withIndex) {
+            const code = workflow.at(i);
+            if (code && code.t === "event") {
+              return i;
+            }
+            i++;
+          }
+          throw new Error(`compensate query fatal error: cevent not found`);
+        })();
+        const firstEventAtStack = data.stack.at(firstEventCodeIndex);
+        if (firstEventAtStack?.t !== "event") {
+          throw new Error("compensate first event at stack type mismatch");
+        }
+
+        return { codeIndex, firstEventId: firstEventAtStack.id };
+      })
+      .sort((a, b) => {
+        // in case of nested timeouts: sorted by last / innermost compensation
+        return b.codeIndex - a.codeIndex;
+      });
 
   /**
    * Find all active compensateable
@@ -536,8 +579,8 @@ export const WFMachine = <CType extends CTypeProto>(
         };
       })
       .sort((a, b) => {
-        // in case of nested timeouts: sort by first/deepest-most timeout
-        return a.antiTimeoutIndex - b.antiTimeoutIndex;
+        // in case of nested compensations: sort by last/innermost timeout
+        return b.compensationIndex - a.compensationIndex;
       });
 
   /**
@@ -917,6 +960,7 @@ export const WFMachine = <CType extends CTypeProto>(
         t: "anti-timeout",
         consequence: lastMatching.ctimeout.consequence,
         data: {
+          id: e.id,
           t: "event",
           name: lastMatching.ctimeout.consequence.name,
           payload: {},
@@ -938,6 +982,7 @@ export const WFMachine = <CType extends CTypeProto>(
   ) => {
     if (e.name === code.name) {
       data.stack[evalContext.index] = {
+        id: e.id,
         t: "event",
         payload: e.payload,
       };
@@ -969,6 +1014,7 @@ export const WFMachine = <CType extends CTypeProto>(
       const [indexOffset, _] = firstMatching;
       const eventIndex = eventStartIndex + indexOffset;
       data.stack[eventIndex] = {
+        id: e.id,
         t: "event",
         payload: e.payload,
       };
@@ -1177,6 +1223,6 @@ export const WFMachine = <CType extends CTypeProto>(
         name: firstCompensation.name,
       })),
     availableCommands,
-    availableCompensateableRaw,
+    availableCompensateableCode: availableCompensateableCode,
   };
 };
