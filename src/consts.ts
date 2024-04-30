@@ -134,6 +134,10 @@ export namespace InternalTag {
   };
 
   /**
+   * For marking events that are part of compensation
+   */
+  export const CompensationEvent = factory("ax:wf:compensation:event:");
+  /**
    * For marking predecessor eventId, placed inside a tag
    */
   export const Predecessor = factory("ax:wf:predecessor:");

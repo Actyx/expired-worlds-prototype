@@ -375,6 +375,8 @@ export type WFWorkflow<CType extends CTypeProto> = Readonly<
 export const WFMachine = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
 ): WFMachine<CType> => {
+  const compensateFastQuery = CCompensationFastQuery.make(workflow);
+
   const data = {
     executionIndex: 0,
     stack: [] as (StackItem<CType> | null)[],
@@ -499,7 +501,7 @@ export const WFMachine = <CType extends CTypeProto>(
         const dueDate = stimeout.startedAt.getTime() + ctimeout.duration;
         const lateness = Date.now() - dueDate;
 
-        return { stimeout, ctimeout, lateness, antiIndex };
+        return { timeoutIndex: index, stimeout, ctimeout, lateness, antiIndex };
       })
       .sort((a, b) => {
         // in case of nested timeouts: sorted by last / outermost timeout
@@ -587,6 +589,7 @@ export const WFMachine = <CType extends CTypeProto>(
    * extract available commands, recursesively when needed
    */
   const extractAvailableCommandFromSingularCode = (
+    index: number,
     result: ReturnType<WFMachine<CType>["availableCommands"]>,
     code: CItem<CType>,
     overrideReason?: null | "compensation" | "timeout"
@@ -598,27 +601,30 @@ export const WFMachine = <CType extends CTypeProto>(
       );
 
       if (!maxReached) {
-        const eventCode = workflow.at(
-          data.executionIndex + code.firstEventIndex
-        );
+        const index = data.executionIndex + code.firstEventIndex;
+        const eventCode = workflow.at(index);
         if (eventCode) {
-          extractAvailableCommandFromSingularCode(result, eventCode);
+          extractAvailableCommandFromSingularCode(index, result, eventCode);
         }
       }
 
       atStack.instances.map((instance) => {
-        const eventCode = workflow.at(
-          data.executionIndex + code.firstEventIndex + instance.entry.length
-        );
+        const index =
+          data.executionIndex + code.firstEventIndex + instance.entry.length;
+        const eventCode = workflow.at(index);
         if (eventCode) {
-          extractAvailableCommandFromSingularCode(result, eventCode);
+          extractAvailableCommandFromSingularCode(index, result, eventCode);
         }
       });
 
       if (minReached) {
         const maybeCEv = workflow.at(atStack.nextEvalIndex);
         if (maybeCEv) {
-          extractAvailableCommandFromSingularCode(result, maybeCEv);
+          extractAvailableCommandFromSingularCode(
+            atStack.nextEvalIndex,
+            result,
+            maybeCEv
+          );
         }
       }
     }
@@ -636,7 +642,10 @@ export const WFMachine = <CType extends CTypeProto>(
         name,
         role: code.role,
         control,
-        reason: overrideReason || null,
+        reason:
+          overrideReason || compensateFastQuery.isInsideWithBlock(index)
+            ? "compensation"
+            : null,
       });
     }
 
@@ -645,13 +654,15 @@ export const WFMachine = <CType extends CTypeProto>(
       const antiIndex = data.executionIndex + code.antiIndexOffset;
       workflow
         .slice(eventStartIndex, antiIndex) // take the CEvent between the choice and anti-choice
-        .forEach((x) => {
+        .forEach((x, index) => {
           if (x.t !== "event") {
             // defensive measure, should not exist
             throw new Event("codes inside are not CEvent");
           }
 
-          extractAvailableCommandFromSingularCode(result, x);
+          const codeIndex = eventStartIndex + index;
+
+          extractAvailableCommandFromSingularCode(codeIndex, result, x);
         });
     }
   };
@@ -663,11 +674,16 @@ export const WFMachine = <CType extends CTypeProto>(
     const result: ReturnType<WFMachine<CType>["availableCommands"]> = [];
 
     if (code) {
-      extractAvailableCommandFromSingularCode(result, code);
+      extractAvailableCommandFromSingularCode(
+        data.executionIndex,
+        result,
+        code
+      );
     }
 
     availableLateTimeouts().forEach((timeout) => {
       extractAvailableCommandFromSingularCode(
+        timeout.timeoutIndex,
         result,
         timeout.ctimeout.consequence,
         "timeout"
@@ -676,6 +692,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     availableCompensateable().forEach((compensation) => {
       extractAvailableCommandFromSingularCode(
+        compensation.compensationIndex,
         result,
         compensation.firstCompensation,
         "compensation"
@@ -1222,7 +1239,38 @@ export const WFMachine = <CType extends CTypeProto>(
         role: firstCompensation.role,
         name: firstCompensation.name,
       })),
-    availableCommands,
+    availableCommands: availableCommands,
     availableCompensateableCode: availableCompensateableCode,
   };
 };
+
+export namespace CCompensationFastQuery {
+  const construct = <CType extends CTypeProto>(workflow: WFWorkflow<CType>) => {
+    const compensateWithBlock: { start: number; end: number }[] = [];
+
+    let compensationWithStartIndexes: number[] = [];
+    workflow.forEach((line, index) => {
+      if (line.t === "compensate-with") {
+        compensationWithStartIndexes.push(index);
+        return;
+      } else if (line.t === "anti-compensate") {
+        const start = compensationWithStartIndexes.pop();
+        if (!start) return;
+        compensateWithBlock.push({ start: start, end: index });
+      }
+    });
+
+    return compensateWithBlock;
+  };
+
+  export const make = <CType extends CTypeProto>(
+    workflow: WFWorkflow<CType>
+  ) => {
+    const list = construct(workflow);
+
+    return {
+      isInsideWithBlock: (x: number) =>
+        list.findIndex((entry) => x > entry.start && x < entry.end),
+    };
+  };
+}

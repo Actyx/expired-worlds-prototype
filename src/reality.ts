@@ -14,11 +14,15 @@ export namespace MultiverseTree {
       e: ActyxWFEvent<CType>
     ) => ActyxWFEvent<CType> | UnregisteredEvent | null;
     has: (e: ActyxWFEvent<CType>) => boolean;
+    getNext: (e: ActyxWFEvent<CType>) => ActyxWFEvent<CType>[];
     getById: (id: string) => null | ActyxWFEvent<CType>;
     isHead: (e: ActyxWFEvent<CType>) => boolean;
     isRoot: (e: ActyxWFEvent<CType>) => boolean;
     isCanon: (e: ActyxWFEvent<CType>) => boolean;
     getChainForwards: (e: ActyxWFEvent<CType>) => null | ActyxWFEvent<CType>[];
+    getCompensationChainForwards: (
+      e: ActyxWFEvent<CType>
+    ) => null | ActyxWFEvent<CType>[];
     /**
      * Get a chain of events, both backward and forward.
      * On the forward case, it goes to the future until at the point where event branches
@@ -129,8 +133,39 @@ export namespace MultiverseTree {
       }
     };
 
+    const populateCompensationChainForward = (chain: string[]) => {
+      while (true) {
+        const nextEvents = internal.next.get(chain[chain.length - 1]);
+        if (!nextEvents) break;
+        const nexts = Array.from(nextEvents)
+          .map((eventId) => {
+            const ev = internal.infoMap.get(eventId);
+            if (!ev) return null;
+            return { ev, eventId, eventKey: XEventKey.fromMeta(ev.meta) };
+          })
+          .filter((x): x is Exclude<typeof x, null> => x !== null)
+          .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)));
+
+        const compensationNext = nexts.find(
+          (x) =>
+            x.ev.meta.tags.findIndex((x) =>
+              InternalTag.CompensationEvent.is(x)
+            ) !== -1
+        );
+        if (compensationNext) {
+          chain.push(compensationNext.eventId);
+        }
+
+        break;
+      }
+    };
+
     const self: Type<CType> = {
       getById: (id) => internal.infoMap.get(id) || null,
+      getNext: (ev) =>
+        Array.from(internal.next.get(ev.meta.eventId) || [])
+          .map((eventId) => internal.infoMap.get(eventId) || null)
+          .filter((ev): ev is Exclude<typeof ev, null> => ev !== null),
       register: (ev) => {
         const { eventId } = ev.meta;
         if (internal.predecessors.has(eventId)) return;
@@ -195,6 +230,16 @@ export namespace MultiverseTree {
         );
       },
       isRoot: (ev) => internal.rootOf.has(ev.meta.eventId),
+      getCompensationChainForwards: (ev) => {
+        const idChain = [ev.meta.eventId];
+        populateCompensationChainForward(idChain);
+
+        const infoChain = idChain.map((x) => internal.infoMap.get(x) || null);
+        // get rid of incomplete chain due to malformed query or deleted events
+        if (infoChain.findIndex((x) => x === null) !== -1) return null;
+
+        return infoChain as ExcludeArrayMember<typeof infoChain, null>;
+      },
       getChainForwards: (ev) => {
         const idChain = [ev.meta.eventId];
         populateChainForwardCanon(idChain);

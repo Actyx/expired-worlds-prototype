@@ -35,7 +35,6 @@ export type Params<CType extends CTypeProto> = {
 
 type OnEventsOrTimetravel<E> = (data: EventsOrTimetravel<E>) => Promise<void>;
 
-// TODO: build compensation tracker here
 export const run = async <CType extends CTypeProto>(
   params: Params<CType>,
   // const node = Node.make<WFEventAndDirective<CType>>({ id: params.id });
@@ -62,26 +61,17 @@ export const run = async <CType extends CTypeProto>(
   const multiverseTree = Reality.MultiverseTree.make<CType>();
   const compensationMap = CompensationMap.make();
 
-  /**
-   * Connect to Actyx with predefined params and keep connection until closed.
-   */
-
-  // let nextCanonEventIndexToSwallow = 0;
-  // let witnessCanon: null | Reality.Reality<ActyxWFEvent<CType>> = null;
   type DataModes = {
     wfMachine: WFMachine<CType>;
     digestedChain: ActyxWFEvent<CType>[];
   } & (
+    | { t: "normal" }
+    | { t: "building-compensations" }
     | {
-        t: "normal";
-      }
-    | {
-        t: "building-amendments";
-      }
-    | {
-        t: "amending";
-        nextWFMachine: WFMachine<CType>;
-        nextDigestedChain: ActyxWFEvent<CType>[];
+        t: "compensating";
+        canonWFMachine: WFMachine<CType>;
+        canonDigestedChain: ActyxWFEvent<CType>[];
+        compensationInfo: WFDirectiveCompensationNeeded;
       }
   );
   let data: DataModes = {
@@ -89,7 +79,21 @@ export const run = async <CType extends CTypeProto>(
     wfMachine: WFMachine(workflow),
     digestedChain: [],
   };
-  let alive = false;
+
+  const nextOfMostCanonChain = (chain: Chain<CType>) => {
+    const last = chain.at(chain.length - 1);
+    if (!last) return multiverseTree.getCanonChain() || [];
+    const chainForward = multiverseTree.getChainForwards(last) || [];
+    return chainForward.slice(1); // exclude `last` from the chain
+  };
+
+  const nextOfCompensateChain = (chain: Chain<CType>) => {
+    const last = chain.at(chain.length - 1);
+    if (!last) return multiverseTree.getCanonChain() || [];
+    const chainForward =
+      multiverseTree.getCompensationChainForwards(last) || [];
+    return chainForward.slice(1); // exclude `last` from the chain
+  };
 
   const pipeEventsToWFMachine = (
     e: EventsOrTimetravel<WFEventOrDirective<CType>>
@@ -98,7 +102,7 @@ export const run = async <CType extends CTypeProto>(
 
     if (e.type === MsgType.timetravel) {
       data = {
-        t: "building-amendments",
+        t: "building-compensations",
         wfMachine: currentData.wfMachine,
         digestedChain: currentData.digestedChain,
       };
@@ -107,25 +111,19 @@ export const run = async <CType extends CTypeProto>(
 
     if (e.type === MsgType.events) {
       if (currentData.t === "normal") {
-        const nextInChain = (() => {
-          const last = data.digestedChain.at(data.digestedChain.length - 1);
-          if (!last) return multiverseTree.getCanonChain() || [];
-          const chainForward = multiverseTree.getChainForwards(last) || [];
-          return chainForward.slice(1); // exclude `last` from the chain
-        })();
+        const nextOfChain = nextOfMostCanonChain(data.digestedChain);
+        nextOfChain.map(Emit.fromWFEvent).forEach(data.wfMachine.tick);
+        data.digestedChain.push(...nextOfChain);
+      } else if (currentData.t === "building-compensations" && e.caughtUp) {
+        const canonChain = multiverseTree.getCanonChain() || [];
+        const canonWFMachine = WFMachine(workflow);
+        canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
 
-        nextInChain.map(Emit.fromWFEvent).forEach(data.wfMachine.tick);
-        data.digestedChain.push(...nextInChain);
-      } else if (currentData.t === "building-amendments" && e.caughtUp) {
-        const nextChain = multiverseTree.getCanonChain() || [];
-        const compensations = calculateCompensation(
+        const compensations = calculateCompensations(
           workflow,
           data.digestedChain,
-          nextChain
+          canonChain
         );
-
-        const nextWFMachine = WFMachine(workflow);
-        nextChain.map(Emit.fromWFEvent).forEach(nextWFMachine.tick);
 
         if (compensations) {
           // register compensations to both compensation map and the persistence
@@ -140,39 +138,29 @@ export const run = async <CType extends CTypeProto>(
                 codeIndex,
               };
               // TODO: fix tag
-              node.api.publish(Tag("sometag").apply(directive));
+              node.api.publish(params.tags.apply(directive));
               compensationMap.register(directive);
             }
           );
-
-          data = {
-            t: "amending",
-            wfMachine: currentData.wfMachine,
-            digestedChain: currentData.digestedChain,
-            nextWFMachine: nextWFMachine,
-            nextDigestedChain: nextChain,
-          };
-        } else {
-          data = {
-            t: "normal",
-            wfMachine: nextWFMachine,
-            digestedChain: nextChain,
-          };
         }
-      } else if (currentData.t === "amending") {
-        const nextInChain = (() => {
-          const last = currentData.nextDigestedChain.at(
-            data.digestedChain.length - 1
-          );
-          if (!last) return multiverseTree.getCanonChain() || [];
-          const chainForward = multiverseTree.getChainForwards(last) || [];
-          return chainForward.slice(1); // exclude `last` from the chain
-        })();
 
-        nextInChain
+        rebuildData();
+      } else if (currentData.t === "compensating") {
+        const nextOfCompensateable = nextOfCompensateChain(
+          currentData.digestedChain
+        );
+        currentData.digestedChain.push(...nextOfCompensateable);
+        nextOfCompensateable
           .map(Emit.fromWFEvent)
-          .forEach(currentData.nextWFMachine.tick);
-        currentData.nextDigestedChain.push(...nextInChain);
+          .forEach(currentData.wfMachine.tick);
+
+        const nextOfCanon = nextOfMostCanonChain(
+          currentData.canonDigestedChain
+        );
+        currentData.canonDigestedChain.push(...nextOfCanon);
+        nextOfCanon
+          .map(Emit.fromWFEvent)
+          .forEach(currentData.canonWFMachine.tick);
       }
     }
   };
@@ -203,19 +191,24 @@ export const run = async <CType extends CTypeProto>(
         compensateableLastEvent
       );
       if (!compensateableChain) {
+        // TODO: handle more gracefully
         throw new Error("missing chain noted in a compensation");
       }
+
+      compensateableChain.push(...nextOfCompensateChain(compensateableChain));
+
       const compensateableMachine = WFMachine(workflow);
       compensateableChain
         .map(Emit.fromWFEvent)
         .forEach(compensateableMachine.tick);
 
       data = {
-        t: "amending",
+        t: "compensating",
         wfMachine: compensateableMachine,
         digestedChain: compensateableChain,
-        nextWFMachine: canonWFMachine,
-        nextDigestedChain: canonChain,
+        canonWFMachine: canonWFMachine,
+        canonDigestedChain: canonChain,
+        compensationInfo: compensation.directive,
       };
     } else {
       data = {
@@ -246,43 +239,49 @@ export const run = async <CType extends CTypeProto>(
     }
   });
 
-  const commands = () =>
-    data.wfMachine
+  const commands = () => {
+    if (data.t === "building-compensations") {
+      return [];
+    }
+
+    const commands = data.wfMachine
       .availableCommands()
       .filter((x) => x.role === params.self)
       .map((x) => ({
         info: x,
-        publish: (payload: Record<string, unknown>) =>
-          node.api.publish(
-            params.tags
-              .and(
-                Tag<WFEventOrDirective<CType>>(
-                  InternalTag.Predecessor.write("")
+        publish: (payload: Record<string, unknown>) => {
+          const last = data.digestedChain.at(data.digestedChain.length - 1);
+          let tags = params.tags;
+          if (last) {
+            tags = tags.and(
+              Tag<WFEventOrDirective<CType>>(
+                InternalTag.Predecessor.write(last.meta.eventId)
+              )
+            );
+          }
+          if (data.t === "compensating") {
+            tags = tags.and(
+              Tag<WFEventOrDirective<CType>>(
+                InternalTag.CompensationEvent.write(
+                  data.compensationInfo.fromTimelineOf
                 )
-              ) // TODO: track predecessor
-              .applyTyped({ t: x.name, payload })
-          ),
+              )
+            );
+          }
+          return node.api.publish(tags.applyTyped({ t: x.name, payload }));
+        },
       }));
 
+    if (data.t === "compensating") {
+      return commands.filter((x) => x.info.reason === "compensation");
+    }
+
+    return commands;
+  };
+
   return {
-    amendment: () => {
-      if (!data) {
-        return null;
-      }
-      // TODO: track this using active compensation rather than compensatable
-      return {
-        compensations: data.wfMachine
-          .availableCompensateable()
-          .filter((x) => x.role === params.self),
-      };
-    },
     commands,
-    command: (name: CType["ev"]) =>
-      commands().find((x) => x.info.name === name) || null,
-    kill: async () => {
-      alive = false;
-      axSub.kill();
-    },
+    kill: axSub.kill,
   };
 };
 
@@ -323,7 +322,6 @@ export namespace CompensationMap {
   type Actor = string;
   type From = string;
   type To = string;
-  type CodeIndex = number;
 
   export const make = () => {
     const data = {
@@ -397,7 +395,7 @@ export namespace CompensationMap {
   };
 }
 
-const calculateCompensation = <CType extends CTypeProto>(
+const calculateCompensations = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>,
   previousChain: Chain<CType>,
   currentCanonChain: Chain<CType>
