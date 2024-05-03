@@ -1,6 +1,7 @@
 import {
   Actyx,
   CancelSubscription,
+  EventsMsg,
   EventsOrTimetravel,
   MsgType,
   OnCompleteOrErr,
@@ -34,7 +35,19 @@ export type Params<CType extends CTypeProto> = {
 };
 
 type OnEventsOrTimetravel<E> = (data: EventsOrTimetravel<E>) => Promise<void>;
-
+type DataModes<CType extends CTypeProto> = {
+  wfMachine: WFMachine<CType>;
+  digestedChain: ActyxWFEvent<CType>[];
+} & (
+  | { t: "normal" }
+  | { t: "building-compensations" }
+  | {
+      t: "compensating";
+      canonWFMachine: WFMachine<CType>;
+      canonDigestedChain: ActyxWFEvent<CType>[];
+      compensationInfo: WFDirectiveCompensationNeeded;
+    }
+);
 export const run = async <CType extends CTypeProto>(
   params: Params<CType>,
   // const node = Node.make<WFEventAndDirective<CType>>({ id: params.id });
@@ -57,189 +70,17 @@ export const run = async <CType extends CTypeProto>(
   // }
   //
 
-  let caughtUpFirstTime = false;
-  const multiverseTree = Reality.MultiverseTree.make<CType>();
-  const compensationMap = CompensationMap.make();
-
-  type DataModes = {
-    wfMachine: WFMachine<CType>;
-    digestedChain: ActyxWFEvent<CType>[];
-  } & (
-    | { t: "normal" }
-    | { t: "building-compensations" }
-    | {
-        t: "compensating";
-        canonWFMachine: WFMachine<CType>;
-        canonDigestedChain: ActyxWFEvent<CType>[];
-        compensationInfo: WFDirectiveCompensationNeeded;
-      }
-  );
-  let data: DataModes = {
-    t: "normal",
-    wfMachine: WFMachine(workflow),
-    digestedChain: [],
-  };
-
-  const nextOfMostCanonChain = (chain: Chain<CType>) => {
-    const last = chain.at(chain.length - 1);
-    if (!last) return multiverseTree.getCanonChain() || [];
-    const chainForward = multiverseTree.getChainForwards(last) || [];
-    return chainForward.slice(1); // exclude `last` from the chain
-  };
-
-  const nextOfCompensateChain = (chain: Chain<CType>) => {
-    const last = chain.at(chain.length - 1);
-    if (!last) return multiverseTree.getCanonChain() || [];
-    const chainForward =
-      multiverseTree.getCompensationChainForwards(last) || [];
-    return chainForward.slice(1); // exclude `last` from the chain
-  };
-
-  const pipeEventsToWFMachine = (
-    e: EventsOrTimetravel<WFEventOrDirective<CType>>
-  ) => {
-    const currentData = data;
-
-    if (e.type === MsgType.timetravel) {
-      data = {
-        t: "building-compensations",
-        wfMachine: currentData.wfMachine,
-        digestedChain: currentData.digestedChain,
-      };
-      return;
-    }
-
-    if (e.type === MsgType.events) {
-      if (currentData.t === "normal") {
-        const nextOfChain = nextOfMostCanonChain(data.digestedChain);
-        nextOfChain.map(Emit.fromWFEvent).forEach(data.wfMachine.tick);
-        data.digestedChain.push(...nextOfChain);
-      } else if (currentData.t === "building-compensations" && e.caughtUp) {
-        const canonChain = multiverseTree.getCanonChain() || [];
-        const canonWFMachine = WFMachine(workflow);
-        canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
-
-        const compensations = calculateCompensations(
-          workflow,
-          data.digestedChain,
-          canonChain
-        );
-
-        if (compensations) {
-          // register compensations to both compensation map and the persistence
-          // layer: ax
-          compensations.forEach(
-            ({ fromTimelineOf, toTimelineOf, codeIndex }) => {
-              const directive: WFDirective = {
-                ax: InternalTag.CompensationNeeded.write(""),
-                actor: params.id,
-                fromTimelineOf,
-                toTimelineOf,
-                codeIndex,
-              };
-              // TODO: fix tag
-              node.api.publish(params.tags.apply(directive));
-              compensationMap.register(directive);
-            }
-          );
-        }
-
-        rebuildData();
-      } else if (currentData.t === "compensating") {
-        const nextOfCompensateable = nextOfCompensateChain(
-          currentData.digestedChain
-        );
-        currentData.digestedChain.push(...nextOfCompensateable);
-        nextOfCompensateable
-          .map(Emit.fromWFEvent)
-          .forEach(currentData.wfMachine.tick);
-
-        const nextOfCanon = nextOfMostCanonChain(
-          currentData.canonDigestedChain
-        );
-        currentData.canonDigestedChain.push(...nextOfCanon);
-        nextOfCanon
-          .map(Emit.fromWFEvent)
-          .forEach(currentData.canonWFMachine.tick);
-      }
-    }
-  };
-
-  const rebuildData = () => {
-    // TODO: calculate compensation here
-    // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
-    // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
-    // TODO: think about compensation events tag
-    const compensation = compensationMap
-      .getByActor(params.id)
-      .sort((a, b) => b.directive.codeIndex - a.directive.codeIndex)
-      .at(0);
-
-    const canonWFMachine = WFMachine(workflow);
-    const canonChain = multiverseTree.getCanonChain() || [];
-    canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
-
-    if (compensation) {
-      const compensateableLastEvent = multiverseTree.getById(
-        compensation.fromTimelineOf
-      );
-      if (!compensateableLastEvent) {
-        // TODO: handle more gracefully
-        throw new Error("missing last event noted in a compensation");
-      }
-      const compensateableChain = multiverseTree.getChainBackwards(
-        compensateableLastEvent
-      );
-      if (!compensateableChain) {
-        // TODO: handle more gracefully
-        throw new Error("missing chain noted in a compensation");
-      }
-
-      compensateableChain.push(...nextOfCompensateChain(compensateableChain));
-
-      const compensateableMachine = WFMachine(workflow);
-      compensateableChain
-        .map(Emit.fromWFEvent)
-        .forEach(compensateableMachine.tick);
-
-      data = {
-        t: "compensating",
-        wfMachine: compensateableMachine,
-        digestedChain: compensateableChain,
-        canonWFMachine: canonWFMachine,
-        canonDigestedChain: canonChain,
-        compensationInfo: compensation.directive,
-      };
-    } else {
-      data = {
-        t: "normal",
-        wfMachine: canonWFMachine,
-        digestedChain: canonChain,
-      };
-    }
-  };
-
+  const machineCombinator = MachineCombinator.make(params, node, workflow);
   const axSub = perpetualSubscription(node, async (e) => {
-    if (e.type === MsgType.events) {
-      extractWFEvents(e.events).map((ev) => multiverseTree.register(ev));
-      extractWFDirective(e.events).map((ev) => {
-        compensationMap.register(ev.payload);
-      });
-    }
-
-    if (!caughtUpFirstTime) {
-      if (e.type === MsgType.events) {
-        if (e.caughtUp) {
-          caughtUpFirstTime = true;
-          rebuildData();
-        }
-      }
-    } else {
-      pipeEventsToWFMachine(e);
+    if (e.type === MsgType.timetravel) {
+      machineCombinator.setToBuildingCompensation();
+    } else if (e.type === MsgType.events) {
+      machineCombinator.pipe(e);
     }
   });
 
   const commands = () => {
+    const data = machineCombinator.internal();
     if (data.t === "building-compensations") {
       return [];
     }
@@ -250,8 +91,9 @@ export const run = async <CType extends CTypeProto>(
       .map((x) => ({
         info: x,
         publish: (payload: Record<string, unknown>) => {
-          const last = data.digestedChain.at(data.digestedChain.length - 1);
           let tags = params.tags;
+
+          const last = machineCombinator.last();
           if (last) {
             tags = tags.and(
               Tag<WFEventOrDirective<CType>>(
@@ -259,16 +101,21 @@ export const run = async <CType extends CTypeProto>(
               )
             );
           }
-          if (data.t === "compensating") {
+
+          const compensationInfo = machineCombinator.compensation();
+          if (compensationInfo) {
             tags = tags.and(
               Tag<WFEventOrDirective<CType>>(
                 InternalTag.CompensationEvent.write(
-                  data.compensationInfo.fromTimelineOf
+                  compensationInfo.fromTimelineOf
                 )
               )
             );
           }
-          return node.api.publish(tags.applyTyped({ t: x.name, payload }));
+          const publishPromise = node.api.publish(
+            tags.applyTyped({ t: x.name, payload })
+          );
+          return publishPromise;
         },
       }));
 
@@ -316,6 +163,250 @@ const perpetualSubscription = <E>(
     },
   };
 };
+
+export namespace MachineCombinator {
+  export const make = <CType extends CTypeProto>(
+    params: Params<CType>,
+    node: Node.Type<WFEventOrDirective<CType>>,
+    workflow: WFWorkflow<CType>
+  ) => {
+    const nextOfMostCanonChain = (chain: Chain<CType>) => {
+      const last = chain.at(chain.length - 1);
+      if (!last) return multiverseTree.getCanonChain() || [];
+      const chainForward = multiverseTree.getCanonChainForwards(last) || [];
+      return chainForward.slice(1); // exclude `last` from the chain
+    };
+
+    const nextOfCompensateChain = (chain: Chain<CType>) => {
+      const last = chain.at(chain.length - 1);
+      if (!last) return multiverseTree.getCanonChain() || [];
+      const chainForward =
+        multiverseTree.getCompensationChainForwards(last) || [];
+      return chainForward.slice(1); // exclude `last` from the chain
+    };
+
+    const multiverseTree = Reality.MultiverseTree.make<CType>();
+    const compensationMap = CompensationMap.make();
+    let data: DataModes<CType> = {
+      t: "building-compensations",
+      wfMachine: WFMachine(workflow),
+      digestedChain: [],
+    };
+
+    const currentCompensation = () =>
+      data.t === "compensating" ? data.compensationInfo : null;
+
+    /**
+     * There can be discrepancies between the compensations noted in the
+     * CompensationMap and WFMachine because an actor can exit at the moment
+     * between 1.) when the compensation is finished and 2.) when the
+     * "CompensationDone" marker is published
+     */
+    const compareRememberedCompensation = (
+      rememberedCompensation: ReturnType<
+        (typeof compensationMap)["getByActor"]
+      >[any]
+    ) => {
+      const { fromTimelineOf, toTimelineOf } = rememberedCompensation;
+      const fromlastEvent = multiverseTree.getById(fromTimelineOf);
+      const toLastEvent = multiverseTree.getById(toTimelineOf);
+      // TODO: handle more gracefully
+      if (!fromlastEvent || !toLastEvent) {
+        throw new Error("missing to or from event noted in a compensation");
+      }
+      const fromChain =
+        multiverseTree.getCompensationChainSpanning(fromlastEvent);
+      const toChain = multiverseTree.getChainBackwards(toLastEvent);
+      // TODO: handle more gracefully
+      if (!fromChain || !toChain) {
+        throw new Error("missing chain noted in a compensation");
+      }
+
+      // Do a comparison between remembered compensations and the actually needed compensations
+      const compensations = calculateCompensations(
+        workflow,
+        fromChain,
+        toChain
+      );
+
+      const matchingCompensation = (() => {
+        if (!compensations) return null;
+        const matchingCompensation = compensations.compensations.find(
+          (x) =>
+            x.fromTimelineOf === fromTimelineOf &&
+            x.toTimelineOf === toTimelineOf &&
+            x.codeIndex === rememberedCompensation.directive.codeIndex
+        );
+        if (!matchingCompensation) return null;
+
+        return {
+          compensation: matchingCompensation,
+          lastMachineState: compensations.lastMachineState,
+        } as const;
+      })();
+
+      if (!matchingCompensation) return null;
+
+      return {
+        matchingCompensation,
+        fromChain,
+        toChain,
+      };
+    };
+
+    const recalc = () => {
+      // TODO: calculate compensation here
+      // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
+      // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
+      // TODO: think about compensation events tag
+
+      const canonWFMachine = WFMachine(workflow);
+      const canonChain = multiverseTree.getCanonChain() || [];
+      canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
+
+      const rememberedCompensation = compensationMap
+        .getByActor(params.id)
+        .sort((a, b) => b.directive.codeIndex - a.directive.codeIndex)
+        .at(0);
+
+      if (rememberedCompensation) {
+        const compensationComparison = compareRememberedCompensation(
+          rememberedCompensation
+        );
+
+        if (compensationComparison) {
+          data = {
+            t: "compensating",
+            wfMachine:
+              compensationComparison.matchingCompensation.lastMachineState,
+            digestedChain: compensationComparison.fromChain,
+            canonWFMachine: canonWFMachine,
+            canonDigestedChain: canonChain,
+            compensationInfo: rememberedCompensation.directive,
+          };
+        } else {
+          // If the WFMachine indicates that the compensation is done when the compensationMap remembers differently
+          // This is an indication that the compensation is done but unmarked
+          // Mark the compensation as done
+          const directive: WFDirectiveCompensationDone = {
+            ax: InternalTag.CompensationDone.write(""),
+            actor: params.id,
+            fromTimelineOf: rememberedCompensation.fromTimelineOf,
+            toTimelineOf: rememberedCompensation.toTimelineOf,
+          };
+          // TODO: fix tag
+          node.api.publish(params.tags.apply(directive));
+
+          data = {
+            t: "normal",
+            wfMachine: canonWFMachine,
+            digestedChain: canonChain,
+          };
+        }
+      } else {
+        data = {
+          t: "normal",
+          wfMachine: canonWFMachine,
+          digestedChain: canonChain,
+        };
+      }
+    };
+
+    return {
+      recalc,
+      internal: () => data,
+      machine: () => data.wfMachine,
+      compensation: currentCompensation,
+      last: () => data.digestedChain.at(data.digestedChain.length - 1),
+      setToBuildingCompensation: () => {
+        data = {
+          t: "building-compensations",
+          wfMachine: data.wfMachine,
+          digestedChain: data.digestedChain,
+        };
+      },
+      pipe: (e: EventsMsg<WFEventOrDirective<CType>>) => {
+        extractWFEvents(e.events).map((ev) => multiverseTree.register(ev));
+        extractWFDirective(e.events).map((ev) => {
+          compensationMap.register(ev.payload);
+        });
+
+        const currentData = data;
+        if (currentData.t === "building-compensations" && e.caughtUp) {
+          const canonChain = multiverseTree.getCanonChain() || [];
+          const canonWFMachine = WFMachine(workflow);
+          canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
+
+          const compensations = calculateCompensations(
+            workflow,
+            currentData.digestedChain,
+            canonChain
+          )?.compensations;
+
+          if (compensations) {
+            // register compensations to both compensation map and the persistence
+            // layer: ax
+            compensations.forEach(
+              ({ fromTimelineOf, toTimelineOf, codeIndex }) => {
+                const directive: WFDirective = {
+                  ax: InternalTag.CompensationNeeded.write(""),
+                  actor: params.id,
+                  fromTimelineOf,
+                  toTimelineOf,
+                  codeIndex,
+                };
+                // TODO: fix tag
+                node.api.publish(params.tags.apply(directive));
+                compensationMap.register(directive);
+              }
+            );
+          }
+
+          recalc();
+          return;
+        }
+
+        if (currentData.t === "normal") {
+          const nextOfChain = nextOfMostCanonChain(currentData.digestedChain);
+          nextOfChain.map(Emit.fromWFEvent).forEach(currentData.wfMachine.tick);
+          currentData.digestedChain.push(...nextOfChain);
+          return;
+        }
+
+        if (currentData.t === "compensating") {
+          const nextOfCompensateable = nextOfCompensateChain(
+            currentData.digestedChain
+          );
+          currentData.digestedChain.push(...nextOfCompensateable);
+          nextOfCompensateable
+            .map(Emit.fromWFEvent)
+            .forEach(currentData.wfMachine.tick);
+
+          const nextOfCanon = nextOfMostCanonChain(
+            currentData.canonDigestedChain
+          );
+          currentData.canonDigestedChain.push(...nextOfCanon);
+          nextOfCanon
+            .map(Emit.fromWFEvent)
+            .forEach(currentData.canonWFMachine.tick);
+
+          // check if compensation still applies
+          // TODO: optimize compensation query
+          const activeCompensationCode = currentData.wfMachine
+            .availableCompensateableCode()
+            .findIndex(
+              (x) => x.codeIndex === currentData.compensationInfo.codeIndex
+            );
+
+          // compensation is done
+          if (!activeCompensationCode) {
+            recalc();
+          }
+        }
+      },
+    };
+  };
+}
 
 // TODO: fix tracking, track compensation indicies instead
 export namespace CompensationMap {
@@ -432,9 +523,12 @@ const calculateCompensations = <CType extends CTypeProto>(
 
   if (validCompensations.length === 0) return null;
 
-  return validCompensations.map((x) => ({
-    fromTimelineOf: x.firstEventId,
-    toTimelineOf: lastCanonDigested.meta.eventId,
-    codeIndex: x.codeIndex,
-  }));
+  return {
+    compensations: validCompensations.map((x) => ({
+      fromTimelineOf: x.firstEventId,
+      toTimelineOf: lastCanonDigested.meta.eventId,
+      codeIndex: x.codeIndex,
+    })),
+    lastMachineState: simulation,
+  };
 };
