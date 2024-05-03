@@ -1,4 +1,4 @@
-import { ActyxWFEvent, CTypeProto } from "./consts.js";
+import { ActyxWFBusiness, CTypeProto } from "./consts.js";
 import { Enum } from "./utils.js";
 
 // Code
@@ -317,7 +317,7 @@ export namespace Emit {
   });
 
   export const fromWFEvent = <CType extends CTypeProto>(
-    ev: ActyxWFEvent<CType>
+    ev: ActyxWFBusiness<CType>
   ) => Emit.event(ev.meta.eventId, ev.payload.t, ev.payload.payload);
 }
 

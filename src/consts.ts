@@ -1,6 +1,4 @@
 import { ActyxEvent } from "@actyx/sdk";
-import { XEventKey } from "./ax-mock/index.js";
-import { Ord } from "./utils.js";
 
 export type CTypeProto = { ev: string; role: string };
 export type MakeCType<CType extends CTypeProto> = CType;
@@ -8,14 +6,14 @@ export type MakeCType<CType extends CTypeProto> = CType;
 /**
  * ActyxEvents that is Workflow-conformant will take this form
  */
-export type WFEventOrDirective<CType extends CTypeProto> =
-  | WFEvent<CType>
-  | WFDirective;
+export type WFBusinessOrMarker<CType extends CTypeProto> =
+  | WFBusiness<CType>
+  | WFMarker;
 
 /**
  * Events emitted by the actors explaining the interactions and state of the workflow
  */
-export type WFEvent<CType extends CTypeProto> = {
+export type WFBusiness<CType extends CTypeProto> = {
   t: CType["ev"];
   payload: Record<string, unknown>;
 };
@@ -24,10 +22,8 @@ export type WFEvent<CType extends CTypeProto> = {
  * Events emitted by the intermediate machine to take note of the meta-state of the actor.
  * e.g. in a multiverse, in which universe the actor is in
  */
-export type WFDirective =
-  | WFDirectiveCompensationNeeded
-  | WFDirectiveCompensationDone;
-export type WFDirectiveCompensationNeeded = {
+export type WFMarker = WFMarkerCompensationNeeded | WFMarkerCompensationDone;
+export type WFMarkerCompensationNeeded = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CompensationNeeded>;
   readonly actor: string;
   /**
@@ -45,7 +41,7 @@ export type WFDirectiveCompensationNeeded = {
    */
   readonly codeIndex: number;
 };
-export type WFDirectiveCompensationDone = {
+export type WFMarkerCompensationDone = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CompensationDone>;
   readonly actor: string;
   /**
@@ -58,13 +54,15 @@ export type WFDirectiveCompensationDone = {
   readonly toTimelineOf: string;
 };
 
-export type ActyxWFEvent<CType extends CTypeProto> = ActyxEvent<WFEvent<CType>>;
-export type ActyxWFDirective = ActyxEvent<WFDirective>;
-export type ActyxWFEventAndDirective<CType extends CTypeProto> = ActyxEvent<
-  WFEventOrDirective<CType>
+export type ActyxWFBusiness<CType extends CTypeProto> = ActyxEvent<
+  WFBusiness<CType>
+>;
+export type ActyxWFMarker = ActyxEvent<WFMarker>;
+export type ActyxWFBusinessOrMarker<CType extends CTypeProto> = ActyxEvent<
+  WFBusinessOrMarker<CType>
 >;
 
-export type Chain<CType extends CTypeProto> = ActyxWFEvent<CType>[];
+export type Chain<CType extends CTypeProto> = ActyxWFBusiness<CType>[];
 
 /**
  * Reads as "A diverge from B at"
@@ -87,22 +85,22 @@ export const divertedFromOtherChainAt = <CType extends CTypeProto>(
 };
 
 export const isWFEvent = <CType extends CTypeProto>(
-  x: WFEventOrDirective<CType>
-): x is WFEvent<CType> => "t" in x;
+  x: WFBusinessOrMarker<CType>
+): x is WFBusiness<CType> => "t" in x;
 
 export const isWFDirective = <CType extends CTypeProto>(
-  x: WFEventOrDirective<CType>
-): x is WFDirective => "ax" in x;
+  x: WFBusinessOrMarker<CType>
+): x is WFMarker => "ax" in x;
 
 export const extractWFEvents = <CType extends CTypeProto>(
-  evs: ActyxWFEventAndDirective<CType>[]
-): ActyxWFEvent<CType>[] =>
-  evs.filter((ev): ev is ActyxWFEvent<CType> => isWFEvent(ev.payload));
+  evs: ActyxWFBusinessOrMarker<CType>[]
+): ActyxWFBusiness<CType>[] =>
+  evs.filter((ev): ev is ActyxWFBusiness<CType> => isWFEvent(ev.payload));
 
 export const extractWFDirective = <CType extends CTypeProto>(
-  evs: ActyxWFEventAndDirective<CType>[]
-): ActyxWFDirective[] =>
-  evs.filter((ev): ev is ActyxWFDirective => isWFDirective(ev.payload));
+  evs: ActyxWFBusinessOrMarker<CType>[]
+): ActyxWFMarker[] =>
+  evs.filter((ev): ev is ActyxWFMarker => isWFDirective(ev.payload));
 
 export namespace InternalTag {
   /**

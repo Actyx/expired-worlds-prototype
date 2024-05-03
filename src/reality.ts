@@ -1,42 +1,42 @@
 import { XEventKey } from "./ax-mock/index.js";
-import { ActyxWFEvent, CTypeProto, InternalTag } from "./consts.js";
+import { ActyxWFBusiness, CTypeProto, InternalTag } from "./consts.js";
 import { ExcludeArrayMember, Ord } from "./utils.js";
 
 type EventId = string;
-type EventInfo<CType extends CTypeProto> = ActyxWFEvent<CType>;
+type EventInfo<CType extends CTypeProto> = ActyxWFBusiness<CType>;
 
 export namespace MultiverseTree {
   export const UnregisteredEvent: unique symbol = Symbol("UnregisteredEvent");
   export type UnregisteredEvent = typeof UnregisteredEvent;
   export type Type<CType extends CTypeProto> = {
-    register: (e: ActyxWFEvent<CType>) => void;
+    register: (e: ActyxWFBusiness<CType>) => void;
     getPredecessor: (
-      e: ActyxWFEvent<CType>
-    ) => ActyxWFEvent<CType> | UnregisteredEvent | null;
-    has: (e: ActyxWFEvent<CType>) => boolean;
-    getNext: (e: ActyxWFEvent<CType>) => ActyxWFEvent<CType>[];
-    getById: (id: string) => null | ActyxWFEvent<CType>;
-    isHead: (e: ActyxWFEvent<CType>) => boolean;
-    isRoot: (e: ActyxWFEvent<CType>) => boolean;
-    isCanon: (e: ActyxWFEvent<CType>) => boolean;
+      e: ActyxWFBusiness<CType>
+    ) => ActyxWFBusiness<CType> | UnregisteredEvent | null;
+    has: (e: ActyxWFBusiness<CType>) => boolean;
+    getNext: (e: ActyxWFBusiness<CType>) => ActyxWFBusiness<CType>[];
+    getById: (id: string) => null | ActyxWFBusiness<CType>;
+    isHead: (e: ActyxWFBusiness<CType>) => boolean;
+    isRoot: (e: ActyxWFBusiness<CType>) => boolean;
+    isCanon: (e: ActyxWFBusiness<CType>) => boolean;
     getCanonChainSpanning: (
-      e: ActyxWFEvent<CType>
-    ) => null | ActyxWFEvent<CType>[];
+      e: ActyxWFBusiness<CType>
+    ) => null | ActyxWFBusiness<CType>[];
     getCanonChainForwards: (
-      e: ActyxWFEvent<CType>
-    ) => null | ActyxWFEvent<CType>[];
+      e: ActyxWFBusiness<CType>
+    ) => null | ActyxWFBusiness<CType>[];
     getCompensationChainSpanning: (
-      e: ActyxWFEvent<CType>
-    ) => null | ActyxWFEvent<CType>[];
+      e: ActyxWFBusiness<CType>
+    ) => null | ActyxWFBusiness<CType>[];
     getCompensationChainForwards: (
-      e: ActyxWFEvent<CType>
-    ) => null | ActyxWFEvent<CType>[];
+      e: ActyxWFBusiness<CType>
+    ) => null | ActyxWFBusiness<CType>[];
     /**
      * Get a chain of events, both backward and forward.
      * On the forward case, it goes to the future until at the point where event branches
      */
-    getChainBackwards: (e: ActyxWFEvent<CType>) => null | ActyxWFEvent<CType>[];
-    getCanonChain: () => null | ActyxWFEvent<CType>[];
+    getChainBackwards: (e: ActyxWFBusiness<CType>) => null | ActyxWFBusiness<CType>[];
+    getCanonChain: () => null | ActyxWFBusiness<CType>[];
   };
 
   type RootInfo = { canonHead: EventId; canonChain: EventId[] };

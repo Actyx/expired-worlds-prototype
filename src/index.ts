@@ -15,21 +15,21 @@ export { Reality };
 import { Node } from "./ax-mock/index.js";
 import {
   divertedFromOtherChainAt as divertedFromOtherChainAt,
-  ActyxWFEvent,
+  ActyxWFBusiness,
   CTypeProto,
   InternalTag,
-  WFEventOrDirective,
+  WFBusinessOrMarker,
   extractWFDirective,
   extractWFEvents,
   Chain,
-  WFDirective,
-  WFDirectiveCompensationNeeded,
-  WFDirectiveCompensationDone,
+  WFMarker,
+  WFMarkerCompensationNeeded,
+  WFMarkerCompensationDone,
 } from "./consts.js";
 
 export type Params<CType extends CTypeProto> = {
   actyx: Parameters<(typeof Actyx)["of"]>;
-  tags: Tags<WFEventOrDirective<CType>>;
+  tags: Tags<WFBusinessOrMarker<CType>>;
   self: CType["role"];
   id: string;
 };
@@ -37,21 +37,24 @@ export type Params<CType extends CTypeProto> = {
 type OnEventsOrTimetravel<E> = (data: EventsOrTimetravel<E>) => Promise<void>;
 type DataModes<CType extends CTypeProto> = {
   wfMachine: WFMachine<CType>;
-  digestedChain: ActyxWFEvent<CType>[];
+  digestedChain: ActyxWFBusiness<CType>[];
 } & (
   | { t: "normal" }
   | { t: "building-compensations" }
   | {
       t: "compensating";
       canonWFMachine: WFMachine<CType>;
-      canonDigestedChain: ActyxWFEvent<CType>[];
-      compensationInfo: WFDirectiveCompensationNeeded;
+      canonDigestedChain: ActyxWFBusiness<CType>[];
+      compensationInfo: WFMarkerCompensationNeeded;
     }
 );
+
+// TODO:
+// - involve participation into compensation calculation (this depends on whether we want to block everyone involved in the task into until a particular compensation is done by a subset of participant)
 export const run = async <CType extends CTypeProto>(
   params: Params<CType>,
   // const node = Node.make<WFEventAndDirective<CType>>({ id: params.id });
-  node: Node.Type<WFEventOrDirective<CType>>,
+  node: Node.Type<WFBusinessOrMarker<CType>>,
   workflow: WFWorkflow<CType>
 ) => {
   // COMPENSATE {
@@ -96,7 +99,7 @@ export const run = async <CType extends CTypeProto>(
           const last = machineCombinator.last();
           if (last) {
             tags = tags.and(
-              Tag<WFEventOrDirective<CType>>(
+              Tag<WFBusinessOrMarker<CType>>(
                 InternalTag.Predecessor.write(last.meta.eventId)
               )
             );
@@ -105,7 +108,7 @@ export const run = async <CType extends CTypeProto>(
           const compensationInfo = machineCombinator.compensation();
           if (compensationInfo) {
             tags = tags.and(
-              Tag<WFEventOrDirective<CType>>(
+              Tag<WFBusinessOrMarker<CType>>(
                 InternalTag.CompensationEvent.write(
                   compensationInfo.fromTimelineOf
                 )
@@ -167,7 +170,7 @@ const perpetualSubscription = <E>(
 export namespace MachineCombinator {
   export const make = <CType extends CTypeProto>(
     params: Params<CType>,
-    node: Node.Type<WFEventOrDirective<CType>>,
+    node: Node.Type<WFBusinessOrMarker<CType>>,
     workflow: WFWorkflow<CType>
   ) => {
     const nextOfMostCanonChain = (chain: Chain<CType>) => {
@@ -255,7 +258,6 @@ export namespace MachineCombinator {
     };
 
     const recalc = () => {
-      // TODO: calculate compensation here
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
       // TODO: think about compensation events tag
@@ -264,6 +266,7 @@ export namespace MachineCombinator {
       const canonChain = multiverseTree.getCanonChain() || [];
       canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
 
+      // TODO: examine all compensations. Not just one
       const rememberedCompensation = compensationMap
         .getByActor(params.id)
         .sort((a, b) => b.directive.codeIndex - a.directive.codeIndex)
@@ -288,7 +291,7 @@ export namespace MachineCombinator {
           // If the WFMachine indicates that the compensation is done when the compensationMap remembers differently
           // This is an indication that the compensation is done but unmarked
           // Mark the compensation as done
-          const directive: WFDirectiveCompensationDone = {
+          const directive: WFMarkerCompensationDone = {
             ax: InternalTag.CompensationDone.write(""),
             actor: params.id,
             fromTimelineOf: rememberedCompensation.fromTimelineOf,
@@ -325,7 +328,7 @@ export namespace MachineCombinator {
           digestedChain: data.digestedChain,
         };
       },
-      pipe: (e: EventsMsg<WFEventOrDirective<CType>>) => {
+      pipe: (e: EventsMsg<WFBusinessOrMarker<CType>>) => {
         extractWFEvents(e.events).map((ev) => multiverseTree.register(ev));
         extractWFDirective(e.events).map((ev) => {
           compensationMap.register(ev.payload);
@@ -348,7 +351,7 @@ export namespace MachineCombinator {
             // layer: ax
             compensations.forEach(
               ({ fromTimelineOf, toTimelineOf, codeIndex }) => {
-                const directive: WFDirective = {
+                const directive: WFMarker = {
                   ax: InternalTag.CompensationNeeded.write(""),
                   actor: params.id,
                   fromTimelineOf,
@@ -418,14 +421,14 @@ export namespace CompensationMap {
     const data = {
       positive: new Map<
         Actor,
-        Map<From, Map<To, WFDirectiveCompensationNeeded>>
+        Map<From, Map<To, WFMarkerCompensationNeeded>>
       >(),
       negative: new Map<Actor, Map<From, Map<To, boolean>>>(),
     };
 
     const access = <T>(
       entry: Map<Actor, Map<From, Map<To, T>>>,
-      { actor, fromTimelineOf: from }: WFDirective
+      { actor, fromTimelineOf: from }: WFMarker
     ) => {
       const fromMap: Exclude<
         ReturnType<(typeof entry)["get"]>,
@@ -443,14 +446,14 @@ export namespace CompensationMap {
     };
 
     return {
-      register: (compensation: WFDirective) => {
+      register: (compensation: WFMarker) => {
         // TODO: runtime validation
         if (InternalTag.CompensationNeeded.is(compensation.ax)) {
-          const needed = compensation as WFDirectiveCompensationNeeded;
+          const needed = compensation as WFMarkerCompensationNeeded;
           const set = access(data.positive, compensation);
           set.set(needed.toTimelineOf, needed);
         } else if (InternalTag.CompensationDone.is(compensation.ax)) {
-          const done = compensation as WFDirectiveCompensationDone;
+          const done = compensation as WFMarkerCompensationDone;
           const set = access(data.negative, compensation);
           set.delete(done.toTimelineOf);
         }
@@ -459,7 +462,7 @@ export namespace CompensationMap {
         const ret = [] as {
           fromTimelineOf: string;
           toTimelineOf: string;
-          directive: WFDirectiveCompensationNeeded;
+          directive: WFMarkerCompensationNeeded;
         }[];
         const fromMap = data.positive.get(actor);
         if (!fromMap) return [];
