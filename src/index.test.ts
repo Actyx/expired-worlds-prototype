@@ -1,15 +1,208 @@
-// import { describe, expect, it } from "@jest/globals";
-// import { Reality } from "./index.js";
-// import { v4 as uuidv4 } from "uuid";
+import { describe, expect, it } from "@jest/globals";
+import { Reality, run } from "./index.js";
+import { v4 as uuidv4 } from "uuid";
+import { Node } from "./ax-mock/index.js";
+import { MakeCType, WFBusinessOrMarker } from "./consts.js";
+import { Code, Exact, Otherwise, WFWorkflow } from "./wfmachine.js";
+import { Enum } from "./utils.js";
+import { Tags } from "@actyx/sdk";
 
-// type EventType = { id: string };
-// const event1: EventType = { id: uuidv4() };
-// const event2: EventType = { id: uuidv4() };
-// const event3: EventType = { id: uuidv4() };
-// const event4: EventType = { id: uuidv4() };
-// const event5: EventType = { id: uuidv4() };
+const Ev = Enum([
+  "request",
+  "bid",
+  "cancelled",
+  "assign",
+  "accept",
+  "notAccepted",
+  "atSrc",
+  "reqEnter",
+  "doEnter",
+  "deny",
+  "inside",
+  "withdrawn",
+  "reqLeave",
+  "doLeave",
+  "success",
+  "withdraw",
+  "doLeave",
+  "withdrawn",
+  "loaded",
+  "notPickedUp",
+  "atDst",
+  "notDelivered",
+  "unloaded",
+  "reqStorage",
+  "offerStorage",
+  "acceptStorage",
+  "assistanceNeeded",
+  "atWarehouse",
+  "stashed",
+  "assistanceNeeded",
+  "logisticFailed",
+  "done",
+] as const);
+type Ev = Enum<typeof Ev>;
 
-// const identify = (e: EventType): string => e.id;
+const Role = Enum(["manager", "transporter", "storage"] as const);
+type Role = Enum<typeof Role>;
+
+type TheType = MakeCType<{
+  ev: Ev;
+  role: Role;
+}>;
+
+const workflowTag = Tags<WFBusinessOrMarker<TheType>>("workflowtag");
+const code = Code.make<TheType>();
+const { role, unique } = code.actor;
+
+const docking: WFWorkflow<TheType> = {
+  uniqueParams: ["A", "B"],
+  code: [
+    code.event(unique("A"), Ev.reqEnter),
+    ...code.compensate(
+      [
+        ...code.choice([
+          code.event(unique("B"), Ev.doEnter),
+          code.event(unique("B"), Ev.deny, { control: "return" }),
+        ]),
+        code.event(unique("A"), Ev.inside),
+      ],
+      [code.event(unique("A"), Ev.withdrawn)]
+    ),
+    ...code.compensate(
+      [
+        code.event(unique("A"), Ev.reqLeave),
+        code.event(unique("B"), Ev.doLeave),
+        code.event(unique("A"), Ev.success, { control: "return" }),
+      ],
+      [
+        code.event(unique("A"), Ev.withdraw),
+        code.event(unique("B"), Ev.doLeave),
+        code.event(unique("A"), Ev.withdrawn),
+      ]
+    ),
+  ],
+};
+
+const logistic: WFWorkflow<TheType> = {
+  uniqueParams: [],
+  code: [
+    code.event(role(Role.manager), Ev.request, {
+      bindings: [
+        code.bind("src", "from"),
+        code.bind("dst", "to"),
+        code.bindSelf("m"),
+      ],
+    }),
+    ...code.retry([
+      ...code.timeout(
+        5 * 60 * 1000,
+        [
+          ...code.parallel({ min: 1 }, [
+            code.event(role(Role.transporter), Ev.bid),
+          ] as const),
+        ] as const,
+        code.event(unique("m"), Ev.cancelled, {
+          control: Code.Control.return,
+        })
+      ),
+      ...code.timeout(
+        10 * 1000,
+        [
+          code.event(role(Role.transporter), Ev.assign, {
+            bindings: [code.bind("t", "robotID")],
+          }),
+          code.event(unique("t"), Ev.accept),
+        ] as const,
+        code.event(unique("m"), Ev.notAccepted, {
+          control: Code.Control.fail,
+        })
+      ),
+      ...code.timeout(
+        30 * 60 * 1000,
+        [
+          code.event(unique("t"), Ev.atDst),
+          ...code.match(docking, { A: "t", B: "src" }, [
+            code.matchCase([Exact, Ev.success], [
+              code.event(unique("t"), Ev.loaded),
+            ] as const),
+            code.matchCase([Otherwise], [
+              code.event(unique("t"), Ev.notPickedUp, {
+                control: "fail",
+              }),
+            ] as const),
+          ]),
+          ...code.compensate(
+            [
+              code.event(unique("t"), Ev.atDst),
+              ...code.match(docking, { A: "t", B: "dst" }, [
+                code.matchCase(
+                  [Exact, Ev.success],
+                  [code.event(unique("t"), Ev.unloaded)]
+                ),
+                code.matchCase(
+                  [Otherwise],
+                  [
+                    code.event(unique("t"), Ev.notDelivered, {
+                      control: "fail",
+                    }),
+                  ]
+                ),
+              ]),
+            ],
+            [
+              code.event(unique("t"), Ev.reqStorage),
+              ...code.timeout(
+                10 * 1000,
+                [
+                  code.event(role(Role.storage), Ev.offerStorage, {
+                    bindings: [code.bindSelf("s")],
+                  }),
+                ],
+                code.event(unique("t"), Ev.assistanceNeeded, {
+                  control: "return",
+                })
+              ),
+              code.event(unique("t"), Ev.atWarehouse),
+              ...code.match(docking, { A: "t", B: "s" }, [
+                code.matchCase(
+                  [Exact, Ev.success],
+                  [code.event(unique("t"), Ev.stashed)]
+                ),
+                code.matchCase(
+                  [Otherwise],
+                  [
+                    code.event(unique("t"), Ev.assistanceNeeded, {
+                      control: "return",
+                    }),
+                  ]
+                ),
+              ]),
+            ]
+          ),
+        ] as const,
+        code.event(unique("m"), Ev.logisticFailed, {
+          control: Code.Control.return,
+        })
+      ),
+    ] as const),
+    code.event(unique("m"), Ev.done),
+  ] as const,
+};
+
+describe("x", () => {
+  it("x", () => {
+    const storagenode = Node.make<WFBusinessOrMarker<TheType>>({
+      id: "player-1",
+    });
+
+    run(
+      { self: { role: Role.storage, id: "player-1" }, tags: workflowTag },
+      storagenode,
+      logistic
+    );
+  });
+});
 
 // describe("witness", () => {
 //   it("should track if reality is canon", async () => {

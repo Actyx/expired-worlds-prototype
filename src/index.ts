@@ -28,10 +28,12 @@ import {
 } from "./consts.js";
 
 export type Params<CType extends CTypeProto> = {
-  actyx: Parameters<(typeof Actyx)["of"]>;
+  // actyx: Parameters<(typeof Actyx)["of"]>;
   tags: Tags<WFBusinessOrMarker<CType>>;
-  self: CType["role"];
-  id: string;
+  self: {
+    role: CType["role"];
+    id: string;
+  };
 };
 
 type OnEventsOrTimetravel<E> = (data: EventsOrTimetravel<E>) => Promise<void>;
@@ -90,7 +92,7 @@ export const run = async <CType extends CTypeProto>(
 
     const commands = data.wfMachine
       .availableCommands()
-      .filter((x) => x.role === params.self)
+      .filter((x) => x.role === params.self.role)
       .map((x) => ({
         info: x,
         publish: (payload: Record<string, unknown>) => {
@@ -268,7 +270,7 @@ export namespace MachineCombinator {
 
       // TODO: examine all compensations. Not just one
       const rememberedCompensation = compensationMap
-        .getByActor(params.id)
+        .getByActor(params.self.id)
         .sort((a, b) => b.directive.codeIndex - a.directive.codeIndex)
         .at(0);
 
@@ -293,7 +295,7 @@ export namespace MachineCombinator {
           // Mark the compensation as done
           const directive: WFMarkerCompensationDone = {
             ax: InternalTag.CompensationDone.write(""),
-            actor: params.id,
+            actor: params.self.id,
             fromTimelineOf: rememberedCompensation.fromTimelineOf,
             toTimelineOf: rememberedCompensation.toTimelineOf,
           };
@@ -353,7 +355,7 @@ export namespace MachineCombinator {
               ({ fromTimelineOf, toTimelineOf, codeIndex }) => {
                 const directive: WFMarker = {
                   ax: InternalTag.CompensationNeeded.write(""),
-                  actor: params.id,
+                  actor: params.self.id,
                   fromTimelineOf,
                   toTimelineOf,
                   codeIndex,

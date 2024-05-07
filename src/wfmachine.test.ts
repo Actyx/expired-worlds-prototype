@@ -66,7 +66,7 @@ describe("machine", () => {
       const code = Code.make<TheType>();
       const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
-          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
+          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
         }),
       ]);
 
@@ -92,11 +92,11 @@ describe("machine", () => {
 
       const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
-          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
+          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
         }),
         ...code.retry([
           code.event("a", Ev.reqStorage, {
-            bindings: [code.binding("somevar", "somefield")],
+            bindings: [code.bind("somevar", "somefield")],
           }),
           ...code.timeout(
             TIMEOUT_DURATION,
@@ -156,11 +156,11 @@ describe("machine", () => {
 
       const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
-          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
+          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
         }),
         ...code.retry([
           code.event("a", Ev.reqStorage, {
-            bindings: [code.binding("somevar", "somefield")],
+            bindings: [code.bind("somevar", "somefield")],
           }),
           ...code.timeout(
             TIMEOUT_DURATION,
@@ -199,11 +199,11 @@ describe("machine", () => {
 
       const machine = WFMachine<TheType>([
         code.event("a", Ev.request, {
-          bindings: [code.binding("src", "from"), code.binding("dst", "to")],
+          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
         }),
         ...code.retry([
           code.event("a", Ev.reqStorage, {
-            bindings: [code.binding("somevar", "somefield")],
+            bindings: [code.bind("somevar", "somefield")],
           }),
           ...code.timeout(
             TIMEOUT_DURATION,

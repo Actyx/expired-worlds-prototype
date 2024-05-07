@@ -66,3 +66,69 @@ export namespace Ord {
     }
   };
 }
+
+export namespace WrapType {
+  type Proto = {
+    t: string;
+    val: any;
+  };
+  type Inner<P extends Proto> = [P["t"], P["val"]];
+
+  export type Type<P extends Proto> = Readonly<{
+    t: P["t"];
+    set: (t: P["val"]) => void;
+    get: () => P["val"];
+  }>;
+
+  type BlueprintIntermediate<P extends Proto> = {
+    refine: <Val extends P["val"]>() => BlueprintIntermediate<{
+      t: P["t"];
+      val: Val;
+    }>;
+    build: () => Blueprint<P>;
+  };
+
+  export namespace Utils {
+    export type RefineProto<P extends Proto, Val extends P["val"]> = {
+      t: P["t"];
+      val: Val;
+    };
+
+    export type Refine<
+      B extends BlueprintIntermediate<any>,
+      Val extends ProtoOf<B>["val"]
+    > = B extends BlueprintIntermediate<infer P>
+      ? BlueprintIntermediate<RefineProto<P, Val>>
+      : never;
+
+    export type ProtoOf<B extends Blueprint<any> | BlueprintIntermediate<any>> =
+      B extends Blueprint<infer P>
+        ? P
+        : B extends BlueprintIntermediate<infer P>
+        ? P
+        : Proto;
+  }
+
+  export type Blueprint<P extends Proto> = (val: Proto["val"]) => Type<P>;
+
+  export type TypeOf<B extends Blueprint<any> | BlueprintIntermediate<any>> =
+    Type<Utils.ProtoOf<B>>;
+
+  export const blueprint = <T extends Proto["t"]>(t: T) => {
+    const blueprintInner = <P extends Proto>(): BlueprintIntermediate<P> => {
+      const refine: BlueprintIntermediate<P>["refine"] = blueprintInner;
+      const build: BlueprintIntermediate<P>["build"] = () => (val) => {
+        const inner: Inner<P> = [t, val];
+        return {
+          t,
+          set: (val) => (inner[1] = val),
+          get: () => inner[1],
+        };
+      };
+
+      return { build, refine };
+    };
+
+    return blueprintInner<{ t: T; val: any }>();
+  };
+}
