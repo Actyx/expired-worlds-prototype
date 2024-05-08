@@ -1,8 +1,8 @@
 import { describe, expect, it } from "@jest/globals";
 import { Reality, run } from "./index.js";
 import { v4 as uuidv4 } from "uuid";
-import { Node } from "./ax-mock/index.js";
-import { MakeCType, WFBusinessOrMarker } from "./consts.js";
+import { Network, Node } from "./ax-mock/index.js";
+import { CTypeProto, MakeCType, WFBusinessOrMarker } from "./consts.js";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfmachine.js";
 import { Enum } from "./utils.js";
 import { Tags } from "@actyx/sdk";
@@ -91,7 +91,7 @@ const logistic: WFWorkflow<TheType> = {
       bindings: [
         code.bind("src", "from"),
         code.bind("dst", "to"),
-        code.bindSelf("m"),
+        code.bind("m", "manager"),
       ],
     }),
     ...code.retry([
@@ -99,7 +99,9 @@ const logistic: WFWorkflow<TheType> = {
         5 * 60 * 1000,
         [
           ...code.parallel({ min: 1 }, [
-            code.event(role(Role.transporter), Ev.bid),
+            code.event(role(Role.transporter), Ev.bid, {
+              bindings: [code.bind("bidder", "bidder")],
+            }),
           ] as const),
         ] as const,
         code.event(unique("m"), Ev.cancelled, {
@@ -156,7 +158,7 @@ const logistic: WFWorkflow<TheType> = {
                 10 * 1000,
                 [
                   code.event(role(Role.storage), Ev.offerStorage, {
-                    bindings: [code.bindSelf("s")],
+                    bindings: [code.bind("s", "storage")],
                   }),
                 ],
                 code.event(unique("t"), Ev.assistanceNeeded, {
@@ -190,17 +192,62 @@ const logistic: WFWorkflow<TheType> = {
   ] as const,
 };
 
+/**
+ * promise that waits for other timers to resolve
+ */
+const awhile = () => new Promise(setImmediate);
+
 describe("x", () => {
-  it("x", () => {
-    const storagenode = Node.make<WFBusinessOrMarker<TheType>>({
-      id: "player-1",
+  it("x", async () => {
+    const makenetwork = Network.make<WFBusinessOrMarker<TheType>>;
+    const makenode = Node.make<WFBusinessOrMarker<TheType>>;
+    // setup network
+    const network = makenetwork();
+
+    const agents = [
+      { id: "storage-src", role: Role.storage },
+      { id: "storage-dst", role: Role.storage },
+      { id: "manager", role: Role.manager },
+      { id: "t1", role: Role.transporter },
+      { id: "t2", role: Role.transporter },
+      { id: "t3", role: Role.transporter },
+    ].map((identity) => {
+      const { id } = identity;
+      const node = makenode({ id });
+      const machine = run(
+        { self: identity, tags: workflowTag },
+        node,
+        logistic
+      );
+      network.join(node);
+      return { identity, node, machine };
     });
 
-    run(
-      { self: { role: Role.storage, id: "player-1" }, tags: workflowTag },
-      storagenode,
-      logistic
-    );
+    await awhile();
+
+    const findCommand = (agent: (typeof agents)[0], name: string) => {
+      const found = agent.machine.commands().find((x) => x.info.name);
+      if (!found) throw new Error("command not found");
+      return found;
+    };
+
+    const [src, dst, manager, t1, t2, t3] = agents;
+
+    findCommand(manager, Ev.request).publish({
+      src: src.identity.id,
+      dst: dst.identity.id,
+      m: manager.identity.id,
+    });
+
+    findCommand(t1, Ev.bid).publish({ bidder: t1.identity.id });
+    findCommand(t2, Ev.bid).publish({ bidder: t2.identity.id });
+    findCommand(t3, Ev.bid).publish({ bidder: t3.identity.id });
+
+    console.log(manager.machine.machine().state());
+    console.log(t1.machine.machine().state());
+    console.log(manager.machine.machine().availableCommands());
+
+    // findCommand(manager, Ev.assign).publish({ t: t1.identity.id });
   });
 });
 

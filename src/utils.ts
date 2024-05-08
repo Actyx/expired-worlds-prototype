@@ -72,9 +72,10 @@ export namespace WrapType {
     t: string;
     val: any;
   };
-  type Inner<P extends Proto> = [P["t"], P["val"]];
+  export type Inner<P extends Proto> = [P["t"], P["val"]];
 
   export type Type<P extends Proto> = Readonly<{
+    value: Inner<P>;
     t: P["t"];
     set: (t: P["val"]) => void;
     get: () => P["val"];
@@ -118,12 +119,13 @@ export namespace WrapType {
     const blueprintInner = <P extends Proto>(): BlueprintIntermediate<P> => {
       const refine: BlueprintIntermediate<P>["refine"] = blueprintInner;
       const build: BlueprintIntermediate<P>["build"] = () => (val) => {
-        const inner: Inner<P> = [t, val];
-        return {
+        const self: Type<P> = {
+          value: [t, val],
           t,
-          set: (val) => (inner[1] = val),
-          get: () => inner[1],
+          set: (val) => (self.value[1] = val),
+          get: () => self.value[1],
         };
+        return self;
       };
 
       return { build, refine };

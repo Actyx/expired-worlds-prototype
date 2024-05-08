@@ -23,9 +23,6 @@ type CAnti =
   | CAntiMatchCase
   | CAntiChoice;
 
-export const BindingSelf: unique symbol = Symbol("Self");
-export type BindingSelf = typeof BindingSelf;
-
 export const Unique = WrapType.blueprint("Unique").build();
 export type Unique = WrapType.TypeOf<typeof Unique>;
 export const Role = WrapType.blueprint("Role");
@@ -35,7 +32,7 @@ export type Role<Ctype extends CTypeProto> = WrapType.TypeOf<
 
 type Actor<CType extends CTypeProto> = Unique | Role<CType>;
 
-type CEventBinding = { var: string; index: string | BindingSelf };
+type CEventBinding = { var: string; index: string };
 type CEvent<CType extends CTypeProto> = {
   t: "event";
   name: CType["ev"];
@@ -110,7 +107,6 @@ export namespace Code {
 
   export type CodeMaker<CType extends CTypeProto> = {
     actor: ReturnType<typeof actor<CType>>;
-    bindSelf: typeof bindSelf;
     bind: typeof binding;
     event: typeof event<CType>;
     retry: typeof retry<CType>;
@@ -135,18 +131,12 @@ export namespace Code {
     parallel,
     retry,
     timeout,
-    bindSelf,
     Control,
   });
 
   const binding = (name: string, index: string): CEventBinding => ({
     var: name,
     index,
-  });
-
-  const bindSelf = (name: string): CEventBinding => ({
-    var: name,
-    index: BindingSelf,
   });
 
   const actor = <CType extends CTypeProto>() => {
@@ -382,7 +372,7 @@ export type WFMachine<CType extends CTypeProto> = {
     };
     dueFor: number;
   }[];
-  availableCompensateableCode: () => {
+  activeCompensationCode: () => {
     codeIndex: number;
     firstEventId: string;
   }[];
@@ -452,10 +442,8 @@ export const validateBindings = <CType extends CTypeProto>(
 };
 
 export const WFMachine = <CType extends CTypeProto>(
-  wfWorkflow: WFWorkflow<CType>,
-  self: {
-    id: string;
-  }
+  self: { id: string },
+  wfWorkflow: WFWorkflow<CType>
 ): WFMachine<CType> => {
   const workflow = wfWorkflow.code;
   validateBindings(wfWorkflow);
@@ -470,7 +458,7 @@ export const WFMachine = <CType extends CTypeProto>(
     /**
      * block between compensate and compensate-end
      */
-    activeCompensateable: new Set() as Set<number>,
+    activeCompensation: new Set() as Set<number>,
 
     resultCalcIndex: 0,
     context: {} as Record<string, unknown>,
@@ -599,8 +587,8 @@ export const WFMachine = <CType extends CTypeProto>(
   const availableLateTimeouts = () =>
     availableTimeouts().filter(({ lateness }) => lateness > 0);
 
-  const availableCompensateableCode = () =>
-    Array.from(data.activeCompensateable)
+  const activeCompensationCode = () =>
+    Array.from(data.activeCompensation)
       .map((codeIndex) => {
         const ccompensate = workflow.at(codeIndex);
         if (ccompensate?.t !== "compensate") {
@@ -638,7 +626,7 @@ export const WFMachine = <CType extends CTypeProto>(
    * TODO: return next-events of compensate-with as compensations
    */
   const availableCompensateable = () =>
-    Array.from(data.activeCompensateable)
+    Array.from(data.activeCompensation)
       .map((index) => {
         const ccompensate = workflow.at(index);
         if (ccompensate?.t !== "compensate") {
@@ -648,6 +636,7 @@ export const WFMachine = <CType extends CTypeProto>(
         }
 
         const compensationIndex = index;
+        const withIndex = ccompensate.withIndexOffset;
         const antiIndex = index + ccompensate.antiIndexOffset;
         const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
@@ -659,11 +648,16 @@ export const WFMachine = <CType extends CTypeProto>(
 
         return {
           compensationIndex,
-          ctimeout: ccompensate,
+          code: ccompensate,
           firstCompensation,
           firstCompensationIndex,
           antiTimeoutIndex: antiIndex,
+          withIndex,
         };
+      })
+      .filter((x) => {
+        // only compensateable that's not
+        return data.executionIndex < x.withIndex;
       })
       .sort((a, b) => {
         // in case of nested compensations: sort by last/innermost timeout
@@ -728,9 +722,10 @@ export const WFMachine = <CType extends CTypeProto>(
         actor: code.actor,
         control,
         reason:
-          overrideReason || compensateFastQuery.isInsideWithBlock(index)
+          overrideReason ||
+          (compensateFastQuery.isInsideWithBlock(index)
             ? "compensation"
-            : null,
+            : null),
       });
     }
 
@@ -775,6 +770,7 @@ export const WFMachine = <CType extends CTypeProto>(
       );
     });
 
+    // TODO: review this code
     availableCompensateable().forEach((compensation) => {
       extractAvailableCommandFromSingularCode(
         compensation.compensationIndex,
@@ -849,11 +845,7 @@ export const WFMachine = <CType extends CTypeProto>(
       if (code?.t === "event" && stackItem?.t === "event") {
         code.bindings?.forEach((x) => {
           const index = x.index;
-          if (index === BindingSelf) {
-            data.context[x.var] = self.id;
-          } else {
-            data.context[x.var] = stackItem.payload[index];
-          }
+          data.context[x.var] = stackItem.payload[index];
         });
         data.returnValue = [One, code.name];
 
@@ -946,7 +938,7 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "compensate") {
-      data.activeCompensateable.add(evalContext.index);
+      data.activeCompensation.add(evalContext.index);
       evalContext.index += 1;
       return true;
     }
@@ -954,14 +946,14 @@ export const WFMachine = <CType extends CTypeProto>(
     if (code.t === "compensate-end") {
       const compensateIndex = evalContext.index + code.baseIndexOffset;
       const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
-      data.activeCompensateable.delete(compensateIndex);
+      data.activeCompensation.delete(compensateIndex);
       evalContext.index = rightAfterAntiIndex;
       return true;
     }
 
     if (code.t === "anti-compensate") {
       const compensateIndex = evalContext.index + code.baseIndexOffset;
-      data.activeCompensateable.delete(compensateIndex);
+      data.activeCompensation.delete(compensateIndex);
       // NOTE: do nothing else now
       // we might need to put a marker in the "compensate"'s stack counterpart
       evalContext.index += 1;
@@ -980,7 +972,7 @@ export const WFMachine = <CType extends CTypeProto>(
     if (code.t === "match") {
       const atStack = getSMatchAtIndex(evalContext.index) || {
         t: "match",
-        inner: WFMachine<CType>(code.subworkflow, self),
+        inner: WFMachine<CType>(self, code.subworkflow),
       };
       data.stack[evalContext.index] = atStack;
       if (!atStack.inner.returned()) return false;
@@ -1049,7 +1041,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     if (firstMatching) {
       const firstMatchingIndex = firstMatching.firstCompensationIndex;
-      data.activeCompensateable.delete(firstMatching.compensationIndex);
+      data.activeCompensation.delete(firstMatching.compensationIndex);
       evalContext.index = firstMatchingIndex;
       data.executionIndex = firstMatchingIndex;
       return feedEvent(evalContext, firstMatching.firstCompensation, e);
@@ -1230,6 +1222,8 @@ export const WFMachine = <CType extends CTypeProto>(
         }
       }
 
+      console.log(e, "is fed", fed);
+
       atStack.nextEvalIndex = nextEvalContext.index;
     }
 
@@ -1324,13 +1318,13 @@ export const WFMachine = <CType extends CTypeProto>(
     state,
     returned,
     availableTimeout: availableTimeoutExternal,
-    availableCompensateable: () =>
-      availableCompensateable().map(({ firstCompensation }) => ({
-        actor: firstCompensation.actor,
-        name: firstCompensation.name,
-      })),
     availableCommands: availableCommands,
-    availableCompensateableCode: availableCompensateableCode,
+    activeCompensationCode: activeCompensationCode,
+    availableCompensateable: () =>
+      availableCompensateable().map((x) => ({
+        name: x.firstCompensation.name,
+        actor: x.firstCompensation.actor,
+      })),
   };
 };
 
@@ -1362,7 +1356,7 @@ export namespace CCompensationFastQuery {
 
     return {
       isInsideWithBlock: (x: number) =>
-        list.findIndex((entry) => x > entry.start && x < entry.end),
+        list.findIndex((entry) => x > entry.start && x < entry.end) !== -1,
     };
   };
 }

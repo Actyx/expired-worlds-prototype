@@ -49,6 +49,7 @@ const Ev = Enum([
 type Ev = Enum<typeof Ev>;
 
 type TheType = MakeCType<{ role: "a"; ev: Ev }>;
+const id = "id";
 
 describe("enums", () => {
   it("enums", () => {
@@ -64,16 +65,23 @@ describe("machine", () => {
   describe("event", () => {
     it("event", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request, {
-          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
-        }),
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          code: [
+            code.event(role("a"), Ev.request, {
+              bindings: [code.bind("src", "from"), code.bind("dst", "to")],
+            }),
+          ] as const,
+          uniqueParams: [],
+        }
+      );
 
       expect(machine.returned()).toBe(false);
 
       machine.tick(
-        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+        Emit.event(id, Ev.request, { from: "storage-1", to: "storage-2" })
       );
 
       expect(machine.returned()).toBe(true);
@@ -89,32 +97,39 @@ describe("machine", () => {
       const TIMEOUT_DURATION = 300;
 
       const code = Code.make<TheType>();
+      const { role } = code.actor;
 
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request, {
-          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
-        }),
-        ...code.retry([
-          code.event("a", Ev.reqStorage, {
-            bindings: [code.bind("somevar", "somefield")],
-          }),
-          ...code.timeout(
-            TIMEOUT_DURATION,
-            [code.event("a", Ev.bid)],
-            code.event("a", Ev.cancelled, {
-              control: Code.Control.fail,
-            })
-          ),
-        ]),
-      ]);
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request, {
+              bindings: [code.bind("src", "from"), code.bind("dst", "to")],
+            }),
+            ...code.retry([
+              code.event(role("a"), Ev.reqStorage, {
+                bindings: [code.bind("somevar", "somefield")],
+              }),
+              ...code.timeout(
+                TIMEOUT_DURATION,
+                [code.event(role("a"), Ev.bid)],
+                code.event(role("a"), Ev.cancelled, {
+                  control: Code.Control.fail,
+                })
+              ),
+            ]),
+          ],
+        }
+      );
 
       expect(machine.returned()).toBe(false);
       machine.tick(
-        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+        Emit.event(id, Ev.request, { from: "storage-1", to: "storage-2" })
       );
       expect(machine.returned()).toBe(false);
 
-      machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
+      machine.tick(Emit.event(id, Ev.reqStorage, { somefield: "somevalue" }));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
         state: [One, Ev.reqStorage],
@@ -123,7 +138,7 @@ describe("machine", () => {
       expect(machine.availableTimeout()).toEqual([]);
 
       // attempt timeout will fail
-      machine.tick(Emit.event(Ev.cancelled, {}));
+      machine.tick(Emit.event(id, Ev.cancelled, {}));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
         state: [One, Ev.reqStorage],
@@ -142,7 +157,7 @@ describe("machine", () => {
       ).toBe(true);
 
       // trigger timeout - state will be wound back to when RETRY
-      machine.tick(Emit.event(Ev.cancelled, {}));
+      machine.tick(Emit.event(id, Ev.cancelled, {}));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
         state: [One, Ev.request],
@@ -153,30 +168,39 @@ describe("machine", () => {
     it("retry-timeout RETURN", async () => {
       const TIMEOUT_DURATION = 300;
       const code = Code.make<TheType>();
+      const { role } = code.actor;
 
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request, {
-          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
-        }),
-        ...code.retry([
-          code.event("a", Ev.reqStorage, {
-            bindings: [code.bind("somevar", "somefield")],
-          }),
-          ...code.timeout(
-            TIMEOUT_DURATION,
-            [code.event("a", Ev.bid)],
-            code.event("a", Ev.cancelled, { control: Code.Control.return })
-          ),
-        ]),
-      ]);
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request, {
+              bindings: [code.bind("src", "from"), code.bind("dst", "to")],
+            }),
+            ...code.retry([
+              code.event(role("a"), Ev.reqStorage, {
+                bindings: [code.bind("somevar", "somefield")],
+              }),
+              ...code.timeout(
+                TIMEOUT_DURATION,
+                [code.event(role("a"), Ev.bid)],
+                code.event(role("a"), Ev.cancelled, {
+                  control: Code.Control.return,
+                })
+              ),
+            ]),
+          ],
+        }
+      );
 
       expect(machine.returned()).toBe(false);
       machine.tick(
-        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+        Emit.event(id, Ev.request, { from: "storage-1", to: "storage-2" })
       );
       expect(machine.returned()).toBe(false);
 
-      machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
+      machine.tick(Emit.event(id, Ev.reqStorage, { somefield: "somevalue" }));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
         state: [One, Ev.reqStorage],
@@ -185,7 +209,7 @@ describe("machine", () => {
 
       await sleep(TIMEOUT_DURATION + 100);
       // trigger timeout - also triggering return
-      machine.tick(Emit.event(Ev.cancelled, {}));
+      machine.tick(Emit.event(id, Ev.cancelled, {}));
       expect(machine.returned()).toBe(true);
       expect(machine.state()).toEqual({
         state: [One, Ev.cancelled],
@@ -196,40 +220,45 @@ describe("machine", () => {
     it("retry-timeout PASS", async () => {
       const TIMEOUT_DURATION = 300;
       const code = Code.make<TheType>();
+      const { role } = code.actor;
 
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request, {
-          bindings: [code.bind("src", "from"), code.bind("dst", "to")],
-        }),
-        ...code.retry([
-          code.event("a", Ev.reqStorage, {
-            bindings: [code.bind("somevar", "somefield")],
+      const machine = WFMachine<TheType>({ id }, {
+        uniqueParams: [],
+        code: [
+          code.event(role("a"), Ev.request, {
+            bindings: [code.bind("src", "from"), code.bind("dst", "to")],
           }),
-          ...code.timeout(
-            TIMEOUT_DURATION,
-            [code.event("a", Ev.bid)],
-            code.event("a", Ev.cancelled, { control: Code.Control.fail })
-          ),
-        ]),
-      ]);
+          ...code.retry([
+            code.event(role("a"), Ev.reqStorage, {
+              bindings: [code.bind("somevar", "somefield")],
+            }),
+            ...code.timeout(
+              TIMEOUT_DURATION,
+              [code.event(role("a"), Ev.bid)],
+              code.event(role("a"), Ev.cancelled, {
+                control: Code.Control.fail,
+              })
+            ),
+          ]),
+        ],
+      } as const);
 
       expect(machine.returned()).toBe(false);
       machine.tick(
-        Emit.event(Ev.request, { from: "storage-1", to: "storage-2" })
+        Emit.event(id, Ev.request, { from: "storage-1", to: "storage-2" })
       );
       expect(machine.returned()).toBe(false);
 
-      machine.tick(Emit.event(Ev.reqStorage, { somefield: "somevalue" }));
+      machine.tick(Emit.event(id, Ev.reqStorage, { somefield: "somevalue" }));
       expect(machine.returned()).toBe(false);
       expect(machine.state()).toEqual({
         state: [One, Ev.reqStorage],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
       });
 
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
 
       await sleep(TIMEOUT_DURATION + 100);
-      machine.tick(null);
       expect(machine.state()).toEqual({
         state: [One, Ev.bid],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
@@ -240,37 +269,44 @@ describe("machine", () => {
   describe("parallel", () => {
     it("produce parallel state and work the next workable code and event", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request),
-        ...code.parallel({ min: 2 }, [code.event("a", Ev.bid)]), // minimum of two bids
-        ...code.retry([code.event("a", Ev.accept)]), // test that next code is not immediately event too
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request),
+            ...code.parallel({ min: 2 }, [code.event(role("a"), Ev.bid)]), // minimum of two bids
+            ...code.retry([code.event(role("a"), Ev.accept)]), // test that next code is not immediately event too
+          ],
+        }
+      );
 
-      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
       expect(machine.state()).toEqual({
         state: [One, Ev.request],
         context: {},
       });
 
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
       expect(machine.state()).toEqual({
         state: [Parallel, [Ev.bid]],
         context: {},
       });
 
-      machine.tick(Emit.event(Ev.accept, {})); // attempt to accept will fail because parallel count isn't fulfilled
+      machine.tick(Emit.event(id, Ev.accept, {})); // attempt to accept will fail because parallel count isn't fulfilled
       expect(machine.state()).toEqual({
         state: [Parallel, [Ev.bid]],
         context: {},
       });
 
-      machine.tick(Emit.event(Ev.bid, {})); // the second bid
+      machine.tick(Emit.event(id, Ev.bid, {})); // the second bid
       expect(machine.state()).toEqual({
         state: [Parallel, [Ev.bid, Ev.bid]],
         context: {},
       });
 
-      machine.tick(Emit.event(Ev.accept, {})); // finally accept should work
+      machine.tick(Emit.event(id, Ev.accept, {})); // finally accept should work
       expect(machine.state()).toEqual({
         state: [One, Ev.accept],
         context: {},
@@ -279,14 +315,24 @@ describe("machine", () => {
 
     it("works with choice", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request),
-        ...code.parallel({ min: 0 }, [code.event("a", Ev.bid)]), // minimum of two bids
-        ...code.choice([code.event("a", Ev.accept), code.event("a", Ev.deny)]),
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request),
+            ...code.parallel({ min: 0 }, [code.event(role("a"), Ev.bid)]), // minimum of two bids
+            ...code.choice([
+              code.event(role("a"), Ev.accept),
+              code.event(role("a"), Ev.deny),
+            ]),
+          ],
+        }
+      );
 
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.deny, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.deny, {}));
       expect(machine.state()).toEqual({
         state: [One, Ev.deny],
         context: {},
@@ -295,34 +341,50 @@ describe("machine", () => {
 
     it("sequence of parallels", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request),
-        ...code.parallel({ min: 2 }, [code.event("a", Ev.bid)]), // minimum of two bids
-        ...code.parallel({ min: 2 }, [code.event("a", Ev.accept)]), // minimum of two bids
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request),
+            ...code.parallel({ min: 2 }, [code.event(role("a"), Ev.bid)]), // minimum of two bids
+            ...code.parallel({ min: 2 }, [code.event(role("a"), Ev.accept)]), // minimum of two bids
+          ],
+        }
+      );
 
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
       expect(machine.state().state).toEqual([Parallel, [Ev.bid]]);
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
       expect(machine.state().state).toEqual([Parallel, [Ev.bid, Ev.bid]]);
-      machine.tick(Emit.event(Ev.accept, {}));
+      machine.tick(Emit.event(id, Ev.accept, {}));
       expect(machine.state().state).toEqual([Parallel, [Ev.accept]]);
-      machine.tick(Emit.event(Ev.accept, {}));
+      machine.tick(Emit.event(id, Ev.accept, {}));
       expect(machine.state().state).toEqual([Parallel, [Ev.accept, Ev.accept]]);
     });
 
     it("max reached force next", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request),
-        ...code.parallel({ min: 1, max: 2 }, [code.event("a", Ev.bid)]), // minimum of two bids
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request),
+            ...code.parallel({ min: 1, max: 2 }, [
+              code.event(role("a"), Ev.bid),
+            ]), // minimum of two bids
+          ],
+        }
+      );
 
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
       expect(machine.state().state).toEqual([Parallel, [Ev.bid]]);
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
       expect(machine.state().state).toEqual([Parallel, [Ev.bid, Ev.bid]]);
       expect(machine.returned()).toBe(true);
     });
@@ -331,38 +393,45 @@ describe("machine", () => {
   describe("compensation", () => {
     it("passing without compensation", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.inside, {}),
-        ...code.compensate(
-          [
-            code.event("a", Ev.reqLeave),
-            code.event("a", Ev.doLeave),
-            code.event("a", Ev.success),
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.inside, {}),
+            ...code.compensate(
+              [
+                code.event(role("a"), Ev.reqLeave),
+                code.event(role("a"), Ev.doLeave),
+                code.event(role("a"), Ev.success),
+              ],
+              [
+                code.event(role("a"), Ev.withdraw),
+                code.event(role("a"), Ev.doLeave),
+                code.event(role("a"), Ev.withdrawn),
+              ]
+            ),
           ],
-          [
-            code.event("a", Ev.withdraw),
-            code.event("a", Ev.doLeave),
-            code.event("a", Ev.withdrawn),
-          ]
-        ),
-      ]);
+        }
+      );
 
-      machine.tick(Emit.event(Ev.inside, {}));
+      machine.tick(Emit.event(id, Ev.inside, {}));
       expect(machine.state().state).toEqual([One, Ev.inside]);
 
-      machine.tick(Emit.event(Ev.reqLeave, {}));
+      machine.tick(Emit.event(id, Ev.reqLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.reqLeave]);
       expect(machine.availableCompensateable()).toEqual([
         { name: Ev.withdraw, role: "a" },
       ]);
 
-      machine.tick(Emit.event(Ev.doLeave, {}));
+      machine.tick(Emit.event(id, Ev.doLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.doLeave]);
       expect(machine.availableCompensateable()).toEqual([
         { name: Ev.withdraw, role: "a" },
       ]);
 
-      machine.tick(Emit.event(Ev.success, {}));
+      machine.tick(Emit.event(id, Ev.success, {}));
       expect(machine.state().state).toEqual([One, Ev.success]);
       expect(machine.availableCompensateable()).toEqual([]);
       expect(machine.returned()).toEqual(true);
@@ -370,37 +439,44 @@ describe("machine", () => {
 
     it("passing with compensation", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.inside, {}),
-        ...code.compensate(
-          [
-            code.event("a", Ev.reqLeave),
-            code.event("a", Ev.doLeave),
-            code.event("a", Ev.success),
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.inside, {}),
+            ...code.compensate(
+              [
+                code.event(role("a"), Ev.reqLeave),
+                code.event(role("a"), Ev.doLeave),
+                code.event(role("a"), Ev.success),
+              ],
+              [
+                code.event(role("a"), Ev.withdraw),
+                code.event(role("a"), Ev.doLeave),
+                code.event(role("a"), Ev.withdrawn),
+              ]
+            ),
           ],
-          [
-            code.event("a", Ev.withdraw),
-            code.event("a", Ev.doLeave),
-            code.event("a", Ev.withdrawn),
-          ]
-        ),
-      ]);
+        }
+      );
 
-      machine.tick(Emit.event(Ev.inside, {}));
+      machine.tick(Emit.event(id, Ev.inside, {}));
       expect(machine.state().state).toEqual([One, Ev.inside]);
 
-      machine.tick(Emit.event(Ev.reqLeave, {}));
+      machine.tick(Emit.event(id, Ev.reqLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.reqLeave]);
       expect(machine.availableCompensateable()).toEqual([
         { name: Ev.withdraw, role: "a" },
       ]);
 
-      machine.tick(Emit.event(Ev.withdraw, {}));
+      machine.tick(Emit.event(id, Ev.withdraw, {}));
       expect(machine.state().state).toEqual([One, Ev.withdraw]);
       expect(machine.availableCompensateable()).toEqual([]);
-      machine.tick(Emit.event(Ev.doLeave, {}));
+      machine.tick(Emit.event(id, Ev.doLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.doLeave]);
-      machine.tick(Emit.event(Ev.withdrawn, {}));
+      machine.tick(Emit.event(id, Ev.withdrawn, {}));
       expect(machine.state().state).toEqual([One, Ev.withdrawn]);
       expect(machine.returned()).toEqual(true);
     });
@@ -409,84 +485,114 @@ describe("machine", () => {
   describe("match", () => {
     it("named match should work", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request),
-        ...code.match(
-          [
-            code.event("a", Ev.inside),
-            ...code.compensate(
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request),
+            ...code.match(
+              {
+                uniqueParams: [],
+                code: [
+                  code.event(role("a"), Ev.inside),
+                  ...code.compensate(
+                    [
+                      code.event(role("a"), Ev.reqLeave),
+                      code.event(role("a"), Ev.doLeave),
+                      code.event(role("a"), Ev.success),
+                    ],
+                    [
+                      code.event(role("a"), Ev.withdraw),
+                      code.event(role("a"), Ev.doLeave),
+                      code.event(role("a"), Ev.withdrawn),
+                    ]
+                  ),
+                ],
+              },
+              {},
               [
-                code.event("a", Ev.reqLeave),
-                code.event("a", Ev.doLeave),
-                code.event("a", Ev.success),
-              ],
-              [
-                code.event("a", Ev.withdraw),
-                code.event("a", Ev.doLeave),
-                code.event("a", Ev.withdrawn),
+                code.matchCase([Exact, Ev.success], []),
+                code.matchCase(
+                  [Otherwise],
+                  [
+                    code.event(role("a"), Ev.cancelled, {
+                      control: Code.Control.return,
+                    }),
+                  ]
+                ),
               ]
             ),
+            code.event(role("a"), Ev.done),
           ],
-          [
-            code.matchCase([Exact, Ev.success], []),
-            code.matchCase(
-              [Otherwise],
-              [code.event("a", Ev.cancelled, { control: Code.Control.return })]
-            ),
-          ]
-        ),
-        code.event("a", Ev.done),
-      ]);
+        }
+      );
 
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.inside, {}));
-      machine.tick(Emit.event(Ev.reqLeave, {}));
-      machine.tick(Emit.event(Ev.doLeave, {}));
-      machine.tick(Emit.event(Ev.success, {}));
-      machine.tick(Emit.event(Ev.done, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.inside, {}));
+      machine.tick(Emit.event(id, Ev.reqLeave, {}));
+      machine.tick(Emit.event(id, Ev.doLeave, {}));
+      machine.tick(Emit.event(id, Ev.success, {}));
+      machine.tick(Emit.event(id, Ev.done, {}));
       expect(machine.returned()).toBe(true);
       expect(machine.state().state).toEqual([One, Ev.done]);
     });
 
     it("otherwise match should work", () => {
       const code = Code.make<TheType>();
-      const machine = WFMachine<TheType>([
-        code.event("a", Ev.request),
-        ...code.match(
-          [
-            code.event("a", Ev.inside),
-            ...code.compensate(
+      const { role } = code.actor;
+      const machine = WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request),
+            ...code.match(
+              {
+                uniqueParams: [],
+                code: [
+                  code.event(role("a"), Ev.inside),
+                  ...code.compensate(
+                    [
+                      code.event(role("a"), Ev.reqLeave),
+                      code.event(role("a"), Ev.doLeave),
+                      code.event(role("a"), Ev.success),
+                    ],
+                    [
+                      code.event(role("a"), Ev.withdraw),
+                      code.event(role("a"), Ev.doLeave),
+                      code.event(role("a"), Ev.withdrawn),
+                    ]
+                  ),
+                ],
+              },
+              {},
               [
-                code.event("a", Ev.reqLeave),
-                code.event("a", Ev.doLeave),
-                code.event("a", Ev.success),
-              ],
-              [
-                code.event("a", Ev.withdraw),
-                code.event("a", Ev.doLeave),
-                code.event("a", Ev.withdrawn),
+                code.matchCase([Exact, Ev.success], []),
+                code.matchCase(
+                  [Otherwise],
+                  [
+                    code.event(role("a"), Ev.cancelled, {
+                      control: Code.Control.return,
+                    }),
+                  ]
+                ),
               ]
             ),
+            code.event(role("a"), Ev.done),
           ],
-          [
-            code.matchCase([Exact, Ev.success], []),
-            code.matchCase(
-              [Otherwise],
-              [code.event("a", Ev.cancelled, { control: Code.Control.return })]
-            ),
-          ]
-        ),
-        code.event("a", Ev.done),
-      ]);
+        }
+      );
 
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.inside, {}));
-      machine.tick(Emit.event(Ev.reqLeave, {}));
-      machine.tick(Emit.event(Ev.doLeave, {}));
-      machine.tick(Emit.event(Ev.withdraw, {}));
-      machine.tick(Emit.event(Ev.doLeave, {}));
-      machine.tick(Emit.event(Ev.withdrawn, {}));
-      machine.tick(Emit.event(Ev.cancelled, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.inside, {}));
+      machine.tick(Emit.event(id, Ev.reqLeave, {}));
+      machine.tick(Emit.event(id, Ev.doLeave, {}));
+      machine.tick(Emit.event(id, Ev.withdraw, {}));
+      machine.tick(Emit.event(id, Ev.doLeave, {}));
+      machine.tick(Emit.event(id, Ev.withdrawn, {}));
+      machine.tick(Emit.event(id, Ev.cancelled, {}));
       expect(machine.returned()).toBe(true);
       expect(machine.state().state).toEqual([One, Ev.cancelled]);
     });
@@ -494,42 +600,49 @@ describe("machine", () => {
 
   describe("choice", () => {
     const code = Code.make<TheType>();
+    const { role } = code.actor;
     const prepare = () =>
-      WFMachine<TheType>([
-        code.event("a", Ev.request),
-        ...code.choice([
-          code.event("a", Ev.accept),
-          code.event("a", Ev.deny, { control: Code.Control.return }),
-          code.event("a", Ev.assistanceNeeded, {
-            control: Code.Control.return,
-          }),
-        ]),
-        code.event("a", Ev.doEnter),
-      ]);
+      WFMachine<TheType>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("a"), Ev.request),
+            ...code.choice([
+              code.event(role("a"), Ev.accept),
+              code.event(role("a"), Ev.deny, { control: Code.Control.return }),
+              code.event(role("a"), Ev.assistanceNeeded, {
+                control: Code.Control.return,
+              }),
+            ]),
+            code.event(role("a"), Ev.doEnter),
+          ],
+        }
+      );
 
     it("should work for any event inside the choice - 1", () => {
       const machine = prepare();
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.accept, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.accept, {}));
       expect(machine.returned()).toEqual(false);
       expect(machine.state().state).toEqual([One, Ev.accept]);
-      machine.tick(Emit.event(Ev.doEnter, {}));
+      machine.tick(Emit.event(id, Ev.doEnter, {}));
       expect(machine.returned()).toEqual(true);
       expect(machine.state().state).toEqual([One, Ev.doEnter]);
     });
 
     it("should work for any event inside the choice - 2", () => {
       const machine = prepare();
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.deny, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.deny, {}));
       expect(machine.returned()).toEqual(true);
       expect(machine.state().state).toEqual([One, Ev.deny]);
     });
 
     it("should work for any event inside the choice - 3", () => {
       const machine = prepare();
-      machine.tick(Emit.event(Ev.request, {}));
-      machine.tick(Emit.event(Ev.assistanceNeeded, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.assistanceNeeded, {}));
       expect(machine.returned()).toEqual(true);
       expect(machine.state().state).toEqual([One, Ev.assistanceNeeded]);
     });
@@ -543,7 +656,11 @@ describe("machine", () => {
 
     it("should work with event", () => {
       const code = Code.make<MultiRole>();
-      const machine = WFMachine([code.event("transporter", "bid")]);
+      const { role } = code.actor;
+      const machine = WFMachine(
+        { id },
+        { uniqueParams: [], code: [code.event(role("transporter"), "bid")] }
+      );
       expect(machine.availableCommands()).toContainEqual({
         role: "transporter",
         name: "bid",
@@ -553,15 +670,22 @@ describe("machine", () => {
 
     it("should work with choice", () => {
       const code = Code.make<MultiRole>();
-      const machine = WFMachine([
-        code.event("transporter", "bid"),
-        ...code.choice([
-          code.event("storage", "accept"),
-          code.event("manager", "deny"),
-        ]),
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("transporter"), "bid"),
+            ...code.choice([
+              code.event(role("storage"), "accept"),
+              code.event(role("manager"), "deny"),
+            ]),
+          ],
+        }
+      );
 
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
 
       expect(machine.availableCommands()).toContainEqual({
         role: "storage",
@@ -578,15 +702,22 @@ describe("machine", () => {
 
     it("should work with parallel", () => {
       const code = Code.make<MultiRole>();
-      const machine = WFMachine([
-        code.event("manager", Ev.request),
-        ...code.parallel({ min: 1, max: 2 }, [
-          code.event("transporter", Ev.bid),
-        ]),
-        code.event("manager", Ev.accept),
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("manager"), Ev.request),
+            ...code.parallel({ min: 1, max: 2 }, [
+              code.event(role("transporter"), Ev.bid),
+            ]),
+            code.event(role("manager"), Ev.accept),
+          ],
+        }
+      );
 
-      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
 
       // min not reached
       expect(machine.availableCommands()).toContainEqual({
@@ -602,7 +733,7 @@ describe("machine", () => {
       });
 
       // min reached - maxx not reached
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
       expect(machine.availableCommands()).toContainEqual({
         role: "transporter",
         name: Ev.bid,
@@ -616,7 +747,7 @@ describe("machine", () => {
       });
 
       // max reached
-      machine.tick(Emit.event(Ev.bid, {}));
+      machine.tick(Emit.event(id, Ev.bid, {}));
       expect(machine.availableCommands()).not.toContainEqual({
         role: "transporter",
         name: Ev.bid,
@@ -633,16 +764,29 @@ describe("machine", () => {
     it("should work with timeout", async () => {
       const TIMEOUT_DURATION = 100;
       const code = Code.make<MultiRole>();
-      const machine = WFMachine([
-        code.event("manager", Ev.request, {
-          bindings: [],
-        }),
-        ...code.timeout(
-          TIMEOUT_DURATION,
-          [...code.parallel({ max: 2 }, [code.event("transporter", Ev.bid)])],
-          code.event("manager", Ev.cancelled, { control: Code.Control.fail })
-        ),
-      ]);
+      const { role } = code.actor;
+      const machine = WFMachine(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("manager"), Ev.request, {
+              bindings: [],
+            }),
+            ...code.timeout(
+              TIMEOUT_DURATION,
+              [
+                ...code.parallel({ max: 2 }, [
+                  code.event(role("transporter"), Ev.bid),
+                ]),
+              ],
+              code.event(role("manager"), Ev.cancelled, {
+                control: Code.Control.fail,
+              })
+            ),
+          ],
+        }
+      );
 
       expect(machine.availableCommands()).toContainEqual({
         control: undefined,
@@ -650,7 +794,7 @@ describe("machine", () => {
         name: Ev.request,
         reason: null,
       });
-      machine.tick(Emit.event(Ev.request, {}));
+      machine.tick(Emit.event(id, Ev.request, {}));
 
       await sleep(TIMEOUT_DURATION + 1);
 
@@ -674,29 +818,45 @@ describe("machine", () => {
 
     it("should work match subworkflow", () => {
       const code = Code.make<MultiRole>();
-      const machine = WFMachine([
-        code.event("transporter", Ev.accept),
-        ...code.match(
-          [
-            code.event("transporter", Ev.reqEnter),
-            ...code.choice([
-              code.event("storage", Ev.doEnter),
-              code.event("transporter", Ev.withdraw, { control: "return" }),
-            ]),
-            code.event("transporter", Ev.inside),
-          ],
-          [
-            code.matchCase(
-              [Exact, Ev.inside],
-              [code.event("manager", Ev.success)]
+      const { role } = code.actor;
+      const machine = WFMachine<MultiRole>(
+        { id },
+        {
+          uniqueParams: [],
+          code: [
+            code.event(role("transporter"), Ev.accept),
+            ...code.match(
+              {
+                uniqueParams: [],
+                code: [
+                  code.event(role("transporter"), Ev.reqEnter),
+                  ...code.choice([
+                    code.event(role("storage"), Ev.doEnter),
+                    code.event(role("transporter"), Ev.withdraw, {
+                      control: "return",
+                    }),
+                  ]),
+                  code.event(role("transporter"), Ev.inside),
+                ],
+              },
+              {},
+              [
+                code.matchCase(
+                  [Exact, Ev.inside],
+                  [code.event(role("manager"), Ev.success)]
+                ),
+                code.matchCase(
+                  [Otherwise],
+                  [code.event(role("manager"), Ev.cancelled)]
+                ),
+              ]
             ),
-            code.matchCase([Otherwise], [code.event("manager", Ev.cancelled)]),
-          ]
-        ),
-      ]);
+          ],
+        }
+      );
 
-      machine.tick(Emit.event(Ev.accept, {}));
-      machine.tick(Emit.event(Ev.reqEnter, {}));
+      machine.tick(Emit.event(id, Ev.accept, {}));
+      machine.tick(Emit.event(id, Ev.reqEnter, {}));
 
       expect(machine.availableCommands()).toContainEqual({
         role: "storage",
@@ -712,8 +872,8 @@ describe("machine", () => {
         reason: null,
       });
 
-      machine.tick(Emit.event(Ev.doEnter, {}));
-      machine.tick(Emit.event(Ev.inside, {}));
+      machine.tick(Emit.event(id, Ev.doEnter, {}));
+      machine.tick(Emit.event(id, Ev.inside, {}));
 
       expect(machine.availableCommands()).toContainEqual({
         role: "manager",

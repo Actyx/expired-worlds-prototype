@@ -26,6 +26,7 @@ import {
   WFMarkerCompensationNeeded,
   WFMarkerCompensationDone,
 } from "./consts.js";
+import { machine } from "os";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -53,7 +54,7 @@ type DataModes<CType extends CTypeProto> = {
 
 // TODO:
 // - involve participation into compensation calculation (this depends on whether we want to block everyone involved in the task into until a particular compensation is done by a subset of participant)
-export const run = async <CType extends CTypeProto>(
+export const run = <CType extends CTypeProto>(
   params: Params<CType>,
   // const node = Node.make<WFEventAndDirective<CType>>({ id: params.id });
   node: Node.Type<WFBusinessOrMarker<CType>>,
@@ -92,10 +93,17 @@ export const run = async <CType extends CTypeProto>(
 
     const commands = data.wfMachine
       .availableCommands()
-      .filter((x) => x.role === params.self.role)
+      .filter((x) => {
+        if (x.actor.t === "Role") {
+          return x.actor.get() === params.self.role;
+        } else {
+          return x.actor.get() === params.self.id;
+        }
+      })
       .map((x) => ({
         info: x,
-        publish: (payload: Record<string, unknown>) => {
+        publish: (payloadPatch: Record<string, unknown> = {}) => {
+          const payload = { ...payloadPatch };
           let tags = params.tags;
 
           const last = machineCombinator.last();
@@ -133,6 +141,9 @@ export const run = async <CType extends CTypeProto>(
 
   return {
     commands,
+    mcomb: () => machineCombinator.internal(),
+    machine: () => machineCombinator.machine(),
+    state: () => machineCombinator.machine().state(),
     kill: axSub.kill,
   };
 };
@@ -194,7 +205,7 @@ export namespace MachineCombinator {
     const compensationMap = CompensationMap.make();
     let data: DataModes<CType> = {
       t: "building-compensations",
-      wfMachine: WFMachine(workflow),
+      wfMachine: WFMachine(params.self, workflow),
       digestedChain: [],
     };
 
@@ -229,6 +240,7 @@ export namespace MachineCombinator {
 
       // Do a comparison between remembered compensations and the actually needed compensations
       const compensations = calculateCompensations(
+        params,
         workflow,
         fromChain,
         toChain
@@ -264,7 +276,7 @@ export namespace MachineCombinator {
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
       // TODO: think about compensation events tag
 
-      const canonWFMachine = WFMachine(workflow);
+      const canonWFMachine = WFMachine(params.self, workflow);
       const canonChain = multiverseTree.getCanonChain() || [];
       canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
 
@@ -339,10 +351,11 @@ export namespace MachineCombinator {
         const currentData = data;
         if (currentData.t === "building-compensations" && e.caughtUp) {
           const canonChain = multiverseTree.getCanonChain() || [];
-          const canonWFMachine = WFMachine(workflow);
+          const canonWFMachine = WFMachine(params.self, workflow);
           canonChain.map(Emit.fromWFEvent).forEach(canonWFMachine.tick);
 
           const compensations = calculateCompensations(
+            params,
             workflow,
             currentData.digestedChain,
             canonChain
@@ -398,7 +411,7 @@ export namespace MachineCombinator {
           // check if compensation still applies
           // TODO: optimize compensation query
           const activeCompensationCode = currentData.wfMachine
-            .availableCompensateableCode()
+            .activeCompensationCode()
             .findIndex(
               (x) => x.codeIndex === currentData.compensationInfo.codeIndex
             );
@@ -492,6 +505,7 @@ export namespace CompensationMap {
 }
 
 const calculateCompensations = <CType extends CTypeProto>(
+  params: Params<CType>,
   workflow: WFWorkflow<CType>,
   previousChain: Chain<CType>,
   currentCanonChain: Chain<CType>
@@ -506,21 +520,21 @@ const calculateCompensations = <CType extends CTypeProto>(
 
   if (divergence === previousChain.length) return null;
 
-  const simulation = WFMachine(workflow);
+  const simulation = WFMachine(params.self, workflow);
 
   const beforeDivergence = previousChain.slice(0, divergence);
   const afterDivergence = previousChain.slice(divergence);
 
   beforeDivergence.map(Emit.fromWFEvent).forEach(simulation.tick);
 
-  const invalidCompensations = simulation.availableCompensateableCode();
+  const invalidCompensations = simulation.activeCompensationCode();
   const invalidCompensationIndices = new Set(
     invalidCompensations.map((x) => x.codeIndex)
   );
 
   afterDivergence.map(Emit.fromWFEvent).forEach(simulation.tick);
 
-  const allCompensations = simulation.availableCompensateableCode();
+  const allCompensations = simulation.activeCompensationCode();
 
   const validCompensations = Array.from(allCompensations).filter(
     (x) => !invalidCompensationIndices.has(x.codeIndex)
