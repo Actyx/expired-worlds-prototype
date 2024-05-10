@@ -247,7 +247,7 @@ describe("x", () => {
     console.log(t1.machine.machine().state());
     console.log(manager.machine.machine().availableCommands());
 
-    // findCommand(manager, Ev.assign).publish({ t: t1.identity.id });
+    findCommand(manager, Ev.assign).publish({ t: t1.identity.id });
   });
 });
 

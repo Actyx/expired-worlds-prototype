@@ -35,7 +35,9 @@ export namespace MultiverseTree {
      * Get a chain of events, both backward and forward.
      * On the forward case, it goes to the future until at the point where event branches
      */
-    getChainBackwards: (e: ActyxWFBusiness<CType>) => null | ActyxWFBusiness<CType>[];
+    getChainBackwards: (
+      e: ActyxWFBusiness<CType>
+    ) => null | ActyxWFBusiness<CType>[];
     getCanonChain: () => null | ActyxWFBusiness<CType>[];
   };
 
@@ -170,9 +172,9 @@ export namespace MultiverseTree {
         if (internal.predecessors.has(eventId)) return;
 
         internal.infoMap.set(eventId, ev);
-        const predecessorId = ev.meta.tags.find((x) =>
-          InternalTag.Predecessor.read(x)
-        );
+        const predecessorId = ev.meta.tags
+          .map((x) => InternalTag.Predecessor.read(x))
+          .find((x): x is Exclude<typeof x, null> => x !== null);
         if (!predecessorId) {
           internal.rootOf.set(eventId, {
             canonHead: eventId,

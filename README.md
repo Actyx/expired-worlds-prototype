@@ -32,3 +32,42 @@ A compensation is calculated by spinning two machines by piping events from diff
 The difference of "compensateable list" between the two points in time become the compensation needed by the actor.
 
 // TODO: When things happen, How things are particularly calculated, The VM
+
+## [2024-05-10] Problem with Linear VM and Parallel
+
+I just realized this.
+Predecessor tagging is created at publish time and is not regulated by Actyx's lamport timestamp. As a consequence, any code branches (e.g PARALLEL, TIMEOUT) can create a branch in the timeline too. For example:
+the code below with 1 M and 3 Ts
+```
+request @ M
+PARALLEL {
+  bid @ T
+}
+```
+
+Can produce varying predecessor arrows
+
+```
+     Request @ M1        Request @ M1 
+         │                   │        
+    ┌────┴─────┐             │        
+    ▼          ▼             ▼        
+Bid @ T1    Bid @ T3     Bid @ T1     
+    │                        │        
+    ▼                        ▼        
+Bid @ T2                 Bid @ T2     
+                             │        
+                             ▼        
+                         Bid @ T3     
+```
+
+The entirety of the machine should be able to process not a linear log but a tree in case of parallels and regulate the predecessor arrows so that in the case of parallel, this should be constructed instead.
+
+```
+         Request @ M1         
+               │              
+    ┌──────────┼─────────┐    
+    │          │         │    
+    ▼          ▼         ▼    
+ Bid @ T1  Bid @ T2  Bid @ T3 
+```
