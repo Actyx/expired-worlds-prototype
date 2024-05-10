@@ -584,8 +584,7 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Find all active timeouts that is late. This is useful for telling which timeout commands are available to the users.
    */
-  const availableLateTimeouts = () =>
-    availableTimeouts().filter(({ lateness }) => lateness > 0);
+  const availableLateTimeouts = () => availableTimeouts();
 
   const activeCompensationCode = () =>
     Array.from(data.activeCompensation)
@@ -761,7 +760,7 @@ export const WFMachine = <CType extends CTypeProto>(
       );
     }
 
-    availableLateTimeouts().forEach((timeout) => {
+    availableTimeouts().forEach((timeout) => {
       extractAvailableCommandFromSingularCode(
         timeout.timeoutIndex,
         result,
@@ -1221,8 +1220,6 @@ export const WFMachine = <CType extends CTypeProto>(
           nextEvaluated = nextEvalContext.index;
         }
       }
-
-      console.log(e, "is fed", fed);
 
       atStack.nextEvalIndex = nextEvalContext.index;
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@jest/globals";
-import { Node, Network, XEventKey, XLamport } from "./index.js";
+import { Node, Network, XEventKey, XLamport, Inner } from "./index.js";
 import { ActyxEvent, EventKey, Lamport, MsgType, Tag, Tags } from "@actyx/sdk";
 import { afterEach } from "node:test";
 import { Ord, sleep } from "../utils.js";
@@ -93,7 +93,7 @@ describe("ax-mock", () => {
       unsubs.forEach((x) => x());
       unsubs = [];
     });
-    it.only("should work", async () => {
+    it("should work", async () => {
       const network = Network.make<Payload>();
       const [nodeA, nodeB] = [
         Node.make<Payload>({ id: "A" }),
@@ -154,10 +154,12 @@ describe("event-key", () => {
       XEventKey.make(XLamport.make(1), "b"),
     ].sort((a, b) => Ord.toNum(Ord.cmp(a, b)));
 
-    expect(eventkeys).toEqual([
-      XEventKey.make(XLamport.make(0), "a"),
-      XEventKey.make(XLamport.make(0), "b"),
-      XEventKey.make(XLamport.make(1), "b"),
-    ]);
+    expect(JSON.stringify(eventkeys)).toEqual(
+      JSON.stringify([
+        XEventKey.make(XLamport.make(0), "a"),
+        XEventKey.make(XLamport.make(0), "b"),
+        XEventKey.make(XLamport.make(1), "b"),
+      ])
+    );
   });
 });

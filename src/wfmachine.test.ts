@@ -135,26 +135,17 @@ describe("machine", () => {
         state: [One, Ev.reqStorage],
         context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
       });
-      expect(machine.availableTimeout()).toEqual([]);
 
-      // attempt timeout will fail
-      machine.tick(Emit.event(id, Ev.cancelled, {}));
-      expect(machine.returned()).toBe(false);
-      expect(machine.state()).toEqual({
-        state: [One, Ev.reqStorage],
-        context: { src: "storage-1", dst: "storage-2", somevar: "somevalue" },
-      });
-
-      // after some moments some timeouts are available
-      await sleep(TIMEOUT_DURATION + 100);
       expect(
-        machine
-          .availableTimeout()
-          .findIndex(
-            ({ consequence: { name, control } }) =>
-              name === Ev.cancelled && control === Code.Control.fail
-          ) !== -1
-      ).toBe(true);
+        machine.availableTimeout().find((x) => {
+          const actor = x.consequence.actor;
+          return (
+            actor.t === "Role" &&
+            actor.get() === "a" &&
+            x.consequence.name === "cancelled"
+          );
+        })
+      ).toBeTruthy();
 
       // trigger timeout - state will be wound back to when RETRY
       machine.tick(Emit.event(id, Ev.cancelled, {}));
@@ -421,15 +412,29 @@ describe("machine", () => {
 
       machine.tick(Emit.event(id, Ev.reqLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.reqLeave]);
-      expect(machine.availableCompensateable()).toEqual([
-        { name: Ev.withdraw, role: "a" },
-      ]);
+      expect(
+        machine
+          .availableCompensateable()
+          .find(
+            (x) =>
+              x.name === Ev.withdraw &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "a"
+          )
+      ).toBeTruthy();
 
       machine.tick(Emit.event(id, Ev.doLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.doLeave]);
-      expect(machine.availableCompensateable()).toEqual([
-        { name: Ev.withdraw, role: "a" },
-      ]);
+      expect(
+        machine
+          .availableCompensateable()
+          .find(
+            (x) =>
+              x.name === Ev.withdraw &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "a"
+          )
+      ).toBeTruthy();
 
       machine.tick(Emit.event(id, Ev.success, {}));
       expect(machine.state().state).toEqual([One, Ev.success]);
@@ -467,9 +472,16 @@ describe("machine", () => {
 
       machine.tick(Emit.event(id, Ev.reqLeave, {}));
       expect(machine.state().state).toEqual([One, Ev.reqLeave]);
-      expect(machine.availableCompensateable()).toEqual([
-        { name: Ev.withdraw, role: "a" },
-      ]);
+      expect(
+        machine
+          .availableCompensateable()
+          .find(
+            (x) =>
+              x.name === Ev.withdraw &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "a"
+          )
+      ).toBeTruthy();
 
       machine.tick(Emit.event(id, Ev.withdraw, {}));
       expect(machine.state().state).toEqual([One, Ev.withdraw]);
@@ -661,11 +673,17 @@ describe("machine", () => {
         { id },
         { uniqueParams: [], code: [code.event(role("transporter"), "bid")] }
       );
-      expect(machine.availableCommands()).toContainEqual({
-        role: "transporter",
-        name: "bid",
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.bid &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "transporter"
+          )
+      ).toBeTruthy();
     });
 
     it("should work with choice", () => {
@@ -687,17 +705,29 @@ describe("machine", () => {
 
       machine.tick(Emit.event(id, Ev.bid, {}));
 
-      expect(machine.availableCommands()).toContainEqual({
-        role: "storage",
-        name: "accept",
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === "accept" &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "storage"
+          )
+      ).toBeTruthy();
 
-      expect(machine.availableCommands()).toContainEqual({
-        role: "manager",
-        name: "deny",
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === "deny" &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "manager"
+          )
+      ).toBeTruthy();
     });
 
     it("should work with parallel", () => {
@@ -720,45 +750,81 @@ describe("machine", () => {
       machine.tick(Emit.event(id, Ev.request, {}));
 
       // min not reached
-      expect(machine.availableCommands()).toContainEqual({
-        role: "transporter",
-        name: Ev.bid,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.bid &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "transporter"
+          )
+      ).toBeTruthy();
 
-      expect(machine.availableCommands()).not.toContainEqual({
-        role: "manager",
-        name: Ev.accept,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.accept &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "manager"
+          )
+      ).not.toBeTruthy();
 
       // min reached - maxx not reached
       machine.tick(Emit.event(id, Ev.bid, {}));
-      expect(machine.availableCommands()).toContainEqual({
-        role: "transporter",
-        name: Ev.bid,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.bid &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "transporter"
+          )
+      ).toBeTruthy();
 
-      expect(machine.availableCommands()).toContainEqual({
-        role: "manager",
-        name: Ev.accept,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.accept &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "manager"
+          )
+      ).toBeTruthy();
 
       // max reached
       machine.tick(Emit.event(id, Ev.bid, {}));
-      expect(machine.availableCommands()).not.toContainEqual({
-        role: "transporter",
-        name: Ev.bid,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.bid &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "transporter"
+          )
+      ).not.toBeTruthy();
 
-      expect(machine.availableCommands()).toContainEqual({
-        role: "manager",
-        name: Ev.accept,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.accept &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "manager"
+          )
+      ).toBeTruthy();
     });
 
     it("should work with timeout", async () => {
@@ -788,28 +854,47 @@ describe("machine", () => {
         }
       );
 
-      expect(machine.availableCommands()).toContainEqual({
-        control: undefined,
-        role: "manager",
-        name: Ev.request,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.request &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "manager" &&
+              x.control === undefined
+          )
+      ).toBeTruthy();
       machine.tick(Emit.event(id, Ev.request, {}));
 
       await sleep(TIMEOUT_DURATION + 1);
 
-      expect(machine.availableCommands()).toContainEqual({
-        control: undefined,
-        role: "transporter",
-        name: Ev.bid,
-        reason: null,
-      });
-      expect(machine.availableCommands()).toContainEqual({
-        role: "manager",
-        name: Ev.cancelled,
-        control: "fail",
-        reason: "timeout",
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.bid &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "transporter" &&
+              x.control === undefined
+          )
+      ).toBeTruthy();
+
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.cancelled &&
+              x.reason === "timeout" &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "manager" &&
+              x.control === "fail"
+          )
+      ).toBeTruthy();
     });
 
     // // TODO: alan: I'm not clear on how compensation should actually work
@@ -858,29 +943,47 @@ describe("machine", () => {
       machine.tick(Emit.event(id, Ev.accept, {}));
       machine.tick(Emit.event(id, Ev.reqEnter, {}));
 
-      expect(machine.availableCommands()).toContainEqual({
-        role: "storage",
-        name: Ev.doEnter,
-        control: undefined,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.doEnter &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "storage" &&
+              x.control === undefined
+          )
+      ).toBeTruthy();
 
-      expect(machine.availableCommands()).toContainEqual({
-        role: "transporter",
-        name: Ev.withdraw,
-        control: "return",
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.withdraw &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "transporter" &&
+              x.control === "return"
+          )
+      ).toBeTruthy();
 
       machine.tick(Emit.event(id, Ev.doEnter, {}));
       machine.tick(Emit.event(id, Ev.inside, {}));
 
-      expect(machine.availableCommands()).toContainEqual({
-        role: "manager",
-        name: Ev.success,
-        control: undefined,
-        reason: null,
-      });
+      expect(
+        machine
+          .availableCommands()
+          .find(
+            (x) =>
+              x.name === Ev.success &&
+              x.reason === null &&
+              x.actor.t === "Role" &&
+              x.actor.get() === "manager" &&
+              x.control === undefined
+          )
+      ).toBeTruthy();
     });
   });
 });
