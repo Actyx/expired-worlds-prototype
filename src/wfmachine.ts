@@ -1,287 +1,23 @@
 import { ActyxWFBusiness, CTypeProto } from "./consts.js";
-import { Enum, WrapType } from "./utils.js";
-
-// Code
-
-export type CItem<CType extends CTypeProto> =
-  | CAnti
-  | CEvent<CType>
-  | CRetry
-  | CTimeout<CType>
-  | CParallel
-  | CCompensate
-  | CCompensateEnd
-  | CCompensateWith
-  | CMatch<CType>
-  | CMatchCase
-  | CChoice;
-type CAnti =
-  | CAntiRetry
-  | CAntiTimeout
-  | CAntiParallel
-  | CAntiCompensate
-  | CAntiMatchCase
-  | CAntiChoice;
-
-export const Unique = WrapType.blueprint("Unique").build();
-export type Unique = WrapType.TypeOf<typeof Unique>;
-export const Role = WrapType.blueprint("Role");
-export type Role<Ctype extends CTypeProto> = WrapType.TypeOf<
-  WrapType.Utils.Refine<typeof Role, Ctype["role"]>
->;
-
-type Actor<CType extends CTypeProto> = Unique | Role<CType>;
-
-type CEventBinding = { var: string; index: string };
-type CEvent<CType extends CTypeProto> = {
-  t: "event";
-  name: CType["ev"];
-  actor: Actor<CType>;
-  bindings?: CEventBinding[];
-  control?: Code.Control;
-};
-type CChoice = { t: "choice"; antiIndexOffset: number };
-type CAntiChoice = { t: "anti-choice" };
-type CMatch<CType extends CTypeProto> = {
-  t: "match";
-  subworkflow: WFWorkflow<CType>;
-  args: Record<string, string>;
-  casesIndexOffsets: number[];
-};
-export const Exact: unique symbol = Symbol("Name");
-export const Otherwise: unique symbol = Symbol("Otherwise");
-type CMatchCaseType<CType extends CTypeProto> =
-  | [typeof Exact, CType["ev"]]
-  | [typeof Otherwise];
-type CMatchCase = {
-  t: "match-case";
-  case: [typeof Exact, string] | [typeof Otherwise];
-};
-type CAntiMatchCase = { t: "anti-match-case"; afterIndexOffset: number };
-type CCompensate = {
-  t: "compensate";
-  withIndexOffset: number;
-  antiIndexOffset: number;
-};
-type CCompensateEnd = {
-  t: "compensate-end";
-  baseIndexOffset: number;
-  antiIndexOffset: number;
-};
-type CCompensateWith = {
-  t: "compensate-with";
-  baseIndexOffset: number;
-  antiIndexOffset: number;
-};
-type CAntiCompensate = { t: "anti-compensate"; baseIndexOffset: number };
-type CParallel = {
-  t: "par";
-  count:
-    | {
-        max: number;
-        min?: number;
-      }
-    | {
-        max?: number;
-        min: number;
-      }
-    | { max: number; min: number };
-  pairOffsetIndex: number;
-  firstEventIndex: number;
-};
-type CRetry = { t: "retry"; pairOffsetIndex: number };
-type CTimeout<CType extends CTypeProto> = {
-  t: "timeout";
-  duration: number;
-  consequence: CEvent<CType>;
-  pairOffsetIndex: number;
-};
-
-type CAntiRetry = { t: "anti-retry"; pairOffsetIndex: number };
-type CAntiTimeout = { t: "anti-timeout"; pairOffsetIndex: number };
-type CAntiParallel = { t: "anti-par"; pairOffsetIndex: number };
-
-export namespace Code {
-  export const Control = Enum(["fail", "return"] as const);
-  export type Control = Enum<typeof Control>;
-
-  export type CodeMaker<CType extends CTypeProto> = {
-    actor: ReturnType<typeof actor<CType>>;
-    bind: typeof binding;
-    event: typeof event<CType>;
-    retry: typeof retry<CType>;
-    choice: typeof choice<CType>;
-    compensate: typeof compensate<CType>;
-    matchCase: typeof matchCase<CType>;
-    match: typeof match<CType>;
-    parallel: typeof parallel<CType>;
-    timeout: typeof timeout<CType>;
-
-    Control: typeof Control;
-  };
-
-  export const make = <CType extends CTypeProto>(): CodeMaker<CType> => ({
-    actor: actor(),
-    bind: binding,
-    choice,
-    compensate,
-    event,
-    match,
-    matchCase,
-    parallel,
-    retry,
-    timeout,
-    Control,
-  });
-
-  const binding = (name: string, index: string): CEventBinding => ({
-    var: name,
-    index,
-  });
-
-  const actor = <CType extends CTypeProto>() => {
-    const CTypeRole = Role.refine<CType["role"]>().build();
-    return {
-      role: (role: CType["role"]): Actor<CType> => CTypeRole(role),
-      unique: (t: string) => Unique(t),
-    };
-  };
-
-  const event = <CType extends CTypeProto>(
-    actor: Actor<CType>,
-    name: CType["ev"],
-    x?: Pick<CEvent<CType>, "bindings" | "control">
-  ): CEvent<CType> => ({ t: "event", actor, name, ...(x || {}) });
-
-  const retry = <CType extends CTypeProto>(
-    workflow: CItem<CType>[]
-  ): CItem<CType>[] => [
-    { t: "retry", pairOffsetIndex: workflow.length + 1 },
-    ...workflow,
-    { t: "anti-retry", pairOffsetIndex: (workflow.length + 1) * -1 },
-  ];
-
-  const choice = <CType extends CTypeProto>(
-    events: [CEvent<CType>, CEvent<CType>, ...CEvent<CType>[]]
-  ): CItem<CType>[] => [
-    { t: "choice", antiIndexOffset: events.length + 1 },
-    ...events,
-    { t: "anti-choice" },
-  ];
-
-  // [0, 1,2,3, 4]
-  // 0 - start
-  // 123 - main
-  // 4 - end
-  // 5 - with
-  // 678 - compensation
-  // 9 - anti
-
-  const compensate = <CType extends CTypeProto>(
-    main: CItem<CType>[],
-    compensation: [CEvent<CType>, ...CItem<CType>[]]
-  ): CItem<CType>[] => {
-    const endOffset = main.length + 1;
-    const withOffset = endOffset + 1;
-    const antiOffset = withOffset + compensation.length + 1;
-    return [
-      {
-        t: "compensate",
-        withIndexOffset: withOffset,
-        antiIndexOffset: antiOffset,
-      },
-      ...main,
-      {
-        t: "compensate-end",
-        baseIndexOffset: endOffset * -1,
-        antiIndexOffset: 1 + compensate.length + 1,
-      },
-      {
-        t: "compensate-with",
-        baseIndexOffset: withOffset * -1,
-        antiIndexOffset: 1 + compensation.length,
-      },
-      ...compensation,
-      {
-        t: "anti-compensate",
-        baseIndexOffset: antiOffset * -1,
-      },
-    ];
-  };
-
-  const matchCase = <CType extends CTypeProto>(
-    t: CMatchCaseType<CType>,
-    item: readonly CItem<CType>[]
-  ): [CMatchCaseType<CType>, readonly CItem<CType>[]] => [t, item];
-
-  const match = <CType extends CTypeProto>(
-    workflow: WFWorkflow<CType>,
-    args: Record<string, string>,
-    cases: [CMatchCaseType<CType>, readonly CItem<CType>[]][]
-  ): CItem<CType>[] => {
-    let index = 0;
-    const inlinedCases: CItem<CType>[] = [];
-    const offsets: number[] = [];
-
-    const afterIndexOffset =
-      cases.map((x) => x[1].length).reduce((a, b) => a + b, 0) +
-      cases.length * 2 +
-      1;
-
-    cases.forEach((c) => {
-      index += 1;
-      inlinedCases.push({ t: "match-case", case: c[0] });
-      offsets.push(index);
-
-      index += c[1].length;
-      inlinedCases.push(...c[1]);
-
-      index += 1;
-      inlinedCases.push({
-        t: "anti-match-case",
-        afterIndexOffset: afterIndexOffset - index,
-      });
-    });
-
-    return [
-      { t: "match", casesIndexOffsets: offsets, subworkflow: workflow, args },
-      ...inlinedCases,
-    ];
-  };
-
-  const parallel = <CType extends CTypeProto>(
-    count: CParallel["count"],
-    workflow: CEvent<CType>[]
-  ): CItem<CType>[] => [
-    {
-      t: "par",
-      count,
-      pairOffsetIndex: workflow.length + 1,
-      firstEventIndex: (() => {
-        const firstEventIndex = workflow.findIndex((e) => e.t === "event");
-        if (firstEventIndex === -1) throw new Error("ev not found");
-        return firstEventIndex + 1;
-      })(),
-    },
-    ...workflow,
-    { t: "anti-par", pairOffsetIndex: workflow.length + 1 },
-  ];
-
-  const timeout = <CType extends CTypeProto>(
-    duration: number,
-    workflow: CItem<CType>[],
-    consequence: CEvent<CType>
-  ): CItem<CType>[] => [
-    {
-      t: "timeout",
-      duration,
-      consequence,
-      pairOffsetIndex: workflow.length + 1,
-    },
-    ...workflow,
-    { t: "anti-timeout", pairOffsetIndex: (workflow.length + 1) * -1 },
-  ];
-}
+import {
+  Actor,
+  CAntiParallel,
+  CAntiRetry,
+  CAntiTimeout,
+  CChoice,
+  CCompensationFastQuery,
+  CEvent,
+  CItem,
+  CMatch,
+  CParallel,
+  CRetry,
+  CTimeout,
+  Code,
+  Exact,
+  Otherwise,
+  WFWorkflow,
+  validateBindings,
+} from "./wfcode.js";
 
 // Stack
 type StackItem<CType extends CTypeProto> =
@@ -318,7 +54,7 @@ type SAntiParallel = Pick<CAntiParallel, "t"> & {};
 
 // Payload
 
-type EEvent<CType extends CTypeProto> = {
+export type EEvent<CType extends CTypeProto> = {
   t: "event";
   id: string;
   name: CType["ev"];
@@ -365,12 +101,8 @@ export type WFMachine<CType extends CTypeProto> = {
   state: () => State<CType["ev"]>;
   returned: () => boolean;
   availableTimeout: () => {
-    consequence: {
-      actor: Actor<CType>;
-      name: CType["ev"];
-      control: Code.Control | undefined;
-    };
-    dueFor: number;
+    ctimeout: CTimeout<CType>;
+    lateness: number;
   }[];
   activeCompensationCode: () => {
     codeIndex: number;
@@ -386,59 +118,6 @@ export type WFMachine<CType extends CTypeProto> = {
     control?: Code.Control;
     reason: null | "compensation" | "timeout";
   }[];
-};
-
-export type WFWorkflow<CType extends CTypeProto> = {
-  uniqueParams: string[];
-  code: Readonly<[CEvent<CType>, ...CItem<CType>[]]>;
-};
-
-export const validateBindings = <CType extends CTypeProto>(
-  workflow: WFWorkflow<CType>
-) => {
-  const availableContext = new Set(workflow.uniqueParams);
-  const errors: string[] = [];
-
-  workflow.code.forEach((x, index) => {
-    if (x.t === "match") {
-      const params = new Set(x.subworkflow.uniqueParams);
-
-      Object.entries(x.args).forEach(([binding, val]) => {
-        if (!availableContext.has(val)) {
-          errors.push(
-            `missing assigned value ${val} from context to ${binding} at index ${index}`
-          );
-        }
-
-        params.delete(binding);
-      });
-
-      if (params.size > 0) {
-        errors.push(
-          `unassigned match params: ${Array.from(params).join(
-            ", "
-          )}, at index ${index}`
-        );
-      }
-    }
-
-    if (x.t === "event") {
-      if (x.actor.t === "Unique") {
-        const uniqueName = x.actor.get();
-        if (!availableContext.has(uniqueName)) {
-          errors.push(`missing actor binding ${uniqueName} at index ${index}`);
-        }
-      }
-
-      x.bindings?.forEach((binding) => {
-        availableContext.add(binding.var);
-      });
-    }
-  });
-
-  if (errors.length > 0) {
-    throw new Error(errors.map((x) => `- ${x.trim()}`).join("\n"));
-  }
 };
 
 export const WFMachine = <CType extends CTypeProto>(
@@ -584,7 +263,6 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Find all active timeouts that is late. This is useful for telling which timeout commands are available to the users.
    */
-  const availableLateTimeouts = () => availableTimeouts();
 
   const activeCompensationCode = () =>
     Array.from(data.activeCompensation)
@@ -1290,31 +968,30 @@ export const WFMachine = <CType extends CTypeProto>(
     return fed;
   };
 
-  const state = () => ({
-    state: data.returnValue,
-    context: data.context,
-  });
+  const state = () => {
+    const evalContext = { index: data.executionIndex };
+    const atStack = getSMatchAtIndex(evalContext.index);
+    if (atStack) return atStack.inner.state();
 
-  const returned = () => data.returned;
+    return {
+      state: data.returnValue,
+      context: data.context,
+    };
+  };
 
-  const availableTimeoutExternal = () =>
-    availableLateTimeouts().map(
-      ({
-        ctimeout: {
-          consequence: { actor, name, control },
-        },
-        lateness,
-      }) => ({
-        consequence: { actor, name, control },
-        dueFor: lateness,
-      })
-    );
+  const returned = () => {
+    const evalContext = { index: data.executionIndex };
+    const atStack = getSMatchAtIndex(evalContext.index);
+    if (atStack) return atStack.inner.returned();
+
+    return data.returned;
+  };
 
   return {
     tick,
     state,
     returned,
-    availableTimeout: availableTimeoutExternal,
+    availableTimeout: availableTimeouts,
     availableCommands: availableCommands,
     activeCompensationCode: activeCompensationCode,
     availableCompensateable: () =>
@@ -1324,36 +1001,3 @@ export const WFMachine = <CType extends CTypeProto>(
       })),
   };
 };
-
-export namespace CCompensationFastQuery {
-  const construct = <CType extends CTypeProto>(
-    workflow: WFWorkflow<CType>["code"]
-  ) => {
-    const compensateWithBlock: { start: number; end: number }[] = [];
-
-    let compensationWithStartIndexes: number[] = [];
-    workflow.forEach((line, index) => {
-      if (line.t === "compensate-with") {
-        compensationWithStartIndexes.push(index);
-        return;
-      } else if (line.t === "anti-compensate") {
-        const start = compensationWithStartIndexes.pop();
-        if (!start) return;
-        compensateWithBlock.push({ start: start, end: index });
-      }
-    });
-
-    return compensateWithBlock;
-  };
-
-  export const make = <CType extends CTypeProto>(
-    workflow: WFWorkflow<CType>["code"]
-  ) => {
-    const list = construct(workflow);
-
-    return {
-      isInsideWithBlock: (x: number) =>
-        list.findIndex((entry) => x > entry.start && x < entry.end) !== -1,
-    };
-  };
-}
