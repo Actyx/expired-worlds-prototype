@@ -71,3 +71,17 @@ The entirety of the machine should be able to process not a linear log but a tre
     ▼          ▼         ▼    
  Bid @ T1  Bid @ T2  Bid @ T3 
 ```
+
+## Event Marking the Closing of Parallel
+
+A machine moves on from a parallel block when an event after the parallel is detected.
+Let's call this "closing"; while this does not really close the parallel from having more instance being added to it, due to possibilities of future time travel, "closing" will just move the machine away and ignore the parallel from the time being.
+
+Parallel consumes several branches in the multiverse.
+Intuitively the closing event must be preceeded by one of the branch in the multiverse.
+However that cannot happen because a machine must choose one of the branch and there is no mechanism for that (at least for non participant of a particular branch).
+
+Instead the closing event must follow the predecessor just like the other branches.
+
+A parallel is interpreted as a rich state triggered by a particular event predecessor that allows the machine to peers into multiple realities it produces, but the event itself is still a part of the main branch which the multiple realities are perceived as to collapse into.
+

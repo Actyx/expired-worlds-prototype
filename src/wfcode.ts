@@ -258,7 +258,7 @@ export namespace Code {
       firstEventIndex: (() => {
         const firstEventIndex = workflow.findIndex((e) => e.t === "event");
         if (firstEventIndex === -1) throw new Error("ev not found");
-        return firstEventIndex + 1;
+        return 1 + firstEventIndex;
       })(),
     },
     ...workflow,

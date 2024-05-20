@@ -1,5 +1,10 @@
 import { XEventKey } from "./ax-mock/index.js";
-import { ActyxWFBusiness, CTypeProto, InternalTag } from "./consts.js";
+import {
+  ActyxWFBusiness,
+  CTypeProto,
+  InternalTag,
+  sortByEventKey,
+} from "./consts.js";
 import { ExcludeArrayMember, Ord } from "./utils.js";
 
 type EventId = string;
@@ -15,6 +20,7 @@ export namespace MultiverseTree {
     ) => ActyxWFBusiness<CType> | UnregisteredEvent | null;
     has: (e: ActyxWFBusiness<CType>) => boolean;
     getNext: (e: ActyxWFBusiness<CType>) => ActyxWFBusiness<CType>[];
+    getNextById: (e: string) => ActyxWFBusiness<CType>[];
     getById: (id: string) => null | ActyxWFBusiness<CType>;
     isHead: (e: ActyxWFBusiness<CType>) => boolean;
     isRoot: (e: ActyxWFBusiness<CType>) => boolean;
@@ -29,6 +35,12 @@ export namespace MultiverseTree {
       e: ActyxWFBusiness<CType>
     ) => null | ActyxWFBusiness<CType>[];
     getCompensationChainForwards: (
+      e: ActyxWFBusiness<CType>
+    ) => null | ActyxWFBusiness<CType>[];
+    nextMostCanonChain: (
+      e: ActyxWFBusiness<CType>
+    ) => null | ActyxWFBusiness<CType>[];
+    nextCompensateChain: (
       e: ActyxWFBusiness<CType>
     ) => null | ActyxWFBusiness<CType>[];
     /**
@@ -55,15 +67,15 @@ export namespace MultiverseTree {
     const recalculateCanonChain = (eventId: string): RootInfo => {
       const chain = [eventId];
       while (true) {
-        const next = Array.from(internal.next.get(chain[0]) || [])
-          .map((eventId) => {
-            const event = internal.infoMap.get(eventId);
-            if (!event) return null;
-            return { eventId, event, key: XEventKey.fromMeta(event.meta) };
-          })
-          .filter((x): x is Exclude<typeof x, null> => x !== null)
-          .sort((a, b) => Ord.toNum(Ord.cmp(a.key, b.key)))
-          .at(0);
+        const next = sortByEventKey(
+          Array.from(internal.next.get(chain[0]) || [])
+            .map((eventId) => {
+              const event = internal.infoMap.get(eventId);
+              if (!event) return null;
+              return event;
+            })
+            .filter((x): x is Exclude<typeof x, null> => x !== null)
+        ).at(0);
 
         if (!next) {
           return {
@@ -72,7 +84,7 @@ export namespace MultiverseTree {
           };
         }
 
-        chain.push(next.eventId);
+        chain.push(next.meta.eventId);
       }
     };
 
@@ -114,17 +126,18 @@ export namespace MultiverseTree {
       while (true) {
         const nextEvents = internal.next.get(chain[chain.length - 1]);
         if (!nextEvents) break;
-        const canonNext = Array.from(nextEvents)
-          .map((eventId) => {
-            const ev = internal.infoMap.get(eventId);
-            if (!ev) return null;
-            return { ev, eventId, eventKey: XEventKey.fromMeta(ev.meta) };
-          })
-          .filter((x): x is Exclude<typeof x, null> => x !== null)
-          .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)))
-          .at(0);
+        const canonNext = sortByEventKey(
+          Array.from(nextEvents)
+            .map((eventId) => {
+              const ev = internal.infoMap.get(eventId);
+              if (!ev) return null;
+              return ev;
+            })
+            .filter((x): x is Exclude<typeof x, null> => x !== null)
+        ).at(0);
         if (!canonNext) break;
-        chain.push(canonNext?.eventId);
+
+        chain.push(canonNext?.meta.eventId);
       }
     };
 
@@ -132,23 +145,25 @@ export namespace MultiverseTree {
       while (true) {
         const nextEvents = internal.next.get(chain[chain.length - 1]);
         if (!nextEvents) break;
-        const nexts = Array.from(nextEvents)
-          .map((eventId) => {
-            const ev = internal.infoMap.get(eventId);
-            if (!ev) return null;
-            return { ev, eventId, eventKey: XEventKey.fromMeta(ev.meta) };
-          })
-          .filter((x): x is Exclude<typeof x, null> => x !== null)
-          .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)));
+        const nexts = sortByEventKey(
+          Array.from(nextEvents)
+            .map((eventId) => {
+              const ev = internal.infoMap.get(eventId);
+              if (!ev) return null;
+              return ev;
+            })
+            .filter((x): x is Exclude<typeof x, null> => x !== null)
+        );
 
         const compensationNext = nexts.find(
           (x) =>
-            x.ev.meta.tags.findIndex((x) =>
+            x.meta.tags.findIndex((x) =>
               InternalTag.CompensationEvent.is(x)
             ) !== -1
         );
+
         if (compensationNext) {
-          chain.push(compensationNext.eventId);
+          chain.push(compensationNext.meta.eventId);
         }
 
         break;
@@ -163,8 +178,9 @@ export namespace MultiverseTree {
 
     const self: Type<CType> = {
       getById: (id) => internal.infoMap.get(id) || null,
-      getNext: (ev) =>
-        Array.from(internal.next.get(ev.meta.eventId) || [])
+      getNext: (ev) => self.getNextById(ev.meta.eventId),
+      getNextById: (id) =>
+        Array.from(internal.next.get(id) || [])
           .map((eventId) => internal.infoMap.get(eventId) || null)
           .filter((ev): ev is Exclude<typeof ev, null> => ev !== null),
       register: (ev) => {
@@ -274,13 +290,23 @@ export namespace MultiverseTree {
           .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)))
           .at(0);
 
-        if (!canonRoot) return null;
+        if (!canonRoot) return [];
 
         const infoChain = canonRoot.rootData.canonChain.map(
           (x) => internal.infoMap.get(x) || null
         );
         if (infoChain.findIndex((x) => x === null) !== -1) return null;
         return infoChain as ExcludeArrayMember<typeof infoChain, null>;
+      },
+      nextMostCanonChain: (e: ActyxWFBusiness<CType>) => {
+        const chainForward = self.getCanonChainForwards(e);
+        if (!chainForward) return null;
+        return chainForward.slice(1); // exclude `last` from the chain
+      },
+      nextCompensateChain: (e: ActyxWFBusiness<CType>) => {
+        const chainForward = self.getCompensationChainForwards(e);
+        if (!chainForward) return null;
+        return chainForward.slice(1); // exclude `last` from the chain
       },
     };
 

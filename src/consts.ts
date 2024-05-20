@@ -1,4 +1,6 @@
 import { ActyxEvent } from "@actyx/sdk";
+import { XEventKey } from "./ax-mock/index.js";
+import { Ord } from "./utils.js";
 
 export type CTypeProto = { ev: string; role: string };
 export type MakeCType<CType extends CTypeProto> = CType;
@@ -63,6 +65,16 @@ export type ActyxWFBusinessOrMarker<CType extends CTypeProto> = ActyxEvent<
 >;
 
 export type Chain<CType extends CTypeProto> = ActyxWFBusiness<CType>[];
+
+export const sortByEventKey = <CType extends CTypeProto>(
+  chain: Chain<CType>
+) => {
+  if (chain.length <= 1) return chain;
+  return chain
+    .map((ev) => ({ ev, eventKey: XEventKey.fromMeta(ev.meta) }))
+    .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)))
+    .map((e) => e.ev);
+};
 
 /**
  * Reads as "A diverge from B at"
