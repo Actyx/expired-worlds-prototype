@@ -34,6 +34,7 @@ export namespace MultiverseTree {
     getCompensationChainSpanning: (
       e: ActyxWFBusiness<CType>
     ) => null | ActyxWFBusiness<CType>[];
+    getRoots: () => ActyxWFBusiness<CType>[];
     getCompensationChainForwards: (
       e: ActyxWFBusiness<CType>
     ) => null | ActyxWFBusiness<CType>[];
@@ -177,6 +178,10 @@ export namespace MultiverseTree {
     };
 
     const self: Type<CType> = {
+      getRoots: () =>
+        Array.from(internal.rootOf.keys())
+          .map((x) => internal.infoMap.get(x) || null)
+          .filter((x): x is Exclude<typeof x, null> => x !== null),
       getById: (id) => internal.infoMap.get(id) || null,
       getNext: (ev) => self.getNextById(ev.meta.eventId),
       getNextById: (id) =>

@@ -1,5 +1,6 @@
 import { ActyxWFBusiness, CTypeProto, sortByEventKey } from "./consts.js";
 import { MultiverseTree } from "./reality.js";
+import { Enum } from "./utils.js";
 import {
   Actor,
   CAntiParallel,
@@ -105,7 +106,7 @@ export const statesAreEqual = <T extends string>(a: State<T>, b: State<T>) => {
 };
 
 export type WFMachine<CType extends CTypeProto> = {
-  tick: (state: EEvent<CType>) => boolean;
+  tick: (input: EEvent<CType>) => boolean;
   state: () => State<CType["ev"]>;
   returned: () => boolean;
   availableTimeout: () => {
@@ -133,6 +134,9 @@ export const WFMachine = <CType extends CTypeProto>(
   wfWorkflow: WFWorkflow<CType>,
   multiverse: MultiverseTree.Type<CType>
 ): WFMachine<CType> => {
+  type TickInput = EEvent<CType>;
+  type TickRes = { jumpToIndex: number | null; fed: boolean };
+
   validateBindings(wfWorkflow);
   const workflow = wfWorkflow.code;
   const compensateFastQuery = CCompensationFastQuery.make(workflow);
@@ -399,10 +403,11 @@ export const WFMachine = <CType extends CTypeProto>(
     overrideReason?: null | "compensation" | "timeout"
   ) => {
     if (code?.t === "par") {
-      const { atStack, maxReached, minReached } = fetchParallelCriteria(
-        { index: data.executionIndex },
-        code
-      );
+      const {
+        atStack,
+        maxCreatedReached: maxReached,
+        minCompletedReached: minReached,
+      } = fetchParallelCriteria({ index: data.executionIndex }, code);
 
       if (!maxReached) {
         const index = data.executionIndex + code.firstEventIndex;
@@ -548,14 +553,24 @@ export const WFMachine = <CType extends CTypeProto>(
       return atStack;
     })();
 
+    const instanceCreatedCount = atStack.instances.length;
     const execDoneCount = atStack.instances.filter(
       (instance) => instance.entry.length >= evLength
     ).length;
 
-    const maxReached = execDoneCount >= maxCriteria;
-    const minReached = execDoneCount >= minCriteria;
+    const maxCreatedReached = instanceCreatedCount >= maxCriteria;
+    const minCompletedReached = execDoneCount >= minCriteria;
+    const maxCompletedReached = execDoneCount >= maxCriteria;
 
-    return { atStack, maxReached, minReached, evLength, max, min };
+    return {
+      atStack,
+      maxCreatedReached,
+      minCompletedReached,
+      maxCompletedReached,
+      evLength,
+      max,
+      min,
+    };
   };
 
   const recalculatePar = (stackItem: SParallel<CType>) => {
@@ -620,11 +635,16 @@ export const WFMachine = <CType extends CTypeProto>(
 
   type Continue = boolean;
   type EvalContext = { index: number };
-  const evaluateImpl = (evalContext: EvalContext): Continue => {
+  const autoEvaluateImpl = (evalContext: EvalContext): Continue => {
     // Handle Retry Code
     const code = workflow.at(evalContext.index);
     if (!code) {
       innerstate.returned = true;
+      return false;
+    }
+
+    if (code.t === "par") {
+      readInnerParallelProcessInstances(evalContext, code);
       return false;
     }
 
@@ -753,12 +773,12 @@ export const WFMachine = <CType extends CTypeProto>(
     return false;
   };
 
-  const evaluate = (evalContext: EvalContext) => {
+  const autoEvaluate = (evalContext: EvalContext) => {
     while (true) {
       recalculateResult(evalContext);
       if (innerstate.returned) break;
 
-      const shouldContinue = evaluateImpl(evalContext);
+      const shouldContinue = autoEvaluateImpl(evalContext);
 
       if (shouldContinue) continue;
 
@@ -766,22 +786,7 @@ export const WFMachine = <CType extends CTypeProto>(
     }
   };
 
-  const feedCompensation = (evalContext: EvalContext, e: EEvent<CType>) => {
-    const firstMatching = availableCompensateable()
-      .filter((x) => x.firstCompensation.name === e.name)
-      .at(0);
-
-    if (firstMatching) {
-      const firstMatchingIndex = firstMatching.firstCompensationIndex;
-      active.activeCompensation.delete(firstMatching.compensationIndex);
-      evalContext.index = firstMatchingIndex;
-      data.executionIndex = firstMatchingIndex;
-      return feedEvent(evalContext, firstMatching.firstCompensation, e);
-    }
-    return false;
-  };
-
-  const feedTimeout = (evalContext: EvalContext, e: EEvent<CType>) => {
+  const tickTimeout = (evalContext: EvalContext, e: EEvent<CType>): TickRes => {
     const lastMatching = availableTimeouts()
       .filter((x) => x.ctimeout.consequence.name === e.name)
       .at(0);
@@ -798,12 +803,9 @@ export const WFMachine = <CType extends CTypeProto>(
         },
       };
 
-      evalContext.index = lastMatching.antiIndex + 1;
-      data.executionIndex = lastMatching.antiIndex + 1;
-
-      return true;
+      return { fed: true, jumpToIndex: lastMatching.antiIndex + 1 };
     }
-    return false;
+    return { fed: false, jumpToIndex: null };
   };
 
   const feedEvent = (
@@ -817,17 +819,16 @@ export const WFMachine = <CType extends CTypeProto>(
         t: "event",
         payload: e.payload,
       };
-      evalContext.index += 1;
       return true;
     }
     return false;
   };
 
-  const feedChoice = (
+  const tickChoice = (
     evalContext: EvalContext,
     code: CChoice,
     e: EEvent<CType>
-  ) => {
+  ): TickRes => {
     const eventStartIndex = evalContext.index + 1;
     const antiIndex = evalContext.index + code.antiIndexOffset;
     const firstMatching = workflow
@@ -849,10 +850,15 @@ export const WFMachine = <CType extends CTypeProto>(
         t: "event",
         payload: e.payload,
       };
-      evalContext.index = antiIndex;
-      return true;
+      return {
+        fed: true,
+        jumpToIndex: antiIndex,
+      };
     }
-    return false;
+    return {
+      fed: false,
+      jumpToIndex: null,
+    };
   };
 
   const feed = (
@@ -860,30 +866,19 @@ export const WFMachine = <CType extends CTypeProto>(
     code: CItem<CType>,
     e: EEvent<CType>
   ) => {
-    let isFed = false;
-
     if (code?.t === "event") {
-      isFed = feedEvent(evalContext, code, e);
+      return feedEvent(evalContext, code, e);
     }
 
-    if (!isFed && code?.t === "choice") {
-      isFed = feedChoice(evalContext, code, e);
-    }
-
-    if (!isFed) {
-      isFed = feedTimeout(evalContext, e);
-    }
-
-    if (!isFed) {
-      isFed = feedCompensation(evalContext, e);
-    }
-    return isFed;
+    return false;
   };
 
-  const tickInnerParallelProcessInstances = (
+  /**
+   * Explores the "children" of parallels
+   */
+  const readInnerParallelProcessInstances = (
     evalContext: EvalContext,
-    parallelCode: CParallel,
-    e: EEvent<CType>
+    parallelCode: CParallel
   ) => {
     let fed = false;
     const { atStack, evLength } = fetchParallelCriteria(
@@ -905,7 +900,7 @@ export const WFMachine = <CType extends CTypeProto>(
       .getNextById(atStack.lastEventId)
       .filter(
         (ev) =>
-          e.name === firstEventCode.name &&
+          ev.payload.t === firstEventCode.name &&
           !registeredFirstEventIds.has(ev.meta.eventId)
       );
 
@@ -941,63 +936,35 @@ export const WFMachine = <CType extends CTypeProto>(
   const tickInnerParallelRecursive = (
     evalContext: EvalContext,
     parallelCode: CParallel,
-    e: EEvent<CType>
-  ): { nextEvaluated: null | number; fed: boolean } => {
-    let nextEvaluated: number | null = null;
+    input: TickInput
+  ): TickRes => {
+    let jumpToIndex: number | null = null;
+    let fed = false;
 
-    let { fed } = tickInnerParallelProcessInstances(
-      evalContext,
-      parallelCode,
-      e
-    );
-
-    const { atStack, min, minReached, maxReached, evLength } =
+    const { atStack, min, minCompletedReached, maxCompletedReached, evLength } =
       fetchParallelCriteria(evalContext, parallelCode);
-
-    // Check if the parallel should have advanced.
-    // Predecessor depends if `min` is 0 or not.
-    // If `min` is 0, the event before the parallel can be the predecessor of the event after the parallel
-    const predecessorIds = atStack.instances
-      .filter((instance) => instance.entry.length === evLength)
-      .map((instance) => instance.entry[instance.entry.length - 1])
-      .map((ev) => ev.id);
-
-    if (min === 0) {
-      predecessorIds.push(atStack.lastEventId);
-    }
 
     // advance signal from predecessors
 
-    if (minReached) {
+    if (minCompletedReached) {
       // Can advance, how to advance? It depends if `min` is 0 or not.
       const nextEvalContext = { index: atStack.nextEvalIndex };
       // move nextEvalIndex as far as it can
-      evaluate(nextEvalContext);
+      autoEvaluate(nextEvalContext);
 
-      const innerCode = workflow.at(nextEvalContext.index);
-      if (!fed && innerCode && e) {
-        if (innerCode.t === "par") {
-          const res = tickInnerParallelRecursive(nextEvalContext, innerCode, e);
-          fed = res.fed;
-          if (fed) {
-            nextEvaluated = nextEvalContext.index;
-          }
-
-          nextEvaluated = res.nextEvaluated;
-        } else {
-          fed = feed(nextEvalContext, innerCode, e);
-          if (fed) {
-            nextEvaluated = nextEvalContext.index;
-          }
-        }
-      }
-
+      fed = tickAt(nextEvalContext, input);
       atStack.nextEvalIndex = nextEvalContext.index;
+
+      if (fed) {
+        jumpToIndex = Math.max(
+          atStack.nextEvalIndex,
+          evalContext.index + parallelCode.pairOffsetIndex + 1
+        );
+      }
     }
 
-    if (maxReached) {
-      // TODO: change advance code
-      nextEvaluated = Math.max(
+    if (!fed && maxCompletedReached) {
+      jumpToIndex = Math.max(
         atStack.nextEvalIndex,
         evalContext.index + parallelCode.pairOffsetIndex + 1
       );
@@ -1005,59 +972,116 @@ export const WFMachine = <CType extends CTypeProto>(
 
     return {
       fed,
-      nextEvaluated,
+      jumpToIndex: jumpToIndex,
     };
   };
 
-  const tickParallel = (parallelCode: CParallel, e: EEvent<CType>): boolean => {
-    let evalContext = { index: data.executionIndex };
-    const tickParallelRes = tickInnerParallelRecursive(
-      evalContext,
-      parallelCode,
-      e
-    );
-    if (tickParallelRes.nextEvaluated !== null) {
-      data.executionIndex = tickParallelRes.nextEvaluated;
+  const tickParallel = (
+    evalContext: EvalContext,
+    parallelCode: CParallel,
+    input: TickInput
+  ): TickRes => tickInnerParallelRecursive(evalContext, parallelCode, input);
+
+  const tickCompensation = (
+    evalContext: EvalContext,
+    e: TickInput
+  ): TickRes => {
+    // Compensation can only be triggered by event, not seek
+
+    const firstMatching = availableCompensateable()
+      .filter((x) => x.firstCompensation.name === e.name)
+      .at(0);
+
+    if (firstMatching) {
+      const firstMatchingIndex = firstMatching.firstCompensationIndex;
+      active.activeCompensation.delete(firstMatching.compensationIndex);
+      const fed = feedEvent(evalContext, firstMatching.firstCompensation, e);
+      if (fed) {
+        return { fed, jumpToIndex: firstMatchingIndex };
+      }
     }
 
-    evalContext = { index: data.executionIndex };
-    evaluate(evalContext);
-    data.executionIndex = evalContext.index;
-
-    return tickParallelRes.fed;
+    return { fed: false, jumpToIndex: null };
   };
 
-  const tickMatch = (_: CMatch<CType>, e: EEvent<CType>): boolean => {
-    const evalContext = { index: data.executionIndex };
+  const tickMatch = (
+    evalContext: EvalContext,
+    _: CMatch<CType>,
+    e: TickInput
+  ): TickRes => {
     const atStack = getSMatchAtIndex(evalContext.index);
     if (!atStack) {
       throw new Error("missing match at stack on evaluation");
     }
     data.stack[evalContext.index] = atStack;
-    const res = atStack.inner.tick(e);
-
-    evaluate(evalContext);
-    data.executionIndex = evalContext.index;
-    return res;
+    const fed = atStack.inner.tick(e);
+    return { fed, jumpToIndex: null };
   };
 
-  const tick = (e: EEvent<CType>): boolean => {
-    const evalContext = { index: data.executionIndex };
-    const code = workflow.at(evalContext.index);
-    let fed = false;
-    if (code?.t === "match") {
-      return tickMatch(code, e);
-    }
+  const tickRest = (
+    evalContext: EvalContext,
+    code: CItem<CType>,
+    e: TickInput
+  ): TickRes => {
+    const fed = (() => {
+      if (code?.t === "event") {
+        return feedEvent(evalContext, code, e);
+      }
+      return false;
+    })();
 
-    if (code?.t === "par") {
-      return tickParallel(code, e);
-    }
+    return {
+      fed,
+      jumpToIndex: fed ? evalContext.index + 1 : null,
+    };
+  };
+
+  const tickAt = (evalContext: EvalContext, e: TickInput): boolean => {
+    let fed = false;
+    const code = workflow.at(evalContext.index);
 
     if (code) {
-      fed = feed(evalContext, code, e);
+      const res = (() => {
+        // Jumps
+        // =========
+        const compRes = tickCompensation(evalContext, e);
+        if (compRes.fed) return compRes;
+
+        const timeoutRes = tickTimeout(evalContext, e);
+        if (timeoutRes.fed) return timeoutRes;
+
+        // Non Jumps
+        // =========
+        if (code?.t === "match") {
+          return tickMatch(evalContext, code, e);
+        }
+
+        if (code?.t === "choice") {
+          return tickChoice(evalContext, code, e);
+        }
+
+        if (code?.t === "par") {
+          return tickParallel(evalContext, code, e);
+        }
+
+        return tickRest(evalContext, code, e);
+      })();
+
+      fed = res.fed;
+
+      if (res?.jumpToIndex) {
+        evalContext.index = res.jumpToIndex;
+      }
     }
 
-    evaluate(evalContext);
+    autoEvaluate(evalContext);
+
+    return fed;
+  };
+
+  const tick = (input: TickInput): boolean => {
+    let evalContext = { index: data.executionIndex };
+    const fed = tickAt(evalContext, input);
     data.executionIndex = evalContext.index;
     return fed;
   };
@@ -1095,7 +1119,7 @@ export const WFMachine = <CType extends CTypeProto>(
     innerstate.returned = false;
   };
 
-  const advance = () => {
+  const advanceToCanon = () => {
     const next = () => {
       const last = data.lastProcessedEvent;
       if (!last) return multiverse.getCanonChain();
@@ -1103,6 +1127,8 @@ export const WFMachine = <CType extends CTypeProto>(
     };
     if (!next) throw new Error("cannot advance machine, chain not found");
   };
+
+  const advanceToEvent = (eventId: string) => {};
 
   return {
     tick,

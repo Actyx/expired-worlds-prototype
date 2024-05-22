@@ -286,6 +286,12 @@ export type WFWorkflow<CType extends CTypeProto> = {
   code: Readonly<[CEvent<CType>, ...CItem<CType>[]]>;
 };
 
+export const validate = <CType extends CTypeProto>(
+  workflow: WFWorkflow<CType>
+) => {
+  validateBindings(workflow);
+};
+
 export const validateBindings = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
 ) => {
