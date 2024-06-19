@@ -1,15 +1,8 @@
 import { describe, expect, it } from "@jest/globals";
 import { Enum, sleep } from "./utils.js";
-import {
-  Code,
-  Emit,
-  Exact,
-  One,
-  Otherwise,
-  Parallel,
-  WFMachine,
-} from "./wfmachine.js";
+import { Emit, One, Parallel, WFMachine } from "./wfmachine.js";
 import { MakeCType } from "./consts.js";
+import { Code } from "./wfcode.js";
 
 // TODO:
 // - Participations?
@@ -137,7 +130,7 @@ describe("machine", () => {
       });
 
       expect(
-        machine.availableTimeout().find((x) => {
+        machine.availableTimeouts().find((x) => {
           const actor = x.consequence.actor;
           return (
             actor.t === "Role" &&

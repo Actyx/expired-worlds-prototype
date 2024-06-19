@@ -1,17 +1,17 @@
 import { ActyxWFBusiness, CTypeProto, sortByEventKey } from "./consts.js";
 import { MultiverseTree } from "./reality.js";
-import { Enum } from "./utils.js";
 import {
   Actor,
   CAntiParallel,
   CAntiRetry,
   CAntiTimeout,
   CChoice,
-  CCompensationFastQuery,
+  CCompensationIndexer,
   CEvent,
   CItem,
   CMatch,
   CParallel,
+  CParallelIndexer,
   CRetry,
   CTimeout,
   Code,
@@ -35,8 +35,7 @@ type SMatch<CType extends CTypeProto> = Pick<CMatch<CType>, "t"> & {
   inner: WFMachine<CType>;
 };
 type SEvent<CType extends CTypeProto> = Pick<CEvent<CType>, "t"> & {
-  id: string;
-  payload: EEvent<CType>["payload"];
+  event: EEvent<CType>;
 };
 type SRetry = Pick<CRetry, "t">;
 type SParallelExecution<CType extends CTypeProto> = {
@@ -57,34 +56,13 @@ type STimeout<CType extends CTypeProto> = Pick<CTimeout<CType>, "t"> & {
 };
 type SAntiTimeout<CType extends CTypeProto> = Pick<CAntiTimeout, "t"> & {
   consequence: CTimeout<CType>["consequence"];
-  data: EEvent<CType>;
+  event: EEvent<CType>;
 };
 type SAntiParallel = Pick<CAntiParallel, "t"> & {};
 
 // Payload
 
-export type EEvent<CType extends CTypeProto> = {
-  t: "event";
-  id: string;
-  name: CType["ev"];
-  payload: Record<string, unknown>;
-};
-export namespace Emit {
-  export const event = <CType extends CTypeProto>(
-    id: string,
-    name: CType["ev"],
-    payload: Record<string, unknown>
-  ): EEvent<CType> => ({
-    id,
-    t: "event",
-    name,
-    payload,
-  });
-
-  export const fromWFEvent = <CType extends CTypeProto>(
-    ev: ActyxWFBusiness<CType>
-  ) => Emit.event(ev.meta.eventId, ev.payload.t, ev.payload.payload);
-}
+export type EEvent<CType extends CTypeProto> = ActyxWFBusiness<CType>;
 
 export const One: unique symbol = Symbol("One");
 export const Parallel: unique symbol = Symbol("Parallel");
@@ -92,11 +70,15 @@ export type One<T = unknown> = [typeof One, T];
 export type Parallel<T = unknown> = [typeof Parallel, T[]];
 
 type StateName<T> = One<T> | Parallel<T>;
-export type State<T> = {
-  state: StateName<T> | null;
+export type State<CType extends CTypeProto> = {
+  state: StateName<CType["ev"]> | null;
+  lastProcessedEvent: null | EEvent<CType>;
   context: Record<string, unknown>;
 };
-export const statesAreEqual = <T extends string>(a: State<T>, b: State<T>) => {
+export const statesAreEqual = <CType extends CTypeProto>(
+  a: State<CType>,
+  b: State<CType>
+) => {
   if (a.state !== b.state) return false;
   const allKeys = Array.from(new Set(Object.keys(a).concat(Object.keys(b))));
   const foundDiscrepancyIndex = allKeys.findIndex(
@@ -107,9 +89,9 @@ export const statesAreEqual = <T extends string>(a: State<T>, b: State<T>) => {
 
 export type WFMachine<CType extends CTypeProto> = {
   tick: (input: EEvent<CType>) => boolean;
-  state: () => State<CType["ev"]>;
+  state: () => State<CType>;
   returned: () => boolean;
-  availableTimeout: () => {
+  availableTimeouts: () => {
     ctimeout: CTimeout<CType>;
     lateness: number;
   }[];
@@ -125,12 +107,14 @@ export type WFMachine<CType extends CTypeProto> = {
     actor: Actor<CType>;
     name: CType["ev"];
     control?: Code.Control;
-    reason: null | "compensation" | "timeout";
+    reason: null | "compensation" | "timeout" | "parallel";
   }[];
+  advanceToMostCanon: () => void;
+  resetAndAdvanceToMostCanon: () => void;
+  resetAndAdvanceToEventId: (eventId: string) => void;
 };
 
 export const WFMachine = <CType extends CTypeProto>(
-  self: { id: string },
   wfWorkflow: WFWorkflow<CType>,
   multiverse: MultiverseTree.Type<CType>
 ): WFMachine<CType> => {
@@ -138,8 +122,10 @@ export const WFMachine = <CType extends CTypeProto>(
   type TickRes = { jumpToIndex: number | null; fed: boolean };
 
   validateBindings(wfWorkflow);
+
   const workflow = wfWorkflow.code;
-  const compensateFastQuery = CCompensationFastQuery.make(workflow);
+  const ccompensateIndexer = CCompensationIndexer.make(workflow);
+  const cparallelIndexer = CParallelIndexer.make(workflow);
 
   const data = {
     resultCalcIndex: 0,
@@ -274,7 +260,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
       if (code?.t === "event" && atStack?.t === "event") {
         if (inParallel === 0) {
-          return atStack.id;
+          return atStack.event.meta.eventId;
         }
       }
       i--;
@@ -315,7 +301,6 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Find all active timeouts that is late. This is useful for telling which timeout commands are available to the users.
    */
-
   const activeCompensationCode = () =>
     Array.from(active.activeCompensation)
       .map((codeIndex) => {
@@ -343,7 +328,10 @@ export const WFMachine = <CType extends CTypeProto>(
           throw new Error("compensate first event at stack type mismatch");
         }
 
-        return { codeIndex, firstEventId: firstEventAtStack.id };
+        return {
+          codeIndex,
+          firstEventId: firstEventAtStack.event.meta.eventId,
+        };
       })
       .sort((a, b) => {
         // in case of nested timeouts: sorted by last / innermost compensation
@@ -394,48 +382,37 @@ export const WFMachine = <CType extends CTypeProto>(
       });
 
   /**
-   * extract available commands, recursesively when needed
+   * Extract valid next event types
    */
-  const extractAvailableCommandFromSingularCode = (
+  const extractValidNext = (
     index: number,
     result: ReturnType<WFMachine<CType>["availableCommands"]>,
-    code: CItem<CType>,
-    overrideReason?: null | "compensation" | "timeout"
+    code: CItem<CType>
   ) => {
     if (code?.t === "par") {
-      const {
-        atStack,
-        maxCreatedReached: maxReached,
-        minCompletedReached: minReached,
-      } = fetchParallelCriteria({ index: data.executionIndex }, code);
+      // parStarts
+      (() => {
+        const firstIndex = index + code.firstEventIndex;
+        const firstChildCode = workflow.at(firstIndex);
+        if (!firstChildCode) return;
+        extractValidNext(firstIndex, result, firstChildCode);
+      })();
 
-      if (!maxReached) {
-        const index = data.executionIndex + code.firstEventIndex;
-        const eventCode = workflow.at(index);
-        if (eventCode) {
-          extractAvailableCommandFromSingularCode(index, result, eventCode);
-        }
-      }
-
-      atStack.instances.map((instance) => {
-        const index =
-          data.executionIndex + code.firstEventIndex + instance.entry.length;
-        const eventCode = workflow.at(index);
-        if (eventCode) {
-          extractAvailableCommandFromSingularCode(index, result, eventCode);
-        }
+      const parStack = fetchParallelCriteria({ index }, code).atStack;
+      parStack.instances.map((instance) => {
+        const childIndex = index + code.firstEventIndex + instance.entry.length;
+        const childCode = workflow.at(index);
+        if (!childCode) return;
+        extractValidNext(childIndex, result, childCode);
       });
 
-      if (minReached) {
-        const maybeCEv = workflow.at(atStack.nextEvalIndex);
-        if (maybeCEv) {
-          extractAvailableCommandFromSingularCode(
-            atStack.nextEvalIndex,
-            result,
-            maybeCEv
-          );
-        }
-      }
+      // nextOfPar
+      (() => {
+        const maybeCEv = workflow.at(parStack.nextEvalIndex);
+        if (!maybeCEv) return;
+        extractValidNext(parStack.nextEvalIndex, result, maybeCEv);
+      })();
+      return;
     }
 
     if (code?.t === "match") {
@@ -443,6 +420,7 @@ export const WFMachine = <CType extends CTypeProto>(
       if (smatch && smatch.t === "match") {
         result.push(...smatch.inner.availableCommands());
       }
+      return;
     }
 
     if (code?.t === "event") {
@@ -451,62 +429,53 @@ export const WFMachine = <CType extends CTypeProto>(
         name,
         actor: code.actor,
         control,
-        reason:
-          overrideReason ||
-          (compensateFastQuery.isInsideWithBlock(index)
-            ? "compensation"
-            : null),
+        reason: (() => {
+          if (ccompensateIndexer.isInsideWithBlock(index))
+            return "compensation";
+          if (cparallelIndexer.isParallelStart(index)) return "parallel";
+          return null;
+        })(),
       });
+      return;
     }
 
     if (code?.t === "choice") {
       const eventStartIndex = data.executionIndex + 1;
       const antiIndex = data.executionIndex + code.antiIndexOffset;
       workflow
-        .slice(eventStartIndex, antiIndex) // take the CEvent between the choice and anti-choice
-        .forEach((x, index) => {
-          if (x.t !== "event") {
-            // defensive measure, should not exist
-            throw new Event("codes inside are not CEvent");
-          }
-
-          const codeIndex = eventStartIndex + index;
-
-          extractAvailableCommandFromSingularCode(codeIndex, result, x);
-        });
+        .map((code, line) => ({ code, line }))
+        .slice(eventStartIndex, antiIndex)
+        .forEach(({ code, line }) => extractValidNext(line, result, code));
+      return;
     }
   };
 
-  const availableCommands = (): ReturnType<
+  const availableNexts = (): ReturnType<
     WFMachine<CType>["availableCommands"]
   > => {
     const code = workflow.at(data.executionIndex);
     const result: ReturnType<WFMachine<CType>["availableCommands"]> = [];
 
     if (code) {
-      extractAvailableCommandFromSingularCode(
-        data.executionIndex,
-        result,
-        code
-      );
+      extractValidNext(data.executionIndex, result, code);
     }
 
     availableTimeouts().forEach((timeout) => {
-      extractAvailableCommandFromSingularCode(
-        timeout.timeoutIndex,
-        result,
-        timeout.ctimeout.consequence,
-        "timeout"
-      );
+      const { name, control, actor } = timeout.ctimeout.consequence;
+      result.push({
+        name,
+        actor,
+        control,
+        reason: "timeout",
+      });
     });
 
     // TODO: review this code
     availableCompensateable().forEach((compensation) => {
-      extractAvailableCommandFromSingularCode(
+      extractValidNext(
         compensation.compensationIndex,
         result,
-        compensation.firstCompensation,
-        "compensation"
+        compensation.firstCompensation
       );
     });
 
@@ -577,7 +546,7 @@ export const WFMachine = <CType extends CTypeProto>(
     innerstate.returnValue = [
       Parallel,
       stackItem.instances.map(
-        (instance) => instance.entry[instance.entry.length - 1]?.name
+        (instance) => instance.entry[instance.entry.length - 1].payload.t
       ),
     ];
   };
@@ -592,7 +561,7 @@ export const WFMachine = <CType extends CTypeProto>(
       if (code?.t === "event" && stackItem?.t === "event") {
         code.bindings?.forEach((x) => {
           const index = x.index;
-          innerstate.context[x.var] = stackItem.payload[index];
+          innerstate.context[x.var] = stackItem.event.payload.payload[index];
         });
         innerstate.returnValue = [One, code.name];
 
@@ -602,8 +571,8 @@ export const WFMachine = <CType extends CTypeProto>(
       }
 
       if (code?.t === "anti-timeout" && stackItem?.t === "anti-timeout") {
-        const consequenceData = stackItem.data;
-        innerstate.returnValue = [One, consequenceData.name];
+        const consequenceData = stackItem.event;
+        innerstate.returnValue = [One, consequenceData.payload.t];
 
         const consequence = stackItem.consequence;
         if (consequence.control === Code.Control.fail) {
@@ -624,16 +593,10 @@ export const WFMachine = <CType extends CTypeProto>(
 
       data.resultCalcIndex += 1;
     }
-
-    // Handle parallel code
-    const code = workflow.at(data.resultCalcIndex);
-    const stackItem = data.stack.at(data.resultCalcIndex);
-    if (code?.t === "par" && stackItem?.t === "par") {
-      recalculatePar(stackItem);
-    }
   };
 
   type Continue = boolean;
+  const Continue = true as const;
   type EvalContext = { index: number };
   const autoEvaluateImpl = (evalContext: EvalContext): Continue => {
     // Handle Retry Code
@@ -724,7 +687,7 @@ export const WFMachine = <CType extends CTypeProto>(
     if (code.t === "match") {
       const atStack = getSMatchAtIndex(evalContext.index) || {
         t: "match",
-        inner: WFMachine<CType>(self, code.subworkflow, multiverse),
+        inner: WFMachine<CType>(code.subworkflow, multiverse),
       };
       data.stack[evalContext.index] = atStack;
       if (!atStack.inner.returned()) return false;
@@ -786,21 +749,17 @@ export const WFMachine = <CType extends CTypeProto>(
     }
   };
 
-  const tickTimeout = (evalContext: EvalContext, e: EEvent<CType>): TickRes => {
+  const tickTimeout = (e: EEvent<CType>): TickRes => {
+    // TODO: there should not be multiple matches, shouldn't timeout be unique?
     const lastMatching = availableTimeouts()
-      .filter((x) => x.ctimeout.consequence.name === e.name)
+      .filter((x) => x.ctimeout.consequence.name === e.payload.t)
       .at(0);
 
     if (lastMatching) {
       data.stack[lastMatching.antiIndex] = {
         t: "anti-timeout",
         consequence: lastMatching.ctimeout.consequence,
-        data: {
-          id: e.id,
-          t: "event",
-          name: lastMatching.ctimeout.consequence.name,
-          payload: {},
-        },
+        event: e,
       };
 
       return { fed: true, jumpToIndex: lastMatching.antiIndex + 1 };
@@ -813,12 +772,12 @@ export const WFMachine = <CType extends CTypeProto>(
     code: CEvent<CType>,
     e: EEvent<CType>
   ) => {
-    if (e.name === code.name) {
+    if (e.payload.payload.t === code.name) {
       data.stack[evalContext.index] = {
-        id: e.id,
         t: "event",
-        payload: e.payload,
+        event: e,
       };
+      data.lastProcessedEvent = e;
       return true;
     }
     return false;
@@ -840,15 +799,14 @@ export const WFMachine = <CType extends CTypeProto>(
         }
         return [index, x] as const;
       })
-      .find(([_, x]) => x.name === e.name);
+      .find(([_, x]) => x.name === e.payload.t);
 
     if (firstMatching) {
       const [indexOffset, _] = firstMatching;
       const eventIndex = eventStartIndex + indexOffset;
       data.stack[eventIndex] = {
-        id: e.id,
         t: "event",
-        payload: e.payload,
+        event: e,
       };
       return {
         fed: true,
@@ -861,18 +819,6 @@ export const WFMachine = <CType extends CTypeProto>(
     };
   };
 
-  const feed = (
-    evalContext: EvalContext,
-    code: CItem<CType>,
-    e: EEvent<CType>
-  ) => {
-    if (code?.t === "event") {
-      return feedEvent(evalContext, code, e);
-    }
-
-    return false;
-  };
-
   /**
    * Explores the "children" of parallels
    */
@@ -880,7 +826,6 @@ export const WFMachine = <CType extends CTypeProto>(
     evalContext: EvalContext,
     parallelCode: CParallel
   ) => {
-    let fed = false;
     const { atStack, evLength } = fetchParallelCriteria(
       evalContext,
       parallelCode
@@ -894,7 +839,7 @@ export const WFMachine = <CType extends CTypeProto>(
       throw new Error("parallel.firstEventIndex is not event code");
     }
     const registeredFirstEventIds = new Set(
-      atStack.instances.map((x) => x.entry[0].id)
+      atStack.instances.map((x) => x.entry[0].meta.eventId)
     );
     const newFirstEvents = multiverse
       .getNextById(atStack.lastEventId)
@@ -906,34 +851,31 @@ export const WFMachine = <CType extends CTypeProto>(
 
     newFirstEvents.forEach((e) => {
       const newInstance: SParallelExecution<CType> = {
-        entry: [Emit.fromWFEvent(e)],
+        entry: [e],
       };
       atStack.instances.push(newInstance);
-      fed = true;
     });
 
     // Advance registered parallel instances
-    atStack.instances.forEach((x) => {
+    atStack.instances.forEach((parallelStack) => {
       while (true) {
-        const index = x.entry.length;
+        const index = parallelStack.entry.length;
         if (index >= evLength) return;
         const code = workflow.at(index);
         if (code?.t !== "event") return;
-        const last = x.entry[x.entry.length - 1].id;
+        const last =
+          parallelStack.entry[parallelStack.entry.length - 1].meta.eventId;
         const validNext = multiverse
           .getNextById(last)
           .filter((ev) => ev.payload.t === code.name);
         const sortedNext = sortByEventKey(validNext).at(0);
         if (!sortedNext) return;
-        x.entry.push(Emit.fromWFEvent(sortedNext));
-        fed = true;
+        parallelStack.entry.push(sortedNext);
       }
     });
-
-    return { fed };
   };
 
-  const tickInnerParallelRecursive = (
+  const tickParallel = (
     evalContext: EvalContext,
     parallelCode: CParallel,
     input: TickInput
@@ -976,26 +918,21 @@ export const WFMachine = <CType extends CTypeProto>(
     };
   };
 
-  const tickParallel = (
-    evalContext: EvalContext,
-    parallelCode: CParallel,
-    input: TickInput
-  ): TickRes => tickInnerParallelRecursive(evalContext, parallelCode, input);
-
-  const tickCompensation = (
-    evalContext: EvalContext,
-    e: TickInput
-  ): TickRes => {
+  const tickCompensation = (e: TickInput): TickRes => {
     // Compensation can only be triggered by event, not seek
 
     const firstMatching = availableCompensateable()
-      .filter((x) => x.firstCompensation.name === e.name)
+      .filter((x) => x.firstCompensation.name === e.payload.t)
       .at(0);
 
     if (firstMatching) {
       const firstMatchingIndex = firstMatching.firstCompensationIndex;
       active.activeCompensation.delete(firstMatching.compensationIndex);
-      const fed = feedEvent(evalContext, firstMatching.firstCompensation, e);
+      const fed = feedEvent(
+        { index: firstMatching.firstCompensationIndex },
+        firstMatching.firstCompensation,
+        e
+      );
       if (fed) {
         return { fed, jumpToIndex: firstMatchingIndex };
       }
@@ -1024,9 +961,7 @@ export const WFMachine = <CType extends CTypeProto>(
     e: TickInput
   ): TickRes => {
     const fed = (() => {
-      if (code?.t === "event") {
-        return feedEvent(evalContext, code, e);
-      }
+      if (code?.t === "event") return feedEvent(evalContext, code, e);
       return false;
     })();
 
@@ -1044,26 +979,17 @@ export const WFMachine = <CType extends CTypeProto>(
       const res = (() => {
         // Jumps
         // =========
-        const compRes = tickCompensation(evalContext, e);
+        const compRes = tickCompensation(e);
         if (compRes.fed) return compRes;
 
-        const timeoutRes = tickTimeout(evalContext, e);
+        const timeoutRes = tickTimeout(e);
         if (timeoutRes.fed) return timeoutRes;
 
         // Non Jumps
         // =========
-        if (code?.t === "match") {
-          return tickMatch(evalContext, code, e);
-        }
-
-        if (code?.t === "choice") {
-          return tickChoice(evalContext, code, e);
-        }
-
-        if (code?.t === "par") {
-          return tickParallel(evalContext, code, e);
-        }
-
+        if (code?.t === "match") return tickMatch(evalContext, code, e);
+        if (code?.t === "choice") return tickChoice(evalContext, code, e);
+        if (code?.t === "par") return tickParallel(evalContext, code, e);
         return tickRest(evalContext, code, e);
       })();
 
@@ -1120,22 +1046,32 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const advanceToCanon = () => {
-    const next = () => {
-      const last = data.lastProcessedEvent;
-      if (!last) return multiverse.getCanonChain();
-      return multiverse.nextMostCanonChain(last);
-    };
-    if (!next) throw new Error("cannot advance machine, chain not found");
+    while (true) {
+      // NOTE: assume all chain are valid?
+      // TODO: tick must be given options (represeting branches of possibly invalid nextses and parallels)
+      // TODO: should we look for available commands first? but this feels that this cost too much.
+      const next = sortByEventKey(
+        (() => {
+          const last = data.lastProcessedEvent;
+          if (!last) return multiverse.getRoots();
+          return sortByEventKey(multiverse.getNextById(last.meta.eventId));
+        })()
+      );
+
+      if (next.length === 0) return;
+
+      const validCommands = availableNexts();
+    }
   };
 
-  const advanceToEvent = (eventId: string) => {};
+  const resetAndAdvanceToEvent = (eventId: string) => {};
 
   return {
     tick,
     state,
     returned,
-    availableTimeout: availableTimeouts,
-    availableCommands: availableCommands,
+    availableTimeouts: availableTimeouts,
+    availableCommands: availableNexts,
     activeCompensationCode: activeCompensationCode,
     availableCompensateable: () =>
       availableCompensateable().map((x) => ({

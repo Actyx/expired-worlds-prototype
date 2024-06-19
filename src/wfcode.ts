@@ -340,7 +340,40 @@ export const validateBindings = <CType extends CTypeProto>(
   }
 };
 
-export namespace CCompensationFastQuery {
+export namespace CParallelIndexer {
+  export const make = <CType extends CTypeProto>(
+    workflow: WFWorkflow<CType>["code"]
+  ) => {
+    const parStarts = workflow
+      .map((code, line) => ({ code, line }))
+      .filter(({ code, line }) => code.t === "par");
+
+    const parNexts = new Set(
+      parStarts
+        .map(({ line: parLine }) => {
+          const line = parLine + 1;
+          const code = workflow.at(line);
+          if (!code)
+            throw new Error(
+              "CParallelIndexer Error: no code after parallel opening"
+            );
+
+          // NOTE: only support event in parallel right now
+          if (code.t !== "event") return null;
+
+          return { code, line };
+        })
+        .filter((x): x is Exclude<typeof x, null> => x !== null)
+        .map((x) => x.line)
+    );
+
+    return {
+      isParallelStart: (line: number) => parNexts.has(line),
+    };
+  };
+}
+
+export namespace CCompensationIndexer {
   const construct = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]
   ) => {

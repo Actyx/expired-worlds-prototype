@@ -64,6 +64,8 @@ export type ActyxWFBusinessOrMarker<CType extends CTypeProto> = ActyxEvent<
   WFBusinessOrMarker<CType>
 >;
 
+// TODO: modify name, might mislead. Parallel is not part of the chain, because
+// the history can actually be a graph, unlike for example, git
 export type Chain<CType extends CTypeProto> = ActyxWFBusiness<CType>[];
 
 export const sortByEventKey = <CType extends CTypeProto>(
@@ -77,21 +79,15 @@ export const sortByEventKey = <CType extends CTypeProto>(
 };
 
 /**
- * Reads as "A diverge from B at"
- * 0 means that the chain diverge at the first event
- * if result === A.length it means the chain doesn't diverge
+ * Last point where chainA and chainB has the same eventId
  */
-export const divertedFromOtherChainAt = <CType extends CTypeProto>(
+export const divergencePoint = <CType extends CTypeProto>(
   chainA: Chain<CType>,
   chainB: Chain<CType>
 ): number => {
-  let sameIndex = 0;
+  let sameIndex = -1;
   while (true) {
-    const nextA = chainA.at(sameIndex);
-    const nextB = chainB.at(sameIndex);
-    if (!nextB) return chainA.length;
-    if (!nextA) return sameIndex;
-    if (nextA.meta.eventId !== nextB.meta.eventId) return sameIndex;
+    if (chainA.at(sameIndex + 1) !== chainB.at(sameIndex + 1)) return sameIndex;
     sameIndex++;
   }
 };

@@ -15,9 +15,12 @@ export namespace MultiverseTree {
   export type UnregisteredEvent = typeof UnregisteredEvent;
   export type Type<CType extends CTypeProto> = {
     register: (e: ActyxWFBusiness<CType>) => void;
-    getPredecessor: (
+    /**
+     * In the case of parallels, there can be more than one predecessors
+     */
+    getPredecessors: (
       e: ActyxWFBusiness<CType>
-    ) => ActyxWFBusiness<CType> | UnregisteredEvent | null;
+    ) => (ActyxWFBusiness<CType> | UnregisteredEvent)[];
     has: (e: ActyxWFBusiness<CType>) => boolean;
     getNext: (e: ActyxWFBusiness<CType>) => ActyxWFBusiness<CType>[];
     getNextById: (e: string) => ActyxWFBusiness<CType>[];
