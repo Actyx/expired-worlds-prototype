@@ -8,7 +8,7 @@ import {
   Tags,
 } from "@actyx/sdk";
 import * as Reality from "./reality.js";
-import { EEvent, WFMachine } from "./wfmachine.js";
+import { WFMachine } from "./wfmachine.js";
 export { Reality };
 import { Node } from "./ax-mock/index.js";
 import {
@@ -21,9 +21,10 @@ import {
   WFMarker,
   WFMarkerCompensationNeeded,
   WFMarkerCompensationDone,
-  sortByEventKey,
+  ActyxWFBusiness,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
+import { createLinearChain } from "./event-utils.js";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -71,7 +72,7 @@ export const run = <CType extends CTypeProto>(
     }
 
     const commands = data.wfMachine
-      .availableCommands()
+      .availableNexts()
       .filter((x) => {
         if (x.actor.t === "Role") {
           return x.actor.get() === params.self.role;
@@ -237,7 +238,6 @@ export namespace MachineCombinator {
       const canonWFMachine = WFMachine(workflow, multiverseTree);
       canonWFMachine.resetAndAdvanceToMostCanon();
 
-      // TODO: examine all compensations. Not just one
       const rememberedCompensation = compensationMap
         .getByActor(params.self.id)
         .sort((a, b) => b.directive.codeIndex - a.directive.codeIndex)
@@ -287,7 +287,7 @@ export namespace MachineCombinator {
       internal: () => data,
       machine: () => data.wfMachine,
       compensation: currentCompensation,
-      last: () => data.wfMachine.state().lastProcessedEvent,
+      last: () => data.wfMachine.latestStateEvent(),
       setToBuildingCompensation: () => {
         data = {
           t: "building-compensations",
@@ -305,8 +305,8 @@ export namespace MachineCombinator {
           const canonWFMachine = WFMachine(workflow, multiverseTree);
           canonWFMachine.advanceToMostCanon();
 
-          const lastEvent = currentData.wfMachine.state().lastProcessedEvent;
-          const canonLastEvent = canonWFMachine.state().lastProcessedEvent;
+          const lastEvent = currentData.wfMachine.latestStateEvent();
+          const canonLastEvent = canonWFMachine.latestStateEvent();
 
           const compensations =
             lastEvent &&
@@ -353,9 +353,12 @@ export namespace MachineCombinator {
           // check if compensation still applies
           // TODO: optimize compensation query
           const activeCompensationCode = currentData.wfMachine
-            .activeCompensationCode()
+            .availableCompensateable()
             .find(
-              (x) => x.codeIndex === currentData.compensationInfo.codeIndex
+              (x) =>
+                x.fromTimelineOf ===
+                  currentData.compensationInfo.fromTimelineOf &&
+                x.codeIndex === currentData.compensationInfo.codeIndex
             );
 
           // compensation is done
@@ -446,35 +449,11 @@ export namespace CompensationMap {
   };
 }
 
-/**
- * Linear chain = chain where parallels are ignored.
- */
-const createLinearChain = <CType extends CTypeProto>(
-  multiverse: Reality.MultiverseTree.Type<CType>,
-  point: EEvent<CType>
-) => {
-  const chain = [point];
-  while (true) {
-    const first = chain[0];
-    const predecessor = sortByEventKey(
-      multiverse
-        .getPredecessors(first)
-        .filter(
-          (x): x is EEvent<CType> =>
-            x !== Reality.MultiverseTree.UnregisteredEvent
-        )
-    ).at(0);
-    if (!predecessor) break;
-    chain.unshift(predecessor);
-  }
-  return chain;
-};
-
 const calculateCompensations = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>,
   multiverse: Reality.MultiverseTree.Type<CType>,
-  fromPoint: EEvent<CType>,
-  toPoint: EEvent<CType>
+  fromPoint: ActyxWFBusiness<CType>,
+  toPoint: ActyxWFBusiness<CType>
 ) => {
   // TODO: this is wrong. to do calculate compensations, one must also calculate
   const fromChain = createLinearChain(multiverse, fromPoint);
@@ -491,7 +470,7 @@ const calculateCompensations = <CType extends CTypeProto>(
     simulation.resetAndAdvanceToEventId(atDivergence.meta.eventId);
   }
   // Comps before divergence should not be accounted for
-  const compsBeforeDivergence = simulation.activeCompensationCode();
+  const compsBeforeDivergence = simulation.availableCompensateable();
   const compsBeforeDivergenceIndices = new Set(
     compsBeforeDivergence.map((x) => x.codeIndex)
   );
@@ -500,7 +479,7 @@ const calculateCompensations = <CType extends CTypeProto>(
   // advancing most canon might resolve some compensations.
   // `advanceToMostCanon` is the key function call that will eventually trigger CompensationDone
   simulation.advanceToMostCanon();
-  const allActiveCompensations = simulation.activeCompensationCode();
+  const allActiveCompensations = simulation.availableCompensateable();
 
   // subtract "before-divergence" from "all" and we get compensations that we need
   const activeCompensationsBetweenFromAndTwo = Array.from(
@@ -514,7 +493,7 @@ const calculateCompensations = <CType extends CTypeProto>(
       /**
        * The "from" attribute is identified by the first event within the compensation block, not from the "from point".
        */
-      fromTimelineOf: x.firstEventId,
+      fromTimelineOf: x.fromTimelineOf,
       toTimelineOf: toPoint.meta.eventId,
       codeIndex: x.codeIndex,
     })),

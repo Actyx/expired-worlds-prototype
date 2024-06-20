@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@jest/globals";
 import { Enum, sleep } from "./utils.js";
-import { Emit, One, Parallel, WFMachine } from "./wfmachine.js";
+import { One, Parallel, WFMachine } from "./wfmachine.js";
 import { MakeCType } from "./consts.js";
 import { Code } from "./wfcode.js";
 
@@ -668,7 +668,7 @@ describe("machine", () => {
       );
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.bid &&
@@ -700,7 +700,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === "accept" &&
@@ -712,7 +712,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === "deny" &&
@@ -745,7 +745,7 @@ describe("machine", () => {
       // min not reached
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.bid &&
@@ -757,7 +757,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.accept &&
@@ -771,7 +771,7 @@ describe("machine", () => {
       machine.tick(Emit.event(id, Ev.bid, {}));
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.bid &&
@@ -783,7 +783,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.accept &&
@@ -797,7 +797,7 @@ describe("machine", () => {
       machine.tick(Emit.event(id, Ev.bid, {}));
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.bid &&
@@ -809,7 +809,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.accept &&
@@ -849,7 +849,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.request &&
@@ -865,7 +865,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.bid &&
@@ -878,7 +878,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.cancelled &&
@@ -938,7 +938,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.doEnter &&
@@ -951,7 +951,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.withdraw &&
@@ -967,7 +967,7 @@ describe("machine", () => {
 
       expect(
         machine
-          .availableCommands()
+          .availableNexts()
           .find(
             (x) =>
               x.name === Ev.success &&

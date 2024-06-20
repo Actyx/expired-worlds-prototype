@@ -1,11 +1,10 @@
-import { describe, expect, it } from "@jest/globals";
-import { Reality, run } from "./index.js";
-import { v4 as uuidv4 } from "uuid";
+import { describe, it } from "@jest/globals";
+import { run } from "./index.js";
 import { Network, Node } from "./ax-mock/index.js";
-import { CTypeProto, MakeCType, WFBusinessOrMarker } from "./consts.js";
-import { Code, Exact, Otherwise, WFWorkflow } from "./wfmachine.js";
+import { MakeCType, WFBusinessOrMarker } from "./consts.js";
 import { Enum } from "./utils.js";
 import { Tags } from "@actyx/sdk";
+import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
 
 const Ev = Enum([
   "request",
@@ -245,7 +244,7 @@ describe("x", () => {
 
     console.log(manager.machine.machine().state());
     console.log(t1.machine.machine().state());
-    console.log(manager.machine.machine().availableCommands());
+    console.log(manager.machine.machine().availableNexts());
 
     findCommand(manager, Ev.assign).publish({ t: t1.identity.id });
   });
