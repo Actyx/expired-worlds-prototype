@@ -105,10 +105,8 @@ export const run = <CType extends CTypeProto>(
               )
             );
           }
-          const publishPromise = node.api.publish(
-            tags.applyTyped({ t: x.name, payload })
-          );
-          return publishPromise;
+
+          node.api.publish(tags.applyTyped({ t: x.name, payload }));
         },
       }));
 
@@ -317,7 +315,6 @@ export namespace MachineCombinator {
               lastEvent,
               canonLastEvent
             )?.compensations;
-
           if (compensations) {
             // register compensations to both compensation map and the persistence
             // layer: ax
@@ -336,8 +333,8 @@ export namespace MachineCombinator {
               }
             );
           }
-
           recalc();
+
           return;
         }
 

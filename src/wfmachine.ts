@@ -210,9 +210,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const getSMatchAtIndex = (index: number) => {
     const atStack = data.stack.at(index);
-    if (!atStack) return null;
-    if (atStack.t !== "match")
-      throw new Error("match stack position filled with non-match");
+    if (atStack?.t !== "match") return null;
     return atStack;
   };
 
@@ -497,7 +495,7 @@ export const WFMachine = <CType extends CTypeProto>(
    * Catch up with execution index
    */
   const recalculateResult = (evalContext: EvalContext) => {
-    while (data.resultCalcIndex < evalContext.index) {
+    const calc = (): Continue => {
       const code = workflow.at(data.resultCalcIndex);
       const stackItem = data.stack.at(data.resultCalcIndex);
       if (code?.t === "event" && stackItem?.t === "event") {
@@ -522,7 +520,7 @@ export const WFMachine = <CType extends CTypeProto>(
             throw new Error("cannot find retry while dealing with ");
           }
           resetIndex(evalContext, retryIndex + 1);
-          continue; // important
+          return true;
         } else if (consequence.control === "return") {
           innerstate.returned = true;
         }
@@ -536,6 +534,16 @@ export const WFMachine = <CType extends CTypeProto>(
             (instance) => instance.entry[instance.entry.length - 1]
           ),
         ];
+      }
+
+      return false;
+    };
+
+    calc();
+
+    while (data.resultCalcIndex < evalContext.index) {
+      if (calc()) {
+        continue;
       }
 
       data.resultCalcIndex += 1;
@@ -636,6 +644,8 @@ export const WFMachine = <CType extends CTypeProto>(
         t: "match",
         inner: WFMachine<CType>(code.subworkflow, multiverse),
       };
+      if (atStack.t !== "match")
+        throw new Error("match stack position filled with non-match");
       data.stack[evalContext.index] = atStack;
       if (!atStack.inner.returned()) return false;
 
@@ -719,7 +729,7 @@ export const WFMachine = <CType extends CTypeProto>(
     code: CEvent<CType>,
     e: ActyxWFBusiness<CType>
   ) => {
-    if (e.payload.payload.t === code.name) {
+    if (e.payload.t === code.name) {
       data.stack[evalContext.index] = {
         t: "event",
         event: e,
@@ -915,10 +925,12 @@ export const WFMachine = <CType extends CTypeProto>(
     };
   };
 
+  const id = `id:${Math.round(Math.random() * 1000)}`;
+
   const tickAt = (evalContext: EvalContext, e: TickInput | null): boolean => {
     let fed = false;
+    const code = workflow.at(evalContext.index);
     if (e) {
-      const code = workflow.at(evalContext.index);
       if (code) {
         const res = (() => {
           // Jumps
@@ -1014,7 +1026,8 @@ export const WFMachine = <CType extends CTypeProto>(
       const next = sortByEventKey(allNextEvents).at(0);
 
       if (next) {
-        tick(next);
+        const fed = tick(next);
+        if (fed === false) return;
       } else {
         tick(null);
         return;
