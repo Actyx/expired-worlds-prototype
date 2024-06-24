@@ -1,10 +1,11 @@
-import { describe, it } from "@jest/globals";
+import { describe, expect, it } from "@jest/globals";
 import { run } from "./index.js";
 import { Network, Node } from "./ax-mock/index.js";
 import { MakeCType, WFBusinessOrMarker } from "./consts.js";
 import { Enum } from "./utils.js";
 import { Tags } from "@actyx/sdk";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
+import { Parallel } from "./wfmachine.js";
 
 const Ev = Enum([
   "request",
@@ -196,179 +197,104 @@ const logistic: WFWorkflow<TheType> = {
  */
 const awhile = () => new Promise(setImmediate);
 
+const setup = (params: { id: string; role: Role }[]) => {
+  const makenetwork = Network.make<WFBusinessOrMarker<TheType>>;
+  const makenode = Node.make<WFBusinessOrMarker<TheType>>;
+
+  const network = makenetwork();
+
+  const agents = params.map((identity) => {
+    const node = makenode({ id: identity.id });
+    const machine = run({ self: identity, tags: workflowTag }, node, logistic);
+    network.join(node);
+    return { identity, node, machine };
+  });
+  type Agent = (typeof agents)[any];
+
+  const findAgent = (fn: (c: Agent) => boolean): Agent => {
+    const agent = agents.find(fn);
+    if (!agent) throw new Error("findAgent error");
+    return agent;
+  };
+
+  const findCommand = (agent: Agent, name: string) => {
+    const found = agent.machine.commands().find((x) => x.info.name === name);
+    if (!found)
+      throw new Error(`command ${name} not found in ${agent.identity.id}`);
+    return found;
+  };
+
+  return {
+    agents,
+    findAgent,
+    network,
+    findCommand,
+  };
+};
+
+const genScenario = () => {
+  const scenario = setup([
+    { id: "storage-src", role: Role.storage },
+    { id: "storage-dst", role: Role.storage },
+    { id: "manager", role: Role.manager },
+    { id: "t1", role: Role.transporter },
+    { id: "t2", role: Role.transporter },
+    { id: "t3", role: Role.transporter },
+  ]);
+  const [src, dst, manager, t1, t2, t3] = scenario.agents;
+
+  return {
+    ...scenario,
+    agents: { src, dst, manager, t1, t2, t3 } as const,
+  };
+};
+type Scenario = ReturnType<typeof genScenario>;
+
+/**
+ * request
+ */
+const sequenceOne = async (scenario: Scenario) => {
+  const { findCommand, agents } = scenario;
+  const { dst, manager, src } = agents;
+  await awhile();
+  findCommand(manager, Ev.request).publish({
+    from: src.identity.id,
+    to: dst.identity.id,
+    manager: manager.identity.id,
+  });
+  await awhile();
+};
+
+/**
+ * bidding
+ */
+const sequenceTwo = async (scenario: Scenario) => {
+  const { findCommand, agents } = scenario;
+  const { t1, t2, t3 } = agents;
+  await awhile();
+
+  findCommand(t1, Ev.bid).publish({ bidder: t1.identity.id });
+  findCommand(t2, Ev.bid).publish({ bidder: t2.identity.id });
+  findCommand(t3, Ev.bid).publish({ bidder: t3.identity.id });
+  await awhile();
+};
+
 describe("x", () => {
   it("x", async () => {
-    const makenetwork = Network.make<WFBusinessOrMarker<TheType>>;
-    const makenode = Node.make<WFBusinessOrMarker<TheType>>;
-    // setup network
-    const network = makenetwork();
-
-    const agents = [
-      { id: "storage-src", role: Role.storage },
-      { id: "storage-dst", role: Role.storage },
-      { id: "manager", role: Role.manager },
-      { id: "t1", role: Role.transporter },
-      { id: "t2", role: Role.transporter },
-      { id: "t3", role: Role.transporter },
-    ].map((identity) => {
-      const { id } = identity;
-      const node = makenode({ id });
-      const machine = run(
-        { self: identity, tags: workflowTag },
-        node,
-        logistic
+    const scenario = genScenario();
+    await sequenceOne(scenario);
+    const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+    [manager, src, t1, t2, t3].forEach((x) => {
+      expect(dst.machine.machine().state()).toEqual(
+        x.machine.machine().state()
       );
-      network.join(node);
-      return { identity, node, machine };
     });
 
-    await awhile();
+    expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
 
-    const findCommand = (agent: (typeof agents)[0], name: string) => {
-      const found = agent.machine.commands().find((x) => x.info.name);
-      if (!found) throw new Error("command not found");
-      return found;
-    };
-
-    const [src, dst, manager, t1, t2, t3] = agents;
-
-    findCommand(manager, Ev.request).publish({
-      src: src.identity.id,
-      dst: dst.identity.id,
-      m: manager.identity.id,
-    });
-
-    findCommand(t1, Ev.bid).publish({ bidder: t1.identity.id });
-    findCommand(t2, Ev.bid).publish({ bidder: t2.identity.id });
-    findCommand(t3, Ev.bid).publish({ bidder: t3.identity.id });
-
-    console.log(manager.machine.machine().state());
-    console.log(t1.machine.machine().state());
-    console.log(manager.machine.machine().availableNexts());
-
-    findCommand(manager, Ev.assign).publish({ t: t1.identity.id });
+    await sequenceTwo(scenario);
+    expect(dst.machine.machine().state().state?.[0]).toBe(Parallel);
+    expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
+    expect(dst.machine.machine().state().state?.[2]?.length).toBe(3);
   });
 });
-
-// describe("witness", () => {
-//   it("should track if reality is canon", async () => {
-//     const witness = Reality.witness<EventType>({ id: identify });
-
-//     witness.see(event2);
-
-//     const reality = await witness.canonReality();
-
-//     expect(reality.isCanon()).toBe(true);
-//     expect(reality.isExpired()).toBe(false);
-
-//     witness.retrospect();
-
-//     expect(reality.isCanon()).toBe(false);
-//     expect(reality.isExpired()).toBe(true);
-//   });
-
-//   it("should work", async () => {
-//     const witness = Reality.witness<EventType>({ id: identify });
-
-//     witness.see(event2);
-//     witness.see(event3);
-//     witness.see(event5);
-
-//     const reality1 = await witness.canonReality();
-
-//     witness.retrospect();
-
-//     witness.see(event1);
-//     witness.see(event2);
-//     witness.see(event3);
-//     witness.see(event4);
-//     witness.see(event5);
-
-//     const amendments = reality1.amendments();
-//     expect(amendments).not.toBe(Reality.AmendmentsNotReady);
-//     if (amendments === Reality.AmendmentsNotReady) throw new Error("fail");
-
-//     const first = amendments.at(0);
-//     expect(first).toBeTruthy();
-//     if (!first) throw new Error("fail");
-
-//     expect(first.past.history()).toEqual([event2, event3, event5]);
-//     expect(first.future.history()).toEqual([
-//       event1,
-//       event2,
-//       event3,
-//       event4,
-//       event5,
-//     ]);
-//     expect(first.divergentPoint).toEqual(event2);
-
-//     const reality2 = await witness.canonReality();
-//     expect(reality1.history() === first.past.history());
-//     expect(reality2.history() === first.future.history());
-//   });
-
-//   it("should track latest data", async () => {
-//     const witness = Reality.witness<EventType>({ id: identify });
-
-//     witness.see(event1);
-//     const reality = await witness.canonReality();
-
-//     expect(reality.latest()).toBe(event1);
-//     witness.see(event2);
-//     expect(reality.latest()).toBe(event2);
-//     witness.see(event3);
-//     expect(reality.latest()).toBe(event3);
-//     witness.see(event4);
-//     expect(reality.latest()).toBe(event4);
-//     witness.see(event5);
-//     expect(reality.latest()).toBe(event5);
-//   });
-
-//   it("should track previous snapshots", async () => {
-//     const witness = Reality.witness<EventType>({ id: identify });
-
-//     witness.see(event1);
-//     witness.see(event2);
-//     witness.see(event3);
-//     witness.see(event4);
-//     witness.see(event5);
-
-//     const reality = await witness.canonReality();
-//     const snap4 = reality.previous();
-//     expect(snap4?.latest()).toBe(event4);
-//     const snap3 = snap4?.previous();
-//     expect(snap3?.latest()).toBe(event3);
-//     const snap2 = snap3?.previous();
-//     expect(snap2?.latest()).toBe(event2);
-//     const snap1 = snap2?.previous();
-//     expect(snap1?.latest()).toBe(event1);
-//     const snapnull = snap1?.previous();
-//     expect(snapnull).toBe(null);
-//   });
-
-//   it("should track root", async () => {
-//     const witness = Reality.witness<EventType>({ id: identify });
-
-//     witness.see(event1);
-//     witness.see(event2);
-//     witness.see(event3);
-//     witness.see(event4);
-//     witness.see(event5);
-
-//     const reality = await witness.canonReality();
-//     expect(reality.first().latest()).toBe(event1);
-//   });
-
-//   it("should be able to get reality from snapshot", async () => {
-//     const witness = Reality.witness<EventType>({ id: identify });
-
-//     witness.see(event1);
-//     witness.see(event2);
-//     witness.see(event3);
-//     witness.see(event4);
-//     witness.see(event5);
-
-//     const reality = await witness.canonReality();
-//     expect(reality.first().real()).toBe(reality);
-//   });
-// });
