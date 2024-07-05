@@ -72,13 +72,16 @@ export const run = <CType extends CTypeProto>(
       return [];
     }
 
+    const context = data.wfMachine.state().context;
+    machineCombinator.logger.log("context", context);
+
     const commands = data.wfMachine
       .availableNexts()
       .filter((x) => {
-        if (x.actor.t === "Role") {
-          return x.actor.get() === params.self.role;
+        if (x.actor.t === "Unique") {
+          return context[x.actor.get()] === params.self.id;
         } else {
-          return x.actor.get() === params.self.id;
+          return x.actor.get() === params.self.role;
         }
       })
       .map((x) => ({
