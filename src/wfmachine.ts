@@ -8,6 +8,7 @@ import {
   CAntiRetry,
   CAntiTimeout,
   CChoice,
+  CCompensate,
   CCompensationIndexer,
   CEvent,
   CItem,
@@ -19,6 +20,7 @@ import {
   Code,
   Exact,
   Otherwise,
+  Unique,
   WFWorkflow,
   validateBindings,
 } from "./wfcode.js";
@@ -86,6 +88,13 @@ export const statesAreEqual = <CType extends CTypeProto>(
   return foundDiscrepancyIndex === -1; // -1 means not found in the context of `findIndex`
 };
 
+type Next<CType extends CTypeProto> = {
+  actor: Actor<CType>;
+  name: CType["ev"];
+  control?: Code.Control;
+  reason: null | "compensation" | "timeout" | "parallel";
+};
+
 export type WFMachine<CType extends CTypeProto> = {
   tick: (input: ActyxWFBusiness<CType> | null) => boolean;
   state: () => WFMachineState<CType>;
@@ -101,12 +110,7 @@ export type WFMachine<CType extends CTypeProto> = {
     name: CType["ev"];
     fromTimelineOf: string;
   }[];
-  availableNexts: () => {
-    actor: Actor<CType>;
-    name: CType["ev"];
-    control?: Code.Control;
-    reason: null | "compensation" | "timeout" | "parallel";
-  }[];
+  availableNexts: () => Next<CType>[];
   advanceToMostCanon: () => void;
   resetAndAdvanceToMostCanon: () => void;
   resetAndAdvanceToEventId: (eventId: string) => void;
@@ -115,7 +119,8 @@ export type WFMachine<CType extends CTypeProto> = {
 
 export const WFMachine = <CType extends CTypeProto>(
   wfWorkflow: WFWorkflow<CType>,
-  multiverse: MultiverseTree.Type<CType>
+  multiverse: MultiverseTree.Type<CType>,
+  contextArg = {} as Record<string, unknown>
 ): WFMachine<CType> => {
   type TickInput = ActyxWFBusiness<CType>;
   type TickRes = { jumpToIndex: number | null; fed: boolean };
@@ -126,6 +131,13 @@ export const WFMachine = <CType extends CTypeProto>(
   const workflow = wfWorkflow.code;
   const ccompensateIndexer = CCompensationIndexer.make(workflow);
   const cparallelIndexer = CParallelIndexer.make(workflow);
+
+  const mapUniqueActorOnNext = (res: Next<CType>): Next<CType> => {
+    if (res.actor.t === "Unique") {
+      res.actor = Unique(innerstate.context[res.actor.get()]);
+    }
+    return res;
+  };
 
   const data = {
     extraParCalcIndex: 0 as number | null, // does not support nested parallel
@@ -140,7 +152,7 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const innerstate = {
-    context: {} as Record<string, unknown>,
+    context: { ...contextArg } as Record<string, unknown>,
     state: null as State<CType> | null,
     returned: false,
   };
@@ -161,7 +173,7 @@ export const WFMachine = <CType extends CTypeProto>(
     // force recalculate context
     data.resultCalcIndex = 0;
     data.extraParCalcIndex = null; // does not support nested parallel
-    innerstate.context = {};
+    innerstate.context = { ...contextArg };
   };
 
   // Finders helpers
@@ -287,6 +299,22 @@ export const WFMachine = <CType extends CTypeProto>(
         return b.antiIndex - a.antiIndex;
       });
 
+  const firstEventIndexForCompensation = (
+    compensateIndex: number,
+    ccompensate: CCompensate
+  ) => {
+    let index = compensateIndex + 1;
+    while (index < ccompensate.withIndexOffset) {
+      if (index > data.stack.length - 1) return null;
+      if (workflow.at(index)?.t === "event") {
+        const stack = data.stack.at(index);
+        if (stack?.t === "event") return { index, event: stack };
+      }
+      index += 1;
+    }
+    return null;
+  };
+
   /**
    * Find all active compensateable
    * TODO: return next-events of compensate-with as compensations
@@ -302,17 +330,19 @@ export const WFMachine = <CType extends CTypeProto>(
         }
 
         const compensationIndex = index;
-        const firstEventIndex = index + 1;
-        const firstEvent = data.stack.at(firstEventIndex);
+        const firstEventInfo = firstEventIndexForCompensation(
+          index,
+          ccompensate
+        );
         const withIndex = index + ccompensate.withIndexOffset;
         const antiIndex = index + ccompensate.antiIndexOffset;
         const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
-        if (firstEvent?.t !== "event") {
-          throw new Error(
-            `compensate query fatal error: compensation.body first data at stack is missing`
-          );
-        }
+
+        // if first event is not emitted, compensation is not actuallly active
+        if (!firstEventInfo) return null;
+        const firstEvent = firstEventInfo.event;
+
         if (firstCompensation?.t !== "event") {
           throw new Error(
             `compensate query fatal error: compensation.with first code is not of type event`
@@ -330,6 +360,7 @@ export const WFMachine = <CType extends CTypeProto>(
           fromTimelineOf: firstEvent.event.meta.eventId,
         };
       })
+      .filter((x): x is Exclude<typeof x, null> => x !== null)
       .sort((a, b) => {
         // in case of nested compensations: sort by last/innermost timeout
         return b.compensationIndex - a.compensationIndex;
@@ -382,17 +413,19 @@ export const WFMachine = <CType extends CTypeProto>(
 
     if (code?.t === "event") {
       const { name, control } = code;
-      result.push({
-        name,
-        actor: code.actor,
-        control,
-        reason: (() => {
-          if (ccompensateIndexer.isInsideWithBlock(index))
-            return "compensation";
-          if (cparallelIndexer.isParallelStart(index)) return "parallel";
-          return null;
-        })(),
-      });
+      result.push(
+        mapUniqueActorOnNext({
+          name,
+          actor: code.actor,
+          control,
+          reason: (() => {
+            if (ccompensateIndexer.isInsideWithBlock(index))
+              return "compensation";
+            if (cparallelIndexer.isParallelStart(index)) return "parallel";
+            return null;
+          })(),
+        })
+      );
       return;
     }
 
@@ -417,12 +450,14 @@ export const WFMachine = <CType extends CTypeProto>(
 
     availableTimeouts().forEach((timeout) => {
       const { name, control, actor } = timeout.ctimeout.consequence;
-      result.push({
-        name,
-        actor,
-        control,
-        reason: "timeout",
-      });
+      result.push(
+        mapUniqueActorOnNext({
+          name,
+          actor,
+          control,
+          reason: "timeout",
+        })
+      );
     });
 
     availableCompensateable().forEach((compensation) => {
@@ -655,9 +690,19 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "match") {
+      const context = {} as Record<string, unknown>;
+      Object.entries(code.args).forEach(([assignee, assigner]) => {
+        context[assignee] = innerstate.context[assigner];
+      });
+      const matchMachine = WFMachine<CType>(
+        code.subworkflow,
+        multiverse,
+        context
+      );
+      matchMachine.logger.sub(logger.log);
       const atStack = getSMatchAtIndex(evalContext.index) || {
         t: "match",
-        inner: WFMachine<CType>(code.subworkflow, multiverse),
+        inner: matchMachine,
       };
       if (atStack.t !== "match")
         throw new Error("match stack position filled with non-match");
@@ -941,8 +986,6 @@ export const WFMachine = <CType extends CTypeProto>(
     };
   };
 
-  const id = `id:${Math.round(Math.random() * 1000)}`;
-
   const tickAt = (evalContext: EvalContext, e: TickInput | null): boolean => {
     let fed = false;
     const code = workflow.at(evalContext.index);
@@ -988,7 +1031,12 @@ export const WFMachine = <CType extends CTypeProto>(
   const state = (): WFMachineState<CType> => {
     const evalContext = { index: data.evalIndex };
     const atStack = getSMatchAtIndex(evalContext.index);
-    if (atStack) return atStack.inner.state();
+    if (atStack) {
+      const state = atStack.inner.state();
+      if (state.state) {
+        return state;
+      }
+    }
 
     return {
       state: innerstate.state,
@@ -1020,7 +1068,7 @@ export const WFMachine = <CType extends CTypeProto>(
     active.activeCompensation = new Set();
     active.activeTimeout = new Set();
 
-    innerstate.context = {};
+    innerstate.context = { ...contextArg };
     innerstate.state = null;
     innerstate.returned = false;
   };

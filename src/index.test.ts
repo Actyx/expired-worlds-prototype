@@ -5,7 +5,7 @@ import { MakeCType, WFBusinessOrMarker } from "./consts.js";
 import { Enum } from "./utils.js";
 import { Tags } from "@actyx/sdk";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
-import { Parallel } from "./wfmachine.js";
+import { One, Parallel } from "./wfmachine.js";
 
 const Ev = Enum([
   "request",
@@ -218,7 +218,9 @@ const setup = (params: { id: string; role: Role }[]) => {
   };
 
   const findCommand = (agent: Agent, name: string) => {
-    const found = agent.machine.commands().find((x) => x.info.name === name);
+    const found = agent.machine
+      .commands()
+      .find(({ info }) => info.name === name);
     if (!found)
       throw new Error(`command ${name} not found in ${agent.identity.id}`);
     return found;
@@ -256,7 +258,6 @@ type Scenario = ReturnType<typeof genScenario>;
 const sequenceOne = async (scenario: Scenario) => {
   const { findCommand, agents } = scenario;
   const { dst, manager, src } = agents;
-  manager.machine.logger.sub(console.log);
   await awhile();
   findCommand(manager, Ev.request).publish({
     from: src.identity.id,
@@ -269,9 +270,10 @@ const sequenceOne = async (scenario: Scenario) => {
 /**
  * bidding
  */
-const sequenceTwo = async (scenario: Scenario) => {
-  const { findCommand, agents } = scenario;
-  const { t1, t2, t3 } = agents;
+const sequenceBidding = async ({
+  findCommand,
+  agents: { t1, t2, t3 },
+}: Scenario) => {
   await awhile();
 
   findCommand(t1, Ev.bid).publish({ bidder: t1.identity.id });
@@ -280,23 +282,124 @@ const sequenceTwo = async (scenario: Scenario) => {
   await awhile();
 };
 
-describe("x", () => {
-  it("x", async () => {
+const sequenceSelfAssignAndAcceptByT1 = async ({
+  findCommand,
+  agents: { t1 },
+}: Scenario) => {
+  const state = t1.machine.state().state;
+  const winner =
+    state &&
+    state[0] === Parallel &&
+    state[2].find((x) => x.payload.payload.bidder === t1.identity.id)?.payload
+      .payload.bidder;
+  if (!winner) throw new Error("no winner");
+
+  findCommand(t1, Ev.assign).publish({ robotID: winner });
+  await awhile();
+  findCommand(t1, Ev.accept).publish();
+  await awhile();
+};
+
+const sequenceGoToDst = async ({ findCommand, agents: { t1 } }: Scenario) => {
+  findCommand(t1, Ev.atDst).publish();
+  await awhile();
+};
+
+const sequenceT1SrcDockingFirstPart = async ({
+  findCommand,
+  agents: { t1, src },
+}: Scenario) => {
+  findCommand(t1, Ev.reqEnter).publish();
+  await awhile();
+  findCommand(src, Ev.doEnter).publish();
+  await awhile();
+  findCommand(t1, Ev.inside).publish();
+  await awhile();
+};
+
+const sequenceT1SrcDockingSecondPart = async ({
+  findCommand,
+  agents: { t1, src },
+}: Scenario) => {
+  findCommand(t1, Ev.reqLeave).publish();
+  await awhile();
+  findCommand(src, Ev.doLeave).publish();
+  await awhile();
+  findCommand(t1, Ev.success).publish();
+  await awhile();
+};
+
+const sequenceSelfAssignByT2 = async ({
+  findCommand,
+  agents: { t2 },
+}: Scenario) => {
+  const state = t2.machine.state().state;
+  const winner =
+    state &&
+    state[0] === Parallel &&
+    state[2].find((x) => x.payload.payload.bidder === t2.identity.id);
+
+  findCommand(t2, Ev.assign).publish({
+    robotID: winner,
+  });
+
+  await awhile();
+};
+
+describe("single", () => {
+  it("works", async () => {
     const scenario = genScenario();
     await sequenceOne(scenario);
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+
+    // assert all machine has the same state
     [manager, src, t1, t2, t3].forEach((x) => {
       expect(dst.machine.machine().state()).toEqual(
         x.machine.machine().state()
       );
     });
 
+    // assert state at request
+    expect(dst.machine.machine().state().state?.[0]).toBe(One);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
 
-    await sequenceTwo(scenario);
+    await sequenceBidding(scenario);
 
+    // assert base state at request
+    // and there are 3 bids in parallel
     expect(dst.machine.machine().state().state?.[0]).toBe(Parallel);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
     expect(dst.machine.machine().state().state?.[2]?.length).toBe(3);
+    expect(
+      dst.machine
+        .machine()
+        .state()
+        .state?.[2]?.find((x) => x.payload.payload.bidder === t1.identity.id)
+    ).toBeTruthy();
+    expect(
+      dst.machine
+        .machine()
+        .state()
+        .state?.[2]?.find((x) => x.payload.payload.bidder === t2.identity.id)
+    ).toBeTruthy();
+    expect(
+      dst.machine
+        .machine()
+        .state()
+        .state?.[2]?.find((x) => x.payload.payload.bidder === t3.identity.id)
+    ).toBeTruthy();
+
+    sequenceSelfAssignAndAcceptByT1(scenario);
+    // sequenceSelfAssignByT2(scenario);
+
+    await awhile();
+    expect(dst.machine.machine().state().state?.[0]).toBe(One);
+    expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
+
+    await sequenceGoToDst(scenario);
+    await sequenceT1SrcDockingFirstPart(scenario);
+    expect(dst.machine.machine().state().state?.[0]).toBe(One);
+    expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.inside);
+    await sequenceT1SrcDockingSecondPart(scenario);
   });
 });
