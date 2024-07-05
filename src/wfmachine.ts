@@ -1,6 +1,7 @@
 import { ActyxWFBusiness, CTypeProto, sortByEventKey } from "./consts.js";
 import { createLinearChain } from "./event-utils.js";
 import { MultiverseTree } from "./reality.js";
+import { Logger, makeLogger } from "./utils.js";
 import {
   Actor,
   CAntiParallel,
@@ -109,6 +110,7 @@ export type WFMachine<CType extends CTypeProto> = {
   advanceToMostCanon: () => void;
   resetAndAdvanceToMostCanon: () => void;
   resetAndAdvanceToEventId: (eventId: string) => void;
+  logger: Logger;
 };
 
 export const WFMachine = <CType extends CTypeProto>(
@@ -120,13 +122,15 @@ export const WFMachine = <CType extends CTypeProto>(
 
   validateBindings(wfWorkflow);
 
+  const logger = makeLogger();
   const workflow = wfWorkflow.code;
   const ccompensateIndexer = CCompensationIndexer.make(workflow);
   const cparallelIndexer = CParallelIndexer.make(workflow);
 
   const data = {
+    extraParCalcIndex: 0 as number | null, // does not support nested parallel
     resultCalcIndex: 0,
-    executionIndex: 0,
+    evalIndex: 0,
     stack: [] as (StackItem<CType> | null)[],
   };
 
@@ -144,7 +148,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const resetIndex = (evalContext: EvalContext, targetIndex: number) => {
     // set execution back at the index
     data.stack.length = targetIndex;
-    data.executionIndex = targetIndex;
+    data.evalIndex = targetIndex;
     evalContext.index = targetIndex;
 
     // remove timeouts after the last item index in stack
@@ -156,6 +160,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     // force recalculate context
     data.resultCalcIndex = 0;
+    data.extraParCalcIndex = null; // does not support nested parallel
     innerstate.context = {};
   };
 
@@ -331,7 +336,7 @@ export const WFMachine = <CType extends CTypeProto>(
       });
 
   const availableCompensateable = () =>
-    activeCompensation().filter((x) => data.executionIndex < x.withIndex);
+    activeCompensation().filter((x) => data.evalIndex < x.withIndex);
 
   /**
    * Extract valid next event types
@@ -368,7 +373,7 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code?.t === "match") {
-      const smatch = data.stack.at(data.executionIndex);
+      const smatch = data.stack.at(data.evalIndex);
       if (smatch && smatch.t === "match") {
         result.push(...smatch.inner.availableNexts());
       }
@@ -392,8 +397,8 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code?.t === "choice") {
-      const eventStartIndex = data.executionIndex + 1;
-      const antiIndex = data.executionIndex + code.antiIndexOffset;
+      const eventStartIndex = data.evalIndex + 1;
+      const antiIndex = data.evalIndex + code.antiIndexOffset;
       workflow
         .map((code, line) => ({ code, line }))
         .slice(eventStartIndex, antiIndex)
@@ -403,11 +408,11 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const availableNexts = (): ReturnType<WFMachine<CType>["availableNexts"]> => {
-    const code = workflow.at(data.executionIndex);
+    const code = workflow.at(data.evalIndex);
     const result: ReturnType<WFMachine<CType>["availableNexts"]> = [];
 
     if (code) {
-      extractValidNext(data.executionIndex, result, code);
+      extractValidNext(data.evalIndex, result, code);
     }
 
     availableTimeouts().forEach((timeout) => {
@@ -495,9 +500,9 @@ export const WFMachine = <CType extends CTypeProto>(
    * Catch up with execution index
    */
   const recalculateResult = (evalContext: EvalContext) => {
-    const calc = (): Continue => {
-      const code = workflow.at(data.resultCalcIndex);
-      const stackItem = data.stack.at(data.resultCalcIndex);
+    const calc = (calcIndex: number): Continue => {
+      const code = workflow.at(calcIndex);
+      const stackItem = data.stack.at(calcIndex);
       if (code?.t === "event" && stackItem?.t === "event") {
         code.bindings?.forEach((x) => {
           const index = x.index;
@@ -511,42 +516,50 @@ export const WFMachine = <CType extends CTypeProto>(
       }
 
       if (code?.t === "anti-timeout" && stackItem?.t === "anti-timeout") {
-        innerstate.state = [One, stackItem.event];
-
         const consequence = stackItem.consequence;
+
         if (consequence.control === Code.Control.fail) {
-          const retryIndex = findRetryOnStack(data.resultCalcIndex);
+          const retryIndex = findRetryOnStack(calcIndex);
           if (retryIndex === null) {
             throw new Error("cannot find retry while dealing with ");
           }
           resetIndex(evalContext, retryIndex + 1);
           return true;
         } else if (consequence.control === "return") {
+          innerstate.state = [One, stackItem.event];
           innerstate.returned = true;
         }
       }
 
       if (code?.t === "par" && stackItem?.t === "par") {
-        innerstate.state = [
-          Parallel,
-          stackItem.lastEvent,
-          stackItem.instances.map(
+        innerstate.state = (() => {
+          const instances = stackItem.instances.map(
             (instance) => instance.entry[instance.entry.length - 1]
-          ),
-        ];
+          );
+          if (instances.length === 0) {
+            return [One, stackItem.lastEvent];
+          } else {
+            return [Parallel, stackItem.lastEvent, instances];
+          }
+        })();
       }
 
       return false;
     };
 
-    calc();
-
     while (data.resultCalcIndex < evalContext.index) {
-      if (calc()) {
+      if (calc(data.resultCalcIndex)) {
         continue;
       }
-
       data.resultCalcIndex += 1;
+    }
+
+    // special case for parallel
+    if (
+      data.extraParCalcIndex !== null &&
+      data.extraParCalcIndex === evalContext.index
+    ) {
+      calc(data.extraParCalcIndex);
     }
   };
 
@@ -556,6 +569,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const autoEvaluateImpl = (evalContext: EvalContext): Continue => {
     // Handle Retry Code
     const code = workflow.at(evalContext.index);
+
     if (!code) {
       innerstate.returned = true;
       return false;
@@ -563,6 +577,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     if (code.t === "par") {
       readInnerParallelProcessInstances(evalContext, code);
+      data.extraParCalcIndex = evalContext.index;
       return false;
     }
 
@@ -704,6 +719,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
       break;
     }
+    recalculateResult(evalContext);
   };
 
   const tickTimeout = (e: ActyxWFBusiness<CType>): TickRes => {
@@ -963,14 +979,14 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const tick = (input: TickInput | null): boolean => {
-    let evalContext = { index: data.executionIndex };
+    let evalContext = { index: data.evalIndex };
     const fed = tickAt(evalContext, input);
-    data.executionIndex = evalContext.index;
+    data.evalIndex = evalContext.index;
     return fed;
   };
 
   const state = (): WFMachineState<CType> => {
-    const evalContext = { index: data.executionIndex };
+    const evalContext = { index: data.evalIndex };
     const atStack = getSMatchAtIndex(evalContext.index);
     if (atStack) return atStack.inner.state();
 
@@ -987,7 +1003,7 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const returned = () => {
-    const evalContext = { index: data.executionIndex };
+    const evalContext = { index: data.evalIndex };
     const atStack = getSMatchAtIndex(evalContext.index);
     if (atStack) return atStack.inner.returned();
 
@@ -995,8 +1011,10 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const reset = () => {
-    data.executionIndex = 0;
+    data.evalIndex = 0;
+    // calc index
     data.resultCalcIndex = 0;
+    data.extraParCalcIndex = null;
     data.stack = [];
 
     active.activeCompensation = new Set();
@@ -1092,6 +1110,7 @@ export const WFMachine = <CType extends CTypeProto>(
       advanceToMostCanon();
     },
     resetAndAdvanceToEventId,
+    logger,
   };
 
   return self;

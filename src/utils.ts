@@ -1,5 +1,22 @@
 export const sleep = (x: number) => new Promise((res) => setTimeout(res, x));
 
+export const cleanup = () => {
+  let set = new Set<Function>();
+  const self = {
+    add: (fn: Function) => {
+      const theSet = set;
+      theSet.add(fn);
+      return () => theSet.delete(fn);
+    },
+    clean: () => {
+      const oldset = set;
+      set = new Set();
+      Array.from(oldset).forEach((fn) => fn());
+    },
+  };
+  return self;
+};
+
 export const Enum = <T extends ReadonlyArray<string>>(
   strs: T
 ): Readonly<{ [S in T[number] as S]: Readonly<S> }> =>
@@ -72,10 +89,13 @@ export namespace WrapType {
     t: string;
     val: any;
   };
-  export type Inner<P extends Proto> = [P["t"], P["val"]];
+  export type Inner<P extends Proto> = {
+    t: P["t"];
+    value: ["val"];
+  };
 
   export type Type<P extends Proto> = Readonly<{
-    value: Inner<P>;
+    data: Inner<P>;
     t: P["t"];
     set: (t: P["val"]) => void;
     get: () => P["val"];
@@ -118,12 +138,12 @@ export namespace WrapType {
   export const blueprint = <T extends Proto["t"]>(t: T) => {
     const blueprintInner = <P extends Proto>(): BlueprintIntermediate<P> => {
       const refine: BlueprintIntermediate<P>["refine"] = blueprintInner;
-      const build: BlueprintIntermediate<P>["build"] = () => (val) => {
+      const build: BlueprintIntermediate<P>["build"] = () => (value) => {
         const self: Type<P> = {
-          value: [t, val],
+          data: { t, value: value },
           t,
-          set: (val) => (self.value[1] = val),
-          get: () => self.value[1],
+          set: (val) => (self.data.value = val),
+          get: () => self.data.value,
         };
         return self;
       };
@@ -134,3 +154,20 @@ export namespace WrapType {
     return blueprintInner<{ t: T; val: any }>();
   };
 }
+
+export type Logger = ReturnType<typeof makeLogger>;
+export const makeLogger = () => {
+  type Args = any[];
+  type Sub = (...args: Args) => unknown;
+  const subs = new Set<Sub>();
+  const id = String(Math.round(Math.random() * 10000));
+  return {
+    sub: (fn: Sub) => {
+      subs.add(fn);
+      return () => subs.delete(fn);
+    },
+    log: (...args: Args) => {
+      subs.forEach((sub) => sub(id, ...args));
+    },
+  };
+};

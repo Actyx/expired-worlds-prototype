@@ -25,6 +25,7 @@ import {
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
+import { makeLogger } from "./utils.js";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -122,6 +123,7 @@ export const run = <CType extends CTypeProto>(
     mcomb: () => machineCombinator.internal(),
     machine: () => machineCombinator.machine(),
     state: () => machineCombinator.machine().state(),
+    logger: machineCombinator.logger,
     kill: axSub.kill,
   };
 };
@@ -164,11 +166,14 @@ export namespace MachineCombinator {
     node: Node.Type<WFBusinessOrMarker<CType>>,
     workflow: WFWorkflow<CType>
   ) => {
+    const logger = makeLogger();
     const multiverseTree = Reality.MultiverseTree.make<CType>();
     const compensationMap = CompensationMap.make();
+    const wfMachine = WFMachine(workflow, multiverseTree);
+    wfMachine.logger.sub(logger.log);
     let data: DataModes<CType> = {
       t: "building-compensations",
-      wfMachine: WFMachine(workflow, multiverseTree),
+      wfMachine,
     };
 
     const currentCompensation = () =>
@@ -234,6 +239,7 @@ export namespace MachineCombinator {
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
       // TODO: think about compensation events tag
       const canonWFMachine = WFMachine(workflow, multiverseTree);
+      canonWFMachine.logger.sub(logger.log);
       canonWFMachine.resetAndAdvanceToMostCanon();
 
       const rememberedCompensation = compensationMap
@@ -247,10 +253,12 @@ export namespace MachineCombinator {
         );
 
         if (compensationComparison) {
+          const lastMachineState =
+            compensationComparison.matchingCompensation.lastMachineState;
+          lastMachineState.logger.sub(logger.log);
           data = {
             t: "compensating",
-            wfMachine:
-              compensationComparison.matchingCompensation.lastMachineState,
+            wfMachine: lastMachineState,
             canonWFMachine: canonWFMachine,
             compensationInfo: rememberedCompensation.directive,
           };
@@ -281,6 +289,7 @@ export namespace MachineCombinator {
     };
 
     return {
+      logger,
       recalc,
       internal: () => data,
       machine: () => data.wfMachine,
@@ -301,6 +310,7 @@ export namespace MachineCombinator {
         const currentData = data;
         if (currentData.t === "building-compensations" && e.caughtUp) {
           const canonWFMachine = WFMachine(workflow, multiverseTree);
+          canonWFMachine.logger.sub(logger.log);
           canonWFMachine.advanceToMostCanon();
 
           const lastEvent = currentData.wfMachine.latestStateEvent();

@@ -256,6 +256,7 @@ type Scenario = ReturnType<typeof genScenario>;
 const sequenceOne = async (scenario: Scenario) => {
   const { findCommand, agents } = scenario;
   const { dst, manager, src } = agents;
+  manager.machine.logger.sub(console.log);
   await awhile();
   findCommand(manager, Ev.request).publish({
     from: src.identity.id,
@@ -293,6 +294,7 @@ describe("x", () => {
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
 
     await sequenceTwo(scenario);
+
     expect(dst.machine.machine().state().state?.[0]).toBe(Parallel);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
     expect(dst.machine.machine().state().state?.[2]?.length).toBe(3);
