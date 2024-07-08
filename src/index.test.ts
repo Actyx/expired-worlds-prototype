@@ -123,7 +123,7 @@ const logistic: WFWorkflow<TheType> = {
       ...code.timeout(
         30 * 60 * 1000,
         [
-          code.event(unique("t"), Ev.atDst),
+          code.event(unique("t"), Ev.atSrc),
           ...code.match(docking, { A: "t", B: "src" }, [
             code.matchCase([Exact, Ev.success], [
               code.event(unique("t"), Ev.loaded),
@@ -226,11 +226,23 @@ const setup = (params: { id: string; role: Role }[]) => {
     return found;
   };
 
+  const findAndRunCommand = async (
+    agent: Agent,
+    name: string,
+    payload?: Record<string, unknown>
+  ) => {
+    await awhile();
+    const command = findCommand(agent, name);
+    command.publish(payload);
+    await awhile();
+  };
+
   return {
     agents,
     findAgent,
-    network,
     findCommand,
+    findAndRunCommand,
+    network,
   };
 };
 
@@ -255,35 +267,31 @@ type Scenario = ReturnType<typeof genScenario>;
 /**
  * request
  */
-const sequenceOne = async (scenario: Scenario) => {
-  const { findCommand, agents } = scenario;
-  const { dst, manager, src } = agents;
-  await awhile();
-  findCommand(manager, Ev.request).publish({
+const sequenceOne = async ({
+  findAndRunCommand,
+  agents: { manager, src, dst },
+}: Scenario) => {
+  await findAndRunCommand(manager, Ev.request, {
     from: src.identity.id,
     to: dst.identity.id,
     manager: manager.identity.id,
   });
-  await awhile();
 };
 
 /**
  * bidding
  */
 const sequenceBidding = async ({
-  findCommand,
+  findAndRunCommand,
   agents: { t1, t2, t3 },
 }: Scenario) => {
-  await awhile();
-
-  findCommand(t1, Ev.bid).publish({ bidder: t1.identity.id });
-  findCommand(t2, Ev.bid).publish({ bidder: t2.identity.id });
-  findCommand(t3, Ev.bid).publish({ bidder: t3.identity.id });
-  await awhile();
+  await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+  await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
+  await findAndRunCommand(t3, Ev.bid, { bidder: t3.identity.id });
 };
 
 const sequenceSelfAssignAndAcceptByT1 = async ({
-  findCommand,
+  findAndRunCommand,
   agents: { t1 },
 }: Scenario) => {
   const state = t1.machine.state().state;
@@ -293,40 +301,55 @@ const sequenceSelfAssignAndAcceptByT1 = async ({
     state[2].find((x) => x.payload.payload.bidder === t1.identity.id)?.payload
       .payload.bidder;
   if (!winner) throw new Error("no winner");
-
-  findCommand(t1, Ev.assign).publish({ robotID: winner });
-  await awhile();
-  findCommand(t1, Ev.accept).publish();
-  await awhile();
-};
-
-const sequenceGoToDst = async ({ findCommand, agents: { t1 } }: Scenario) => {
-  findCommand(t1, Ev.atDst).publish();
-  await awhile();
+  await findAndRunCommand(t1, Ev.assign, { robotID: winner });
+  await findAndRunCommand(t1, Ev.accept);
 };
 
 const sequenceT1SrcDockingFirstPart = async ({
-  findCommand,
+  findAndRunCommand,
   agents: { t1, src },
 }: Scenario) => {
-  findCommand(t1, Ev.reqEnter).publish();
-  await awhile();
-  findCommand(src, Ev.doEnter).publish();
-  await awhile();
-  findCommand(t1, Ev.inside).publish();
-  await awhile();
+  await findAndRunCommand(t1, Ev.atSrc);
+  await findAndRunCommand(t1, Ev.reqEnter);
+  await findAndRunCommand(src, Ev.doEnter);
+  await findAndRunCommand(t1, Ev.inside);
 };
 
 const sequenceT1SrcDockingSecondPart = async ({
-  findCommand,
+  findAndRunCommand,
   agents: { t1, src },
 }: Scenario) => {
-  findCommand(t1, Ev.reqLeave).publish();
-  await awhile();
-  findCommand(src, Ev.doLeave).publish();
-  await awhile();
-  findCommand(t1, Ev.success).publish();
-  await awhile();
+  await findAndRunCommand(t1, Ev.reqLeave);
+  await findAndRunCommand(src, Ev.doLeave);
+  await findAndRunCommand(t1, Ev.success);
+  await findAndRunCommand(t1, Ev.loaded);
+};
+
+const sequenceT1DstDockingFirstPart = async ({
+  findAndRunCommand,
+  agents: { t1, dst },
+}: Scenario) => {
+  await findAndRunCommand(t1, Ev.atDst);
+  await findAndRunCommand(t1, Ev.reqEnter);
+  await findAndRunCommand(dst, Ev.doEnter);
+  await findAndRunCommand(t1, Ev.inside);
+};
+
+const sequenceT1DstDockingSecondPart = async ({
+  findAndRunCommand,
+  agents: { t1, dst },
+}: Scenario) => {
+  await findAndRunCommand(t1, Ev.reqLeave);
+  await findAndRunCommand(dst, Ev.doLeave);
+  await findAndRunCommand(t1, Ev.success);
+  await findAndRunCommand(t1, Ev.unloaded);
+};
+
+const sequenceDone = async ({
+  findAndRunCommand,
+  agents: { manager },
+}: Scenario) => {
+  await findAndRunCommand(manager, Ev.done);
 };
 
 const sequenceSelfAssignByT2 = async ({
@@ -351,6 +374,7 @@ describe("single", () => {
     const scenario = genScenario();
     await sequenceOne(scenario);
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+    t1.machine.logger.sub(console.log);
 
     // assert all machine has the same state
     [manager, src, t1, t2, t3].forEach((x) => {
@@ -389,17 +413,19 @@ describe("single", () => {
         .state?.[2]?.find((x) => x.payload.payload.bidder === t3.identity.id)
     ).toBeTruthy();
 
-    sequenceSelfAssignAndAcceptByT1(scenario);
+    await sequenceSelfAssignAndAcceptByT1(scenario);
     // sequenceSelfAssignByT2(scenario);
 
-    await awhile();
     expect(dst.machine.machine().state().state?.[0]).toBe(One);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
 
-    await sequenceGoToDst(scenario);
     await sequenceT1SrcDockingFirstPart(scenario);
     expect(dst.machine.machine().state().state?.[0]).toBe(One);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.inside);
     await sequenceT1SrcDockingSecondPart(scenario);
+
+    await sequenceT1DstDockingFirstPart(scenario);
+    await sequenceT1DstDockingSecondPart(scenario);
+    await sequenceDone(scenario);
   });
 });

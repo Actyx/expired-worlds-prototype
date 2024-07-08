@@ -180,9 +180,9 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const nullifyMatchingTimeout = (
     antiTimeout: CAntiTimeout,
-    indexInput: number
+    antiTimeoutIndex: number
   ) => {
-    const timeoutIndex = antiTimeout.pairOffsetIndex + indexInput;
+    const timeoutIndex = antiTimeoutIndex + antiTimeout.pairOffsetIndex;
     const maybeTimeout = data.stack.at(timeoutIndex);
 
     if (
@@ -193,19 +193,10 @@ export const WFMachine = <CType extends CTypeProto>(
       active.activeTimeout.delete(timeoutIndex);
       data.stack[timeoutIndex] = null;
     } else {
-      throw new Error("timeout not found on stack");
+      throw new Error(
+        `timeout not found on stack at ${timeoutIndex} to ${antiTimeoutIndex}`
+      );
     }
-  };
-
-  const findMatchingAntiTimeout = (
-    timeout: CTimeout<CType>,
-    currentIndex: number
-  ) => {
-    const pairOffset = timeout.pairOffsetIndex;
-    const pairIndex = currentIndex + pairOffset;
-    const code = workflow.at(pairIndex);
-    if (code?.t === "anti-timeout") return pairIndex;
-    return null;
   };
 
   const findMatchingRetryIndex = (retry: CAntiRetry, indexInput: number) => {
@@ -638,10 +629,6 @@ export const WFMachine = <CType extends CTypeProto>(
     // Handle timeout code
 
     if (code.t === "timeout") {
-      const pair = findMatchingAntiTimeout(code, evalContext.index);
-      if (typeof pair !== "number") {
-        throw new Error("anti-timeout not found");
-      }
       data.stack[evalContext.index] = {
         t: "timeout",
         startedAt: new Date(),
@@ -711,34 +698,39 @@ export const WFMachine = <CType extends CTypeProto>(
 
       // calculate returned
       const { state } = atStack.inner.state();
-      const oneStateOrNull = (() => {
-        if (state === null) return null;
-        if (state[0] === One) return state[1];
-        throw new Error("submachine returns parallel, which is invalid");
-      })();
+      if (!state) throw new Error("returned without state");
+      const returnedState = state[1].payload.t;
 
-      const firstMatch = code.casesIndexOffsets
-        .map((offset) => {
-          const index = evalContext.index + offset;
-          const matchCase = workflow.at(index);
-          if (matchCase?.t !== "match-case") {
-            throw new Error(
-              `case index offset points to the wrong code type: ${matchCase?.t}`
-            );
-          }
+      const cases = code.casesIndexOffsets.map((offset) => {
+        const index = evalContext.index + offset;
+        const matchCase = workflow.at(index);
+        if (matchCase?.t !== "match-case") {
+          throw new Error(
+            `case index offset points to the wrong code type: ${matchCase?.t}`
+          );
+        }
+        return { offset, matchCase };
+      });
 
-          return { offset, matchCase };
-        })
-        .find(
-          (x) =>
-            x.matchCase.case[0] === Otherwise ||
-            (x.matchCase.case[0] === Exact &&
-              oneStateOrNull &&
-              x.matchCase.case[1] === oneStateOrNull.meta.eventId)
-        );
+      // cases that will not match otherwise
+      const notOtherwises = new Set(
+        cases
+          .map((x) => {
+            if (x.matchCase.case[0] === Exact) return x.matchCase.case[1];
+            return false;
+          })
+          .filter((x): x is Exclude<typeof x, null> => x !== null)
+      );
+
+      const firstMatch = cases.find((c) => {
+        if (c.matchCase.case[0] === Exact) {
+          return c.matchCase.case[1] === returnedState;
+        }
+        return !notOtherwises.has(returnedState);
+      });
 
       if (!firstMatch) {
-        throw new Error(`no case matches for ${oneStateOrNull} at ${code}`);
+        throw new Error(`no case matches for ${returnedState} at ${code}`);
       }
 
       evalContext.index += firstMatch.offset + 1;

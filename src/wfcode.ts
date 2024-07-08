@@ -192,7 +192,7 @@ export namespace Code {
       {
         t: "compensate-end",
         baseIndexOffset: endOffset * -1,
-        antiIndexOffset: 1 + compensate.length + 1,
+        antiIndexOffset: 1 + compensation.length + 1,
       },
       {
         t: "compensate-with",
