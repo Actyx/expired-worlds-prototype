@@ -6,7 +6,6 @@ import { Enum } from "./utils.js";
 import { Tags } from "@actyx/sdk";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
 import { One, Parallel } from "./wfmachine.js";
-import { networkInterfaces } from "os";
 
 const Ev = Enum([
   "request",
@@ -247,6 +246,7 @@ const setup = (params: { id: string; role: Role }[]) => {
   };
 };
 
+type Scenario = ReturnType<typeof genScenario>;
 const genScenario = () => {
   const scenario = setup([
     { id: "storage-src", role: Role.storage },
@@ -264,7 +264,18 @@ const genScenario = () => {
     agents: { src, dst, manager, t1, t2, t3 } as const,
   };
 };
-type Scenario = ReturnType<typeof genScenario>;
+const assertHaveSameState = (
+  agents: Scenario["agents"][keyof Scenario["agents"]][]
+) => {
+  const first = agents.at(0);
+  if (!first) return;
+  const rest = agents.slice(1);
+  const firstState = first.machine.machine().state();
+  rest.forEach((rest) => {
+    const restState = rest.machine.machine().state();
+    expect(firstState).toEqual(restState);
+  });
+};
 
 describe("no-partitions", () => {
   it("works", async () => {
@@ -278,16 +289,7 @@ describe("no-partitions", () => {
       manager: manager.identity.id,
     });
 
-    const assertAllMachineHasTheSameState = () => {
-      // assert all machine has the same state
-      [manager, src, t1, t2, t3].forEach((x) => {
-        expect(dst.machine.machine().state()).toEqual(
-          x.machine.machine().state()
-        );
-      });
-    };
-
-    assertAllMachineHasTheSameState();
+    assertHaveSameState([manager, src, t1, t2, t3]);
 
     // assert state at request
     expect(dst.machine.machine().state().state?.[0]).toBe(One);
@@ -369,25 +371,19 @@ describe("no-partitions", () => {
     // done
     await findAndRunCommand(manager, Ev.done);
 
-    assertAllMachineHasTheSameState();
+    assertHaveSameState([manager, src, t1, t2, t3]);
   });
 });
 
 describe("partitions-multi-level compensations", () => {
-  it("FILL SOME DESCRIPTION HERE", async () => {
-    const scenario = genScenario();
-    const { findAndRunCommand } = scenario;
-    const { dst, manager, src, t1, t2, t3 } = scenario.agents;
-
-    const assertAllMachineHasTheSameState = () => {
-      // assert all machine has the same state
-      [manager, src, t1, t2, t3].forEach((x) => {
-        expect(dst.machine.machine().state()).toEqual(
-          x.machine.machine().state()
-        );
-      });
-    };
-
+  /**
+   * Partitions src and t2 alone
+   */
+  const scenarioContestingBidOnPartition = async ({
+    findAndRunCommand,
+    network,
+    agents: { dst, manager, src, t1, t2, t3 },
+  }: Scenario) => {
     await findAndRunCommand(manager, Ev.request, {
       from: src.identity.id,
       to: dst.identity.id,
@@ -395,7 +391,7 @@ describe("partitions-multi-level compensations", () => {
     });
 
     // partitions
-    scenario.network.partitions.make([t2.node]);
+    network.partitions.make([t2.node, src.node]);
 
     // both t1 and t2 assign and accepts
     // both will have the same lamport timestamp because of the partition,
@@ -407,11 +403,75 @@ describe("partitions-multi-level compensations", () => {
     await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
     await findAndRunCommand(t2, Ev.assign, { robotID: t2.identity.id });
     await findAndRunCommand(t2, Ev.accept);
+  };
 
-    // after partition, expect same state
-    await scenario.network.partitions.clear();
+  it("converge correctly after partition is closed", async () => {
+    const scenario = genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { dst, manager, src, t1, t2, t3 },
+    } = scenario;
+
+    await scenarioContestingBidOnPartition(scenario);
+
+    // expect each of t1 and t2 to have their own "reality"
+    expect(t1.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(t1.machine.machine().state().context.t).toBe("t1");
+
+    expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(t2.machine.machine().state().context.t).toBe("t2");
+
+    assertHaveSameState([manager, t1, t3]);
+    assertHaveSameState([src, t2]);
+
+    // after partition, expect same state for all machines
+    await network.partitions.clear();
     await awhile();
+  });
 
-    assertAllMachineHasTheSameState();
+  it("does compensation correctly", async () => {
+    const log = (...args: any[]) =>
+      args.forEach((a, i) => {
+        process.stdout.write(String(a));
+        if (i < args.length - 1) {
+          process.stdout.write(" ");
+        } else {
+          process.stdout.write("\n");
+        }
+      });
+    const scenario = genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { dst, manager, src, t1, t2, t3 },
+    } = scenario;
+
+    // isolate t2 and src together
+    // t2 and src believes that they should be working together
+    await scenarioContestingBidOnPartition(scenario);
+
+    await findAndRunCommand(t2, Ev.atSrc);
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+    await findAndRunCommand(t2, Ev.inside);
+
+    expect(t1.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(t1.machine.machine().state().context.t).toBe("t1");
+
+    expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.inside);
+    expect(t2.machine.machine().state().context.A).toBe("t2");
+
+    assertHaveSameState([t1, manager, dst]);
+    assertHaveSameState([t2, src]);
+
+    t2.node.logger.sub(log);
+    t2.machine.logger.sub(log);
+
+    network.partitions.clear();
+    await awhile();
+    expect(t2.machine.mcomb().t).toBe("compensating");
+
+    // t2 and src should be in the compensation mode now?
   });
 });

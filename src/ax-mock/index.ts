@@ -169,6 +169,7 @@ export namespace Node {
       nextLamport: XLamport.make(0),
       inToSubPipe: Obs.Obs.make<ActyxEvent<E>>(),
       timeTravelAlert: Obs.Obs.make<void>(),
+      afterAsk: Obs.Obs.make<void>(),
     };
 
     const offsetMap = (): MiniOffsetMap => {
@@ -199,7 +200,7 @@ export namespace Node {
           | null
           | [StreamStore.Stream.Type<E>, ActyxEvent<E>];
 
-        streams.forEach((stream, index) => {
+        streams.forEach((stream) => {
           const item = stream.peek();
           if (item === null) {
             markedEmpty.add(stream);
@@ -241,15 +242,25 @@ export namespace Node {
       }),
       subscribeMonotonic: (handler, onCompleteOrErr) => {
         let alive = true;
+        const wrappedHandler: typeof handler = (...args) => {
+          try {
+            handler(...args);
+          } catch (error) {
+            console.log(error);
+          }
+        };
         const unsubs = [] as (() => unknown)[];
 
         // deferred streaming
 
         const setupStream = () => {
-          const restartStream = () => {
+          const stopAndCleanup = () => {
             unsubs.forEach((x) => x());
             unsubs.length = 0;
-            setImmediate(setupStream);
+          };
+
+          const restartStream = () => {
+            setupStream();
           };
 
           const stream = mergedOrdered([
@@ -264,7 +275,7 @@ export namespace Node {
             bounded.push(next);
           }
           if (!alive) return;
-          handler({
+          wrappedHandler({
             type: MsgType.events,
             caughtUp: true,
             events: bounded,
@@ -272,25 +283,30 @@ export namespace Node {
 
           unsubs.push(
             coord.out.sub((x) =>
-              handler({
+              wrappedHandler({
                 type: MsgType.events,
                 caughtUp: true,
                 events: [x],
               })
             ),
             data.inToSubPipe.sub((x) =>
-              handler({
+              wrappedHandler({
                 type: MsgType.events,
                 caughtUp: true,
                 events: [x],
               })
             ),
             data.timeTravelAlert.sub(() => {
-              handler({
+              stopAndCleanup();
+              const afterAsk = () => {
+                restartStream();
+                data.afterAsk.unsub(afterAsk);
+              };
+              data.afterAsk.sub(afterAsk);
+              wrappedHandler({
                 type: MsgType.timetravel,
                 trigger: {} as any, // TODO: fix
               });
-              restartStream();
             })
           );
         };
@@ -345,6 +361,7 @@ export namespace Node {
           from: params.id,
           offsetMap: offsetMap(),
         });
+        data.afterAsk.emit();
       },
       ask: Obs.Obs.make(),
       receiveAsk: (ask) => {
@@ -447,11 +464,7 @@ export namespace Network {
         return new Promise((res) =>
           setImmediate(() => {
             [...getNeighbors(node.id), node].forEach((node) => {
-              try {
-                node.coord.connected();
-              } catch (err) {
-                console.error(err);
-              }
+              node.coord.connected();
             });
             res();
           })
@@ -490,12 +503,9 @@ export namespace Network {
           return new Promise((res) =>
             setImmediate(() => {
               data.nodes.forEach((node) => {
-                try {
-                  node.coord.connected();
-                } catch (err) {
-                  console.error(err);
-                }
+                node.coord.connected();
               });
+
               res();
             })
           );

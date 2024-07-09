@@ -22,10 +22,11 @@ import {
   WFMarkerCompensationNeeded,
   WFMarkerCompensationDone,
   ActyxWFBusiness,
+  NestedCodeIndexAddress,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
-import { Logger, makeLogger } from "./utils.js";
+import { Logger, makeLogger, Ord } from "./utils.js";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -221,7 +222,10 @@ export namespace MachineCombinator {
           (x) =>
             x.fromTimelineOf === rememberedCompensation.fromTimelineOf &&
             x.toTimelineOf === rememberedCompensation.toTimelineOf &&
-            x.codeIndex === rememberedCompensation.directive.codeIndex
+            NestedCodeIndexAddress.cmp(
+              x.codeIndex,
+              rememberedCompensation.directive.codeIndex
+            ) === Ord.Equal
         );
         if (!matchingCompensation) return null;
 
@@ -249,7 +253,14 @@ export namespace MachineCombinator {
 
       const rememberedCompensation = compensationMap
         .getByActor(params.self.id)
-        .sort((a, b) => b.directive.codeIndex - a.directive.codeIndex)
+        .sort((a, b) =>
+          Ord.toNum(
+            NestedCodeIndexAddress.cmp(
+              b.directive.codeIndex,
+              a.directive.codeIndex
+            )
+          )
+        )
         .at(0);
 
       if (rememberedCompensation) {
@@ -478,6 +489,7 @@ const calculateCompensations = <CType extends CTypeProto>(
   if (divergence === fromChain.length - 1) return null;
 
   const simulation = WFMachine(workflow, multiverse);
+  simulation.logger.sub(logger.log);
 
   // -1 means not found, similar to .findIndex array returns
   if (divergence > -1) {

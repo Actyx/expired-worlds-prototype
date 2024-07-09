@@ -374,7 +374,27 @@ export namespace CParallelIndexer {
 }
 
 export namespace CCompensationIndexer {
-  const construct = <CType extends CTypeProto>(
+  const constructCompensateList = <CType extends CTypeProto>(
+    workflow: WFWorkflow<CType>["code"]
+  ) => {
+    const compensateBlock: { start: number; end: number }[] = [];
+
+    let compensationWithStartIndexes: number[] = [];
+    workflow.forEach((line, index) => {
+      if (line.t === "compensate") {
+        compensationWithStartIndexes.push(index);
+        return;
+      } else if (line.t === "compensate-end") {
+        const start = compensationWithStartIndexes.pop();
+        if (!start) return;
+        compensateBlock.push({ start: start, end: index });
+      }
+    });
+
+    return compensateBlock;
+  };
+
+  const constructWithList = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]
   ) => {
     const compensateWithBlock: { start: number; end: number }[] = [];
@@ -397,11 +417,14 @@ export namespace CCompensationIndexer {
   export const make = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]
   ) => {
-    const list = construct(workflow);
+    const compensateList = constructCompensateList(workflow);
+    const withList = constructWithList(workflow);
 
     return {
+      activeCompensateableIndices: (x: number) =>
+        compensateList.filter((item) => x > item.start && x < item.end),
       isInsideWithBlock: (x: number) =>
-        list.findIndex((entry) => x > entry.start && x < entry.end) !== -1,
+        withList.findIndex((entry) => x > entry.start && x < entry.end) !== -1,
     };
   };
 }

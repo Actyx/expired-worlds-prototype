@@ -20,6 +20,24 @@ export type WFBusiness<CType extends CTypeProto> = {
   payload: Record<string, unknown>;
 };
 
+export namespace NestedCodeIndexAddress {
+  export type Type = number[];
+
+  // example: [0] is smaller than [0,1]
+  export const cmp = (a: Type, b: Type): Ord.Type => {
+    const max = Math.max(a.length, b.length) - 1;
+    let i = 0;
+    while (i < max) {
+      const itemA = a.at(i) || 0;
+      const itemB = a.at(i) || 0;
+      if (itemA < itemB) return Ord.Lesser;
+      if (itemA > itemB) return Ord.Greater;
+      i++;
+    }
+    return Ord.Equal;
+  };
+}
+
 /**
  * Events emitted by the intermediate machine to take note of the meta-state of the actor.
  * e.g. in a multiverse, in which universe the actor is in
@@ -41,7 +59,7 @@ export type WFMarkerCompensationNeeded = {
    * exists in the workflow. IMPORTANT: a directive must be used in the same
    * context as the workflow it originated from.
    */
-  readonly codeIndex: number;
+  readonly codeIndex: NestedCodeIndexAddress.Type;
 };
 export type WFMarkerCompensationDone = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CompensationDone>;

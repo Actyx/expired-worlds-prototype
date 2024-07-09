@@ -1,7 +1,12 @@
-import { ActyxWFBusiness, CTypeProto, sortByEventKey } from "./consts.js";
+import {
+  ActyxWFBusiness,
+  CTypeProto,
+  NestedCodeIndexAddress,
+  sortByEventKey,
+} from "./consts.js";
 import { createLinearChain } from "./event-utils.js";
 import { MultiverseTree } from "./reality.js";
-import { Logger, makeLogger } from "./utils.js";
+import { Logger, makeLogger, Ord } from "./utils.js";
 import {
   Actor,
   CAntiParallel,
@@ -19,7 +24,6 @@ import {
   CTimeout,
   Code,
   Exact,
-  Otherwise,
   Unique,
   WFWorkflow,
   validateBindings,
@@ -105,7 +109,7 @@ export type WFMachine<CType extends CTypeProto> = {
     lateness: number;
   }[];
   availableCompensateable: () => {
-    codeIndex: number;
+    codeIndex: NestedCodeIndexAddress.Type;
     actor: Actor<CType>;
     name: CType["ev"];
     fromTimelineOf: string;
@@ -120,8 +124,13 @@ export type WFMachine<CType extends CTypeProto> = {
 export const WFMachine = <CType extends CTypeProto>(
   wfWorkflow: WFWorkflow<CType>,
   multiverse: MultiverseTree.Type<CType>,
-  contextArg = {} as Record<string, unknown>
+  wfMachineArgs?: {
+    context?: Record<string, unknown>;
+    codeIndexPrefix: NestedCodeIndexAddress.Type;
+  }
 ): WFMachine<CType> => {
+  const contextArg = wfMachineArgs?.context || {};
+  const wfMachineCodeIndexPrefix = wfMachineArgs?.codeIndexPrefix || [];
   type TickInput = ActyxWFBusiness<CType>;
   type TickRes = { jumpToIndex: number | null; fed: boolean };
 
@@ -148,12 +157,12 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const active = {
     activeTimeout: new Set() as Set<number>,
-    activeCompensation: new Set() as Set<number>,
   };
 
   const innerstate = {
     context: { ...contextArg } as Record<string, unknown>,
     state: null as State<CType> | null,
+    stateIndex: -1 as number,
     returned: false,
   };
 
@@ -174,6 +183,8 @@ export const WFMachine = <CType extends CTypeProto>(
     data.resultCalcIndex = 0;
     data.extraParCalcIndex = null; // does not support nested parallel
     innerstate.context = { ...contextArg };
+    innerstate.state = null;
+    innerstate.stateIndex = -1;
   };
 
   // Finders helpers
@@ -310,9 +321,10 @@ export const WFMachine = <CType extends CTypeProto>(
    * Find all active compensateable
    * TODO: return next-events of compensate-with as compensations
    */
-  const activeCompensation = () =>
-    Array.from(active.activeCompensation)
-      .map((index) => {
+  const selfAvailableCompensateable = () => {
+    const res = ccompensateIndexer
+      .activeCompensateableIndices(innerstate.stateIndex)
+      .map(({ start: index }) => {
         const ccompensate = workflow.at(index);
         if (ccompensate?.t !== "compensate") {
           throw new Error(
@@ -341,7 +353,7 @@ export const WFMachine = <CType extends CTypeProto>(
         }
 
         return {
-          codeIndex: index,
+          codeIndex: wfMachineCodeIndexPrefix.concat([index]),
           compensationIndex,
           code: ccompensate,
           firstCompensation,
@@ -357,8 +369,8 @@ export const WFMachine = <CType extends CTypeProto>(
         return b.compensationIndex - a.compensationIndex;
       });
 
-  const availableCompensateable = () =>
-    activeCompensation().filter((x) => data.evalIndex < x.withIndex);
+    return res;
+  };
 
   /**
    * Extract valid next event types
@@ -451,7 +463,7 @@ export const WFMachine = <CType extends CTypeProto>(
       );
     });
 
-    availableCompensateable().forEach((compensation) => {
+    selfAvailableCompensateable().forEach((compensation) => {
       extractValidNext(
         compensation.compensationIndex,
         result,
@@ -535,6 +547,7 @@ export const WFMachine = <CType extends CTypeProto>(
           innerstate.context[x.var] = stackItem.event.payload.payload[index];
         });
         innerstate.state = [One, stackItem.event];
+        innerstate.stateIndex = calcIndex;
 
         if (code.control === "return") {
           innerstate.returned = true;
@@ -645,22 +658,17 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "compensate") {
-      active.activeCompensation.add(evalContext.index);
       evalContext.index += 1;
       return true;
     }
 
     if (code.t === "compensate-end") {
-      const compensateIndex = evalContext.index + code.baseIndexOffset;
       const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
-      active.activeCompensation.delete(compensateIndex);
       evalContext.index = rightAfterAntiIndex;
       return true;
     }
 
     if (code.t === "anti-compensate") {
-      const compensateIndex = evalContext.index + code.baseIndexOffset;
-      active.activeCompensation.delete(compensateIndex);
       // NOTE: do nothing else now
       // we might need to put a marker in the "compensate"'s stack counterpart
       evalContext.index += 1;
@@ -681,11 +689,10 @@ export const WFMachine = <CType extends CTypeProto>(
       Object.entries(code.args).forEach(([assignee, assigner]) => {
         context[assignee] = innerstate.context[assigner];
       });
-      const matchMachine = WFMachine<CType>(
-        code.subworkflow,
-        multiverse,
-        context
-      );
+      const matchMachine = WFMachine<CType>(code.subworkflow, multiverse, {
+        context,
+        codeIndexPrefix: [evalContext.index],
+      });
       matchMachine.logger.sub(logger.log);
       const atStack = getSMatchAtIndex(evalContext.index) || {
         t: "match",
@@ -930,11 +937,10 @@ export const WFMachine = <CType extends CTypeProto>(
   const tickCompensation = (e: TickInput): TickRes => {
     // Compensation can only be triggered by event, not seek
 
-    const firstMatching = availableCompensateable().at(0);
+    const firstMatching = selfAvailableCompensateable().at(0);
 
     if (firstMatching) {
       const firstMatchingIndex = firstMatching.firstCompensationIndex;
-      active.activeCompensation.delete(firstMatching.compensationIndex);
       const fed = feedEvent(
         { index: firstMatching.firstCompensationIndex },
         firstMatching.firstCompensation,
@@ -1057,11 +1063,11 @@ export const WFMachine = <CType extends CTypeProto>(
     data.extraParCalcIndex = null;
     data.stack = [];
 
-    active.activeCompensation = new Set();
     active.activeTimeout = new Set();
 
     innerstate.context = { ...contextArg };
     innerstate.state = null;
+    innerstate.stateIndex = -1;
     innerstate.returned = false;
   };
 
@@ -1137,13 +1143,28 @@ export const WFMachine = <CType extends CTypeProto>(
     returned,
     availableTimeouts,
     availableNexts,
-    availableCompensateable: () =>
-      availableCompensateable().map((x) => ({
+    availableCompensateable: () => {
+      const res = selfAvailableCompensateable().map((x) => ({
         codeIndex: x.codeIndex,
         fromTimelineOf: x.fromTimelineOf,
         name: x.firstCompensation.name,
         actor: x.firstCompensation.actor,
-      })),
+      }));
+
+      const match = getSMatchAtIndex(data.evalIndex);
+      if (match) {
+        res.push(...match.inner.availableCompensateable());
+      }
+
+      res.sort((a, b) => {
+        const res = Ord.toNum(
+          NestedCodeIndexAddress.cmp(b.codeIndex, a.codeIndex)
+        );
+        return res;
+      });
+
+      return res;
+    },
     advanceToMostCanon,
     resetAndAdvanceToMostCanon: () => {
       reset();
