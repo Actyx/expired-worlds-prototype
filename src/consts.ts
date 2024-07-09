@@ -87,7 +87,10 @@ export const divergencePoint = <CType extends CTypeProto>(
 ): number => {
   let sameIndex = -1;
   while (true) {
-    if (chainA.at(sameIndex + 1) !== chainB.at(sameIndex + 1)) return sameIndex;
+    const a = chainA.at(sameIndex + 1);
+    const b = chainB.at(sameIndex + 1);
+    if (a === undefined && b === undefined) return sameIndex;
+    if (a !== b) return sameIndex;
     sameIndex++;
   }
 };

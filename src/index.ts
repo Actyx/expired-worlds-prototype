@@ -25,7 +25,7 @@ import {
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
-import { makeLogger } from "./utils.js";
+import { Logger, makeLogger } from "./utils.js";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -58,6 +58,8 @@ export const run = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
 ) => {
   const machineCombinator = MachineCombinator.make(params, node, workflow);
+  const { logger } = machineCombinator;
+
   const axSub = perpetualSubscription(node, async (e) => {
     if (e.type === MsgType.timetravel) {
       machineCombinator.setToBuildingCompensation();
@@ -166,11 +168,12 @@ export namespace MachineCombinator {
     node: Node.Type<WFBusinessOrMarker<CType>>,
     workflow: WFWorkflow<CType>
   ) => {
-    const logger = makeLogger();
+    const logger = makeLogger(`mcomb:${params.self.id}`);
     const multiverseTree = Reality.MultiverseTree.make<CType>();
     const compensationMap = CompensationMap.make();
     const wfMachine = WFMachine(workflow, multiverseTree);
     wfMachine.logger.sub(logger.log);
+
     let data: DataModes<CType> = {
       t: "building-compensations",
       wfMachine,
@@ -208,7 +211,8 @@ export namespace MachineCombinator {
         workflow,
         multiverseTree,
         fromlastEvent,
-        toLastEvent
+        toLastEvent,
+        logger
       );
 
       const matchingCompensation = (() => {
@@ -234,6 +238,7 @@ export namespace MachineCombinator {
       };
     };
 
+    // TODO: should compensation happen in timeouts an fails?
     const recalc = () => {
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
@@ -323,7 +328,8 @@ export namespace MachineCombinator {
               workflow,
               multiverseTree,
               lastEvent,
-              canonLastEvent
+              canonLastEvent,
+              logger
             )?.compensations;
           if (compensations) {
             // register compensations to both compensation map and the persistence
@@ -460,13 +466,15 @@ const calculateCompensations = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>,
   multiverse: Reality.MultiverseTree.Type<CType>,
   fromPoint: ActyxWFBusiness<CType>,
-  toPoint: ActyxWFBusiness<CType>
+  toPoint: ActyxWFBusiness<CType>,
+  logger: Logger
 ) => {
   // TODO: this is wrong. to do calculate compensations, one must also calculate
   const fromChain = createLinearChain(multiverse, fromPoint);
   const toChain = createLinearChain(multiverse, toPoint);
   const divergence = divergencePoint(fromChain, toChain);
 
+  // fromChain is sub-array of toChain
   if (divergence === fromChain.length - 1) return null;
 
   const simulation = WFMachine(workflow, multiverse);
@@ -478,9 +486,6 @@ const calculateCompensations = <CType extends CTypeProto>(
   }
   // Comps before divergence should not be accounted for
   const compsBeforeDivergence = simulation.availableCompensateable();
-  const compsBeforeDivergenceIndices = new Set(
-    compsBeforeDivergence.map((x) => x.codeIndex)
-  );
 
   simulation.resetAndAdvanceToEventId(fromPoint.meta.eventId);
   // advancing most canon might resolve some compensations.
@@ -489,9 +494,18 @@ const calculateCompensations = <CType extends CTypeProto>(
   const allActiveCompensations = simulation.availableCompensateable();
 
   // subtract "before-divergence" from "all" and we get compensations that we need
+  // TODO: might want to check for more than `codeIndex` because this might not be completely the right definition.
   const activeCompensationsBetweenFromAndTwo = Array.from(
     allActiveCompensations
-  ).filter((x) => !compsBeforeDivergenceIndices.has(x.codeIndex));
+  ).filter((x) => {
+    const existsBeforeDivergence = compsBeforeDivergence.find(
+      (y) =>
+        x.codeIndex === y.codeIndex && x.fromTimelineOf === y.fromTimelineOf
+    );
+
+    // Note: compensateable = comps that exists only after the divergence points, i.e. it doesn't exist before divergence.
+    return !existsBeforeDivergence;
+  });
 
   if (activeCompensationsBetweenFromAndTwo.length === 0) return null;
 

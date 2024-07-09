@@ -156,11 +156,12 @@ export namespace WrapType {
 }
 
 export type Logger = ReturnType<typeof makeLogger>;
-export const makeLogger = () => {
+export const makeLogger = (
+  id: string = String(Math.round(Math.random() * 10000))
+) => {
   type Args = any[];
   type Sub = (...args: Args) => unknown;
   const subs = new Set<Sub>();
-  const id = String(Math.round(Math.random() * 10000));
   return {
     sub: (fn: Sub) => {
       subs.add(fn);

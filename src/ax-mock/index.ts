@@ -9,7 +9,7 @@ import {
 } from "@actyx/sdk";
 import { Obs } from "systemic-ts-utils";
 import * as uuid from "uuid";
-import { Ord } from "../utils.js";
+import { Logger, makeLogger, Ord } from "../utils.js";
 
 type NodeId = string;
 type PartitionId = string;
@@ -156,11 +156,13 @@ export namespace Node {
       answer: Obs.Obs<Answer<E>>;
       receiveAnswer: (answer: Answer<E>) => void;
     };
+    logger: Logger;
   }>;
 
   export type Param = { id: string };
 
   export const make = <E>(params: Param): Type<E> => {
+    const logger = makeLogger(`axmock:${params.id}`);
     const data = {
       own: StreamStore.make<E>(),
       remote: new Map() as Map<string, StreamStore.Type<E>>,
@@ -191,7 +193,6 @@ export namespace Node {
     const mergedOrdered = (inputStreams: StreamStore.Stream.Type<E>[]) => {
       const streams = new Set(inputStreams);
 
-      const mergedOrderedId = uuid.v4();
       const findNext = () => {
         const markedEmpty = new Set<StreamStore.Stream.Type<E>>();
         let pairOrNull = null as
@@ -247,6 +248,7 @@ export namespace Node {
         const setupStream = () => {
           const restartStream = () => {
             unsubs.forEach((x) => x());
+            unsubs.length = 0;
             setImmediate(setupStream);
           };
 
@@ -375,6 +377,7 @@ export namespace Node {
     };
 
     return {
+      logger,
       id: params.id,
       api,
       coord,
@@ -386,7 +389,7 @@ export namespace Network {
   export type Type<E> = Readonly<{
     join: (_: Node.Type<E>) => Promise<void>;
     partitions: {
-      make: (ids: Node.Type<E>[]) => void;
+      make: (nodes: Node.Type<E>[]) => void;
       clear: () => Promise<void>;
     };
   }>;
@@ -443,8 +446,13 @@ export namespace Network {
 
         return new Promise((res) =>
           setImmediate(() => {
-            getNeighbors(node.id).forEach((node) => node.coord.connected());
-            node.coord.connected();
+            [...getNeighbors(node.id), node].forEach((node) => {
+              try {
+                node.coord.connected();
+              } catch (err) {
+                console.error(err);
+              }
+            });
             res();
           })
         );
@@ -481,7 +489,13 @@ export namespace Network {
 
           return new Promise((res) =>
             setImmediate(() => {
-              data.nodes.forEach((node) => node.coord.connected());
+              data.nodes.forEach((node) => {
+                try {
+                  node.coord.connected();
+                } catch (err) {
+                  console.error(err);
+                }
+              });
               res();
             })
           );

@@ -6,6 +6,7 @@ import { Enum } from "./utils.js";
 import { Tags } from "@actyx/sdk";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
 import { One, Parallel } from "./wfmachine.js";
+import { networkInterfaces } from "os";
 
 const Ev = Enum([
   "request",
@@ -255,6 +256,7 @@ const genScenario = () => {
     { id: "t2", role: Role.transporter },
     { id: "t3", role: Role.transporter },
   ]);
+
   const [src, dst, manager, t1, t2, t3] = scenario.agents;
 
   return {
@@ -264,130 +266,36 @@ const genScenario = () => {
 };
 type Scenario = ReturnType<typeof genScenario>;
 
-/**
- * request
- */
-const sequenceOne = async ({
-  findAndRunCommand,
-  agents: { manager, src, dst },
-}: Scenario) => {
-  await findAndRunCommand(manager, Ev.request, {
-    from: src.identity.id,
-    to: dst.identity.id,
-    manager: manager.identity.id,
-  });
-};
-
-/**
- * bidding
- */
-const sequenceBidding = async ({
-  findAndRunCommand,
-  agents: { t1, t2, t3 },
-}: Scenario) => {
-  await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
-  await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
-  await findAndRunCommand(t3, Ev.bid, { bidder: t3.identity.id });
-};
-
-const sequenceSelfAssignAndAcceptByT1 = async ({
-  findAndRunCommand,
-  agents: { t1 },
-}: Scenario) => {
-  const state = t1.machine.state().state;
-  const winner =
-    state &&
-    state[0] === Parallel &&
-    state[2].find((x) => x.payload.payload.bidder === t1.identity.id)?.payload
-      .payload.bidder;
-  if (!winner) throw new Error("no winner");
-  await findAndRunCommand(t1, Ev.assign, { robotID: winner });
-  await findAndRunCommand(t1, Ev.accept);
-};
-
-const sequenceT1SrcDockingFirstPart = async ({
-  findAndRunCommand,
-  agents: { t1, src },
-}: Scenario) => {
-  await findAndRunCommand(t1, Ev.atSrc);
-  await findAndRunCommand(t1, Ev.reqEnter);
-  await findAndRunCommand(src, Ev.doEnter);
-  await findAndRunCommand(t1, Ev.inside);
-};
-
-const sequenceT1SrcDockingSecondPart = async ({
-  findAndRunCommand,
-  agents: { t1, src },
-}: Scenario) => {
-  await findAndRunCommand(t1, Ev.reqLeave);
-  await findAndRunCommand(src, Ev.doLeave);
-  await findAndRunCommand(t1, Ev.success);
-  await findAndRunCommand(t1, Ev.loaded);
-};
-
-const sequenceT1DstDockingFirstPart = async ({
-  findAndRunCommand,
-  agents: { t1, dst },
-}: Scenario) => {
-  await findAndRunCommand(t1, Ev.atDst);
-  await findAndRunCommand(t1, Ev.reqEnter);
-  await findAndRunCommand(dst, Ev.doEnter);
-  await findAndRunCommand(t1, Ev.inside);
-};
-
-const sequenceT1DstDockingSecondPart = async ({
-  findAndRunCommand,
-  agents: { t1, dst },
-}: Scenario) => {
-  await findAndRunCommand(t1, Ev.reqLeave);
-  await findAndRunCommand(dst, Ev.doLeave);
-  await findAndRunCommand(t1, Ev.success);
-  await findAndRunCommand(t1, Ev.unloaded);
-};
-
-const sequenceDone = async ({
-  findAndRunCommand,
-  agents: { manager },
-}: Scenario) => {
-  await findAndRunCommand(manager, Ev.done);
-};
-
-const sequenceSelfAssignByT2 = async ({
-  findCommand,
-  agents: { t2 },
-}: Scenario) => {
-  const state = t2.machine.state().state;
-  const winner =
-    state &&
-    state[0] === Parallel &&
-    state[2].find((x) => x.payload.payload.bidder === t2.identity.id);
-
-  findCommand(t2, Ev.assign).publish({
-    robotID: winner,
-  });
-
-  await awhile();
-};
-
-describe("single", () => {
+describe("no-partitions", () => {
   it("works", async () => {
     const scenario = genScenario();
-    await sequenceOne(scenario);
+    const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
-    t1.machine.logger.sub(console.log);
 
-    // assert all machine has the same state
-    [manager, src, t1, t2, t3].forEach((x) => {
-      expect(dst.machine.machine().state()).toEqual(
-        x.machine.machine().state()
-      );
+    await findAndRunCommand(manager, Ev.request, {
+      from: src.identity.id,
+      to: dst.identity.id,
+      manager: manager.identity.id,
     });
+
+    const assertAllMachineHasTheSameState = () => {
+      // assert all machine has the same state
+      [manager, src, t1, t2, t3].forEach((x) => {
+        expect(dst.machine.machine().state()).toEqual(
+          x.machine.machine().state()
+        );
+      });
+    };
+
+    assertAllMachineHasTheSameState();
 
     // assert state at request
     expect(dst.machine.machine().state().state?.[0]).toBe(One);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
 
-    await sequenceBidding(scenario);
+    await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
+    await findAndRunCommand(t3, Ev.bid, { bidder: t3.identity.id });
 
     // assert base state at request
     // and there are 3 bids in parallel
@@ -413,19 +321,97 @@ describe("single", () => {
         .state?.[2]?.find((x) => x.payload.payload.bidder === t3.identity.id)
     ).toBeTruthy();
 
-    await sequenceSelfAssignAndAcceptByT1(scenario);
-    // sequenceSelfAssignByT2(scenario);
+    // t1 self assign and accept
+    const winner = (() => {
+      const state = t1.machine.state().state;
+      const winner =
+        state &&
+        state[0] === Parallel &&
+        state[2].find((x) => x.payload.payload.bidder === t1.identity.id)
+          ?.payload.payload.bidder;
+      if (!winner) throw new Error("no winner");
+      return winner;
+    })();
+    await findAndRunCommand(t1, Ev.assign, { robotID: winner });
+    await findAndRunCommand(t1, Ev.accept);
 
     expect(dst.machine.machine().state().state?.[0]).toBe(One);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
 
-    await sequenceT1SrcDockingFirstPart(scenario);
+    // docking t1 -> src and loading
+    await findAndRunCommand(t1, Ev.atSrc);
+    await findAndRunCommand(t1, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+    await findAndRunCommand(t1, Ev.inside);
+
     expect(dst.machine.machine().state().state?.[0]).toBe(One);
     expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.inside);
-    await sequenceT1SrcDockingSecondPart(scenario);
 
-    await sequenceT1DstDockingFirstPart(scenario);
-    await sequenceT1DstDockingSecondPart(scenario);
-    await sequenceDone(scenario);
+    await findAndRunCommand(t1, Ev.reqLeave);
+    await findAndRunCommand(src, Ev.doLeave);
+    await findAndRunCommand(t1, Ev.success);
+
+    // load
+    await findAndRunCommand(t1, Ev.loaded);
+
+    // docking t1 -> dst and loading
+    await findAndRunCommand(t1, Ev.atDst);
+    await findAndRunCommand(t1, Ev.reqEnter);
+    await findAndRunCommand(dst, Ev.doEnter);
+    await findAndRunCommand(t1, Ev.inside);
+    await findAndRunCommand(t1, Ev.reqLeave);
+    await findAndRunCommand(dst, Ev.doLeave);
+    await findAndRunCommand(t1, Ev.success);
+
+    // unload
+    await findAndRunCommand(t1, Ev.unloaded);
+
+    // done
+    await findAndRunCommand(manager, Ev.done);
+
+    assertAllMachineHasTheSameState();
+  });
+});
+
+describe("partitions-multi-level compensations", () => {
+  it("FILL SOME DESCRIPTION HERE", async () => {
+    const scenario = genScenario();
+    const { findAndRunCommand } = scenario;
+    const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+
+    const assertAllMachineHasTheSameState = () => {
+      // assert all machine has the same state
+      [manager, src, t1, t2, t3].forEach((x) => {
+        expect(dst.machine.machine().state()).toEqual(
+          x.machine.machine().state()
+        );
+      });
+    };
+
+    await findAndRunCommand(manager, Ev.request, {
+      from: src.identity.id,
+      to: dst.identity.id,
+      manager: manager.identity.id,
+    });
+
+    // partitions
+    scenario.network.partitions.make([t2.node]);
+
+    // both t1 and t2 assign and accepts
+    // both will have the same lamport timestamp because of the partition,
+    // but t1 will win because of stream id sort
+    await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t1, Ev.assign, { robotID: t1.identity.id });
+    await findAndRunCommand(t1, Ev.accept);
+
+    await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
+    await findAndRunCommand(t2, Ev.assign, { robotID: t2.identity.id });
+    await findAndRunCommand(t2, Ev.accept);
+
+    // after partition, expect same state
+    await scenario.network.partitions.clear();
+    await awhile();
+
+    assertAllMachineHasTheSameState();
   });
 });
