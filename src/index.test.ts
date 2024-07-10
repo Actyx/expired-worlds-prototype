@@ -277,6 +277,16 @@ const assertHaveSameState = (
   });
 };
 
+const log = (...args: any[]) =>
+  args.forEach((a, i) => {
+    process.stdout.write(String(a));
+    if (i < args.length - 1) {
+      process.stdout.write(" ");
+    } else {
+      process.stdout.write("\n");
+    }
+  });
+
 describe("no-partitions", () => {
   it("works", async () => {
     const scenario = genScenario();
@@ -431,15 +441,6 @@ describe("partitions-multi-level compensations", () => {
   });
 
   it("does compensation correctly", async () => {
-    const log = (...args: any[]) =>
-      args.forEach((a, i) => {
-        process.stdout.write(String(a));
-        if (i < args.length - 1) {
-          process.stdout.write(" ");
-        } else {
-          process.stdout.write("\n");
-        }
-      });
     const scenario = genScenario();
     const {
       findAndRunCommand,
@@ -461,16 +462,16 @@ describe("partitions-multi-level compensations", () => {
 
     expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.inside);
     expect(t2.machine.machine().state().context.A).toBe("t2");
-
     assertHaveSameState([t1, manager, dst]);
     assertHaveSameState([t2, src]);
 
-    t2.node.logger.sub(log);
-    t2.machine.logger.sub(log);
-
     network.partitions.clear();
     await awhile();
+
     expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating"); // broken, src is stuck on building-compensations
+
+    await findAndRunCommand(t2, Ev.withdrawn);
 
     // t2 and src should be in the compensation mode now?
   });

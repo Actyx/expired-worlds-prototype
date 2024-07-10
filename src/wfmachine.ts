@@ -465,7 +465,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     selfAvailableCompensateable().forEach((compensation) => {
       extractValidNext(
-        compensation.compensationIndex,
+        compensation.firstCompensationIndex,
         result,
         compensation.firstCompensation
       );
@@ -541,6 +541,7 @@ export const WFMachine = <CType extends CTypeProto>(
     const calc = (calcIndex: number): Continue => {
       const code = workflow.at(calcIndex);
       const stackItem = data.stack.at(calcIndex);
+
       if (code?.t === "event" && stackItem?.t === "event") {
         code.bindings?.forEach((x) => {
           const index = x.index;
@@ -585,6 +586,12 @@ export const WFMachine = <CType extends CTypeProto>(
 
       return false;
     };
+
+    // reset calculation to last stateIndex to anticipate jumps
+    data.resultCalcIndex = Math.min(
+      data.resultCalcIndex,
+      innerstate.stateIndex
+    );
 
     while (data.resultCalcIndex < evalContext.index) {
       if (calc(data.resultCalcIndex)) {
@@ -936,18 +943,18 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const tickCompensation = (e: TickInput): TickRes => {
     // Compensation can only be triggered by event, not seek
-
-    const firstMatching = selfAvailableCompensateable().at(0);
+    const firstMatching = selfAvailableCompensateable().find(
+      (comp) => e.payload.t === comp.firstCompensation.name
+    );
 
     if (firstMatching) {
-      const firstMatchingIndex = firstMatching.firstCompensationIndex;
       const fed = feedEvent(
         { index: firstMatching.firstCompensationIndex },
         firstMatching.firstCompensation,
         e
       );
       if (fed) {
-        return { fed, jumpToIndex: firstMatchingIndex };
+        return { fed, jumpToIndex: firstMatching.firstCompensationIndex + 1 };
       }
     }
 
@@ -990,6 +997,12 @@ export const WFMachine = <CType extends CTypeProto>(
     if (e) {
       if (code) {
         const res = (() => {
+          // Submachine
+          // =========
+          const matchRes =
+            code?.t === "match" && tickMatch(evalContext, code, e);
+          if (matchRes && matchRes.fed) return matchRes;
+
           // Jumps
           // =========
           const compRes = tickCompensation(e);
@@ -1000,7 +1013,6 @@ export const WFMachine = <CType extends CTypeProto>(
 
           // Non Jumps
           // =========
-          if (code?.t === "match") return tickMatch(evalContext, code, e);
           if (code?.t === "choice") return tickChoice(evalContext, code, e);
           if (code?.t === "par") return tickParallel(evalContext, code, e);
           return tickRest(evalContext, code, e);
@@ -1008,7 +1020,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
         fed = res.fed;
 
-        if (res?.jumpToIndex) {
+        if (res !== null && res.jumpToIndex !== null) {
           evalContext.index = res.jumpToIndex;
         }
       }
@@ -1077,14 +1089,18 @@ export const WFMachine = <CType extends CTypeProto>(
       // parallel and compensation may lead to dead ends.
       const validNextNames = new Set(
         availableNexts()
-          .filter((x) => x.reason !== "parallel" && x.reason !== "compensation")
+          .filter((x) => x.reason !== "parallel")
           .map((x) => x.name)
       );
 
       const allNextEvents = (() => {
         const last = getLatestStateEvent();
         if (!last) return multiverse.getRoots();
-        return sortByEventKey(multiverse.getNextById(last.meta.eventId));
+        const sorted = sortByEventKey(
+          multiverse.getNextById(last.meta.eventId)
+        );
+
+        return sorted;
       })().filter((x) => validNextNames.has(x.payload.t));
 
       const next = sortByEventKey(allNextEvents).at(0);

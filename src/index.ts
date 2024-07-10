@@ -242,7 +242,7 @@ export namespace MachineCombinator {
       };
     };
 
-    // TODO: should compensation happen in timeouts an fails?
+    // TODO: should compensation happen in timeouts/failures/retries?
     const recalc = () => {
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
@@ -382,7 +382,10 @@ export namespace MachineCombinator {
               (x) =>
                 x.fromTimelineOf ===
                   currentData.compensationInfo.fromTimelineOf &&
-                x.codeIndex === currentData.compensationInfo.codeIndex
+                NestedCodeIndexAddress.cmp(
+                  x.codeIndex,
+                  currentData.compensationInfo.codeIndex
+                ) === Ord.Equal
             );
 
           // compensation is done
@@ -439,7 +442,7 @@ export namespace CompensationMap {
         } else if (InternalTag.CompensationDone.is(compensation.ax)) {
           const done = compensation as WFMarkerCompensationDone;
           const set = access(data.negative, compensation);
-          set.delete(done.toTimelineOf);
+          set.set(done.toTimelineOf, true);
         }
       },
       getByActor: (actor: string) => {
@@ -512,7 +515,8 @@ const calculateCompensations = <CType extends CTypeProto>(
   ).filter((x) => {
     const existsBeforeDivergence = compsBeforeDivergence.find(
       (y) =>
-        x.codeIndex === y.codeIndex && x.fromTimelineOf === y.fromTimelineOf
+        NestedCodeIndexAddress.cmp(x.codeIndex, y.codeIndex) === Ord.Equal &&
+        x.fromTimelineOf === y.fromTimelineOf
     );
 
     // Note: compensateable = comps that exists only after the divergence points, i.e. it doesn't exist before divergence.

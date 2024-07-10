@@ -421,6 +421,8 @@ export namespace CCompensationIndexer {
     const withList = constructWithList(workflow);
 
     return {
+      compensateList,
+      withList,
       activeCompensateableIndices: (x: number) =>
         compensateList.filter((item) => x > item.start && x < item.end),
       isInsideWithBlock: (x: number) =>
