@@ -1,9 +1,13 @@
 import { describe, expect, it } from "@jest/globals";
 import { run } from "./index.js";
 import { Network, Node } from "./ax-mock/index.js";
-import { MakeCType, WFBusinessOrMarker } from "./consts.js";
+import {
+  ActyxWFBusinessOrMarker,
+  MakeCType,
+  WFBusinessOrMarker,
+} from "./consts.js";
 import { Enum } from "./utils.js";
-import { Tags } from "@actyx/sdk";
+import { ActyxEvent, Tags } from "@actyx/sdk";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
 import { One, Parallel } from "./wfmachine.js";
 
@@ -197,18 +201,50 @@ const logistic: WFWorkflow<TheType> = {
  */
 const awhile = () => new Promise(setImmediate);
 
-const setup = (params: { id: string; role: Role }[]) => {
+/**
+ * Scenario Setup Parameters
+ */
+type SetupSystemParams = {
+  /**
+   * The initial data that should be loaded by the nodes at initialization
+   */
+  initialStoreData?: ActyxEvent<WFBusinessOrMarker<TheType>>[];
+};
+
+const setup = (
+  params: { id: string; role: Role }[],
+  networkParams?: SetupSystemParams
+) => {
   const makenetwork = Network.make<WFBusinessOrMarker<TheType>>;
   const makenode = Node.make<WFBusinessOrMarker<TheType>>;
 
   const network = makenetwork();
 
-  const agents = params.map((identity) => {
-    const node = makenode({ id: identity.id });
-    const machine = run({ self: identity, tags: workflowTag }, node, logistic);
-    network.join(node);
-    return { identity, node, machine };
-  });
+  const agents = params
+    .map((identity) => {
+      // initialize nodes and load all initial data
+      const node = makenode({ id: identity.id });
+      node.logger.sub(log);
+      if (networkParams?.initialStoreData) {
+        node.store.load(networkParams.initialStoreData);
+      }
+      return { identity, node };
+    })
+    .map((x) => {
+      // join network to node
+      network.join(x.node);
+      return x;
+    })
+    .map(({ identity, node }) => {
+      // run machine
+      const machine = run(
+        { self: identity, tags: workflowTag },
+        node,
+        logistic
+      );
+      return { identity, node, machine };
+    });
+
   type Agent = (typeof agents)[any];
 
   const findAgent = (fn: (c: Agent) => boolean): Agent => {
@@ -247,15 +283,18 @@ const setup = (params: { id: string; role: Role }[]) => {
 };
 
 type Scenario = ReturnType<typeof genScenario>;
-const genScenario = () => {
-  const scenario = setup([
-    { id: "storage-src", role: Role.storage },
-    { id: "storage-dst", role: Role.storage },
-    { id: "manager", role: Role.manager },
-    { id: "t1", role: Role.transporter },
-    { id: "t2", role: Role.transporter },
-    { id: "t3", role: Role.transporter },
-  ]);
+const genScenario = (setupSystemParams?: SetupSystemParams) => {
+  const scenario = setup(
+    [
+      { id: "storage-src", role: Role.storage },
+      { id: "storage-dst", role: Role.storage },
+      { id: "manager", role: Role.manager },
+      { id: "t1", role: Role.transporter },
+      { id: "t2", role: Role.transporter },
+      { id: "t3", role: Role.transporter },
+    ],
+    setupSystemParams
+  );
 
   const [src, dst, manager, t1, t2, t3] = scenario.agents;
 
@@ -264,7 +303,7 @@ const genScenario = () => {
     agents: { src, dst, manager, t1, t2, t3 } as const,
   };
 };
-const assertHaveSameState = (
+const expectAllToHaveSameState = (
   agents: Scenario["agents"][keyof Scenario["agents"]][]
 ) => {
   const first = agents.at(0);
@@ -299,7 +338,7 @@ describe("no-partitions", () => {
       manager: manager.identity.id,
     });
 
-    assertHaveSameState([manager, src, t1, t2, t3]);
+    expectAllToHaveSameState([manager, src, t1, t2, t3]);
 
     // assert state at request
     expect(dst.machine.machine().state().state?.[0]).toBe(One);
@@ -381,7 +420,7 @@ describe("no-partitions", () => {
     // done
     await findAndRunCommand(manager, Ev.done);
 
-    assertHaveSameState([manager, src, t1, t2, t3]);
+    expectAllToHaveSameState([manager, src, t1, t2, t3]);
   });
 });
 
@@ -432,8 +471,8 @@ describe("partitions-multi-level compensations", () => {
     expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
     expect(t2.machine.machine().state().context.t).toBe("t2");
 
-    assertHaveSameState([manager, t1, t3]);
-    assertHaveSameState([src, t2]);
+    expectAllToHaveSameState([manager, t1, t3]);
+    expectAllToHaveSameState([src, t2]);
 
     // after partition, expect same state for all machines
     await network.partitions.clear();
@@ -461,8 +500,8 @@ describe("partitions-multi-level compensations", () => {
 
     expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.doEnter);
     expect(t2.machine.machine().state().context.A).toBe("t2");
-    assertHaveSameState([t1, manager, dst]);
-    assertHaveSameState([t2, src]);
+    expectAllToHaveSameState([t1, manager, dst]);
+    expectAllToHaveSameState([t2, src]);
 
     network.logger.sub(log);
     src.node.logger.sub(log);
@@ -487,6 +526,70 @@ describe("partitions-multi-level compensations", () => {
     expect(t2.machine.mcomb().t).toBe("normal");
     expect(src.machine.mcomb().t).toBe("normal");
 
-    assertHaveSameState([t1, t2, src, manager, dst, t3]);
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    expectAllToHaveSameState([t1, t2, src, manager, dst, t3]);
+  });
+
+  // prettier-ignore
+  const comp_history = ([{"meta":{"offset":0,"appId":"","eventId":"6dc3039e-2894-4914-ae4a-9d8688c9ff6d","isLocalEvent":true,"lamport":0,"stream":"manager","tags":["workflowtag"],"timestampMicros":1720698809630000},"payload":{"t":"request","payload":{"from":"storage-src","to":"storage-dst","manager":"manager"}}},{"meta":{"offset":0,"appId":"","eventId":"0b05a57a-ecc5-42dc-90a5-da74206c5935","isLocalEvent":true,"lamport":6,"stream":"storage-src","tags":["workflowtag","ax:wf:predecessor:07528c25-bfef-4a17-8861-1d3cbe0a1bdf"],"timestampMicros":1720698809635000},"payload":{"t":"doEnter","payload":{}}},{"meta":{"offset":1,"appId":"","eventId":"181b0e65-642a-436b-b542-d1e7911deea3","isLocalEvent":true,"lamport":7,"stream":"storage-src","tags":["workflowtag"],"timestampMicros":1720698809649000},"payload":{"ax":"ax:wf:compensation:needed:","actor":"storage-src","fromTimelineOf":"07528c25-bfef-4a17-8861-1d3cbe0a1bdf","toTimelineOf":"9967f952-db85-493c-b5f0-2ee1fcfe2989","codeIndex":[13,1]}},{"meta":{"offset":0,"appId":"","eventId":"349059c3-62f0-475d-bd61-010caf680b0c","isLocalEvent":true,"lamport":1,"stream":"t1","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809631000},"payload":{"t":"bid","payload":{"bidder":"t1"}}},{"meta":{"offset":1,"appId":"","eventId":"07126407-1274-4b3c-8087-1f7ee57c0821","isLocalEvent":true,"lamport":2,"stream":"t1","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809632000},"payload":{"t":"assign","payload":{"robotID":"t1"}}},{"meta":{"offset":2,"appId":"","eventId":"9967f952-db85-493c-b5f0-2ee1fcfe2989","isLocalEvent":true,"lamport":3,"stream":"t1","tags":["workflowtag","ax:wf:predecessor:07126407-1274-4b3c-8087-1f7ee57c0821"],"timestampMicros":1720698809632000},"payload":{"t":"accept","payload":{}}},{"meta":{"offset":0,"appId":"","eventId":"b183f4b8-8a66-455b-ac0c-688dd52b5d78","isLocalEvent":true,"lamport":1,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809633000},"payload":{"t":"bid","payload":{"bidder":"t2"}}},{"meta":{"offset":1,"appId":"","eventId":"802bd3c7-36c1-4d52-9179-936f8fbdcdee","isLocalEvent":true,"lamport":2,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809633000},"payload":{"t":"assign","payload":{"robotID":"t2"}}},{"meta":{"offset":2,"appId":"","eventId":"2586ee84-1c57-4866-9c9c-225915a62adf","isLocalEvent":true,"lamport":3,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:802bd3c7-36c1-4d52-9179-936f8fbdcdee"],"timestampMicros":1720698809633000},"payload":{"t":"accept","payload":{}}},{"meta":{"offset":3,"appId":"","eventId":"f82d80ba-cecb-4f52-be7e-48fce4404872","isLocalEvent":true,"lamport":4,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:2586ee84-1c57-4866-9c9c-225915a62adf"],"timestampMicros":1720698809634000},"payload":{"t":"atSrc","payload":{}}},{"meta":{"offset":4,"appId":"","eventId":"07528c25-bfef-4a17-8861-1d3cbe0a1bdf","isLocalEvent":true,"lamport":5,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:f82d80ba-cecb-4f52-be7e-48fce4404872"],"timestampMicros":1720698809634000},"payload":{"t":"reqEnter","payload":{}}},{"meta":{"offset":5,"appId":"","eventId":"b7d342ef-cedf-44b5-a601-72aa168d50f5","isLocalEvent":true,"lamport":8,"stream":"t2","tags":["workflowtag"],"timestampMicros":1720698809652000},"payload":{"ax":"ax:wf:compensation:needed:","actor":"t2","fromTimelineOf":"07528c25-bfef-4a17-8861-1d3cbe0a1bdf","toTimelineOf":"9967f952-db85-493c-b5f0-2ee1fcfe2989","codeIndex":[13,1]}}])
+    .map((entry) => {
+      const date = new Date(Math.round(entry.meta.timestampMicros / 1000))
+      return ({
+        meta: ({
+          ...entry.meta,
+          timestampAsDate: () => date,
+        }),
+        payload: entry.payload
+      }) as ActyxWFBusinessOrMarker<TheType>
+    })
+
+  it("remembers compensation", async () => {
+    // history is loaded that triggers compensation in t2 and src (the above
+    // scenario before Ev.withdrawn is called)
+    const scenario = genScenario({
+      initialStoreData: comp_history,
+    });
+    const {
+      findAndRunCommand,
+      network,
+      agents: { dst, manager, src, t1, t2, t3 },
+    } = scenario;
+
+    await awhile();
+
+    // t2 and src is in doEnter
+    [t2, src].forEach((m) =>
+      expect(m.machine.machine().state()?.state?.[1].payload.t).toBe(Ev.doEnter)
+    );
+
+    [t1, manager, dst, t3].forEach((m) =>
+      expect(m.machine.machine().state()?.state?.[1].payload.t).toBe(Ev.accept)
+    );
+
+    expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    // t2 compensating, src follows
+    await findAndRunCommand(t2, Ev.withdrawn);
+
+    // compensation is done
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(src.machine.mcomb().t).toBe("normal");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    expectAllToHaveSameState([t1, t2, src, manager, dst, t3]);
   });
 });

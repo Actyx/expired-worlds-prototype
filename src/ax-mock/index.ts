@@ -159,6 +159,10 @@ export namespace Node {
 
       afterSync: () => void;
     };
+    store: {
+      save: () => ActyxEvent<E>[];
+      load: (evs: ActyxEvent<E>[]) => void;
+    };
     logger: Logger;
   }>;
 
@@ -398,11 +402,27 @@ export namespace Node {
       },
     };
 
+    const store: Type<E>["store"] = {
+      save: () => data.own.slice(),
+      load: (evs) => {
+        evs
+          .filter((e) => e.meta.stream === params.id)
+          .forEach((e) => {
+            data.own.set(e);
+            data.nextLamport = XLamport.max(
+              data.nextLamport,
+              XLamport.make(e.meta.lamport).incr()
+            );
+          });
+      },
+    };
+
     return {
       logger,
       id: params.id,
       api,
       coord,
+      store,
     };
   };
 }
@@ -419,6 +439,7 @@ export namespace Network {
 
   export const make = <E>(): Type<E> => {
     const logger = makeLogger(`network:${uuid.v4()}`);
+
     const data = {
       nodes: new Map() as Map<string, Node.Type<E>>,
       partitions: {
@@ -471,9 +492,9 @@ export namespace Network {
 
         return new Promise((res) =>
           setImmediate(() => {
-            [...getNeighbors(node.id), node].forEach((node) => {
-              node.coord.startSync();
-            });
+            const nodes = [...getNeighbors(node.id), node];
+            nodes.forEach((node) => node.coord.startSync());
+            nodes.forEach((node) => node.coord.afterSync());
 
             res();
           })
@@ -513,6 +534,7 @@ export namespace Network {
             setImmediate(() => {
               data.nodes.forEach((node) => node.coord.startSync());
               data.nodes.forEach((node) => node.coord.afterSync());
+
               res();
             })
           );
