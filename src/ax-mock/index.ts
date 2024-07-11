@@ -148,13 +148,16 @@ export namespace Node {
       offsetMap: () => MiniOffsetMap;
     };
     coord: {
-      connected: () => unknown;
+      startSync: () => unknown;
       in: (e: ActyxEvent<E>) => unknown;
       out: Obs.Obs<ActyxEvent<E>>;
+
       ask: Obs.Obs<Ask>;
-      receiveAsk: (ask: Ask) => void;
+      recAsk: (ask: Ask) => void;
       answer: Obs.Obs<Answer<E>>;
-      receiveAnswer: (answer: Answer<E>) => void;
+      recAnswer: (answer: Answer<E>) => void;
+
+      afterSync: () => void;
     };
     logger: Logger;
   }>;
@@ -169,7 +172,7 @@ export namespace Node {
       nextLamport: XLamport.make(0),
       inToSubPipe: Obs.Obs.make<ActyxEvent<E>>(),
       timeTravelAlert: Obs.Obs.make<void>(),
-      afterAsk: Obs.Obs.make<void>(),
+      afterSync: Obs.Obs.make<void>(),
     };
 
     const offsetMap = (): MiniOffsetMap => {
@@ -300,9 +303,9 @@ export namespace Node {
               stopAndCleanup();
               const afterAsk = () => {
                 restartStream();
-                data.afterAsk.unsub(afterAsk);
+                data.afterSync.unsub(afterAsk);
               };
-              data.afterAsk.sub(afterAsk);
+              data.afterSync.sub(afterAsk);
               wrappedHandler({
                 type: MsgType.timetravel,
                 trigger: {} as any, // TODO: fix
@@ -356,22 +359,21 @@ export namespace Node {
         getOrCreateStream(stream).set(e);
         data.inToSubPipe.emit(e);
       },
-      connected: () => {
+      startSync: () => {
         coord.ask.emit({
           from: params.id,
           offsetMap: offsetMap(),
         });
-        data.afterAsk.emit();
       },
       ask: Obs.Obs.make(),
-      receiveAsk: (ask) => {
+      recAsk: (ask) => {
         const selfOffset = ask.offsetMap[params.id] || 0;
         const answer = data.own.slice(selfOffset);
         if (answer.length === 0) return;
         coord.answer.emit({ from: params.id, evs: answer });
       },
       answer: Obs.Obs.make(),
-      receiveAnswer: (answer) => {
+      recAnswer: (answer) => {
         const streamStore = getOrCreateStream(answer.from);
         let timetravel = false;
 
@@ -391,6 +393,9 @@ export namespace Node {
           data.timeTravelAlert.emit();
         }
       },
+      afterSync: () => {
+        data.afterSync.emit();
+      },
     };
 
     return {
@@ -404,6 +409,7 @@ export namespace Node {
 
 export namespace Network {
   export type Type<E> = Readonly<{
+    logger: Logger;
     join: (_: Node.Type<E>) => Promise<void>;
     partitions: {
       make: (nodes: Node.Type<E>[]) => void;
@@ -412,6 +418,7 @@ export namespace Network {
   }>;
 
   export const make = <E>(): Type<E> => {
+    const logger = makeLogger(`network:${uuid.v4()}`);
     const data = {
       nodes: new Map() as Map<string, Node.Type<E>>,
       partitions: {
@@ -447,25 +454,27 @@ export namespace Network {
     };
 
     const res: Type<E> = {
+      logger,
       join: (node) => {
         data.nodes.set(node.id, node);
         node.coord.out.sub((e) =>
           getNeighbors(e.meta.stream).map((node) => node.coord.in(e))
         );
         node.coord.ask.sub((ask) =>
-          getNeighbors(ask.from).forEach((node) => node.coord.receiveAsk(ask))
+          getNeighbors(ask.from).forEach((node) => node.coord.recAsk(ask))
         );
         node.coord.answer.sub((answer: Node.Answer<E>) =>
           getNeighbors(answer.from).forEach((node) =>
-            node.coord.receiveAnswer(answer)
+            node.coord.recAnswer(answer)
           )
         );
 
         return new Promise((res) =>
           setImmediate(() => {
             [...getNeighbors(node.id), node].forEach((node) => {
-              node.coord.connected();
+              node.coord.startSync();
             });
+
             res();
           })
         );
@@ -502,10 +511,8 @@ export namespace Network {
 
           return new Promise((res) =>
             setImmediate(() => {
-              data.nodes.forEach((node) => {
-                node.coord.connected();
-              });
-
+              data.nodes.forEach((node) => node.coord.startSync());
+              data.nodes.forEach((node) => node.coord.afterSync());
               res();
             })
           );

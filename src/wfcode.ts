@@ -289,12 +289,30 @@ export type WFWorkflow<CType extends CTypeProto> = {
 export const validate = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
 ) => {
-  validateBindings(workflow);
+  const errors = ([] as string[])
+    .concat(validateBindings(workflow))
+    .concat(validateCompensateNotFirstEvent(workflow));
+
+  if (errors.length > 0) {
+    throw new Error(errors.map((x) => `- ${x.trim()}`).join("\n"));
+  }
+};
+
+/**
+ * Compensate needs eventId as anchor
+ */
+export const validateCompensateNotFirstEvent = <CType extends CTypeProto>(
+  workflow: WFWorkflow<CType>
+): string[] => {
+  if (workflow.code.at(0)?.t === "compensate") {
+    return [`first code cannot be compensate.`];
+  }
+  return [];
 };
 
 export const validateBindings = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
-) => {
+): string[] => {
   const availableContext = new Set(workflow.uniqueParams);
   const errors: string[] = [];
 
@@ -335,9 +353,7 @@ export const validateBindings = <CType extends CTypeProto>(
     }
   });
 
-  if (errors.length > 0) {
-    throw new Error(errors.map((x) => `- ${x.trim()}`).join("\n"));
-  }
+  return errors;
 };
 
 export namespace CParallelIndexer {
@@ -374,26 +390,6 @@ export namespace CParallelIndexer {
 }
 
 export namespace CCompensationIndexer {
-  const constructCompensateList = <CType extends CTypeProto>(
-    workflow: WFWorkflow<CType>["code"]
-  ) => {
-    const compensateBlock: { start: number; end: number }[] = [];
-
-    let compensationWithStartIndexes: number[] = [];
-    workflow.forEach((line, index) => {
-      if (line.t === "compensate") {
-        compensationWithStartIndexes.push(index);
-        return;
-      } else if (line.t === "compensate-end") {
-        const start = compensationWithStartIndexes.pop();
-        if (!start) return;
-        compensateBlock.push({ start: start, end: index });
-      }
-    });
-
-    return compensateBlock;
-  };
-
   const constructWithList = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]
   ) => {
@@ -417,14 +413,10 @@ export namespace CCompensationIndexer {
   export const make = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]
   ) => {
-    const compensateList = constructCompensateList(workflow);
     const withList = constructWithList(workflow);
 
     return {
-      compensateList,
       withList,
-      activeCompensateableIndices: (x: number) =>
-        compensateList.filter((item) => x > item.start && x < item.end),
       isInsideWithBlock: (x: number) =>
         withList.findIndex((entry) => x > entry.start && x < entry.end) !== -1,
     };

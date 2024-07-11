@@ -455,24 +455,38 @@ describe("partitions-multi-level compensations", () => {
     await findAndRunCommand(t2, Ev.atSrc);
     await findAndRunCommand(t2, Ev.reqEnter);
     await findAndRunCommand(src, Ev.doEnter);
-    await findAndRunCommand(t2, Ev.inside);
 
     expect(t1.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
     expect(t1.machine.machine().state().context.t).toBe("t1");
 
-    expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.inside);
+    expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.doEnter);
     expect(t2.machine.machine().state().context.A).toBe("t2");
     assertHaveSameState([t1, manager, dst]);
     assertHaveSameState([t2, src]);
 
-    network.partitions.clear();
-    await awhile();
+    network.logger.sub(log);
+    src.node.logger.sub(log);
+    t2.node.logger.sub(log);
+    src.machine.logger.sub(log);
+    t2.machine.logger.sub(log);
+
+    await network.partitions.clear();
 
     expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating"); // broken, src is stuck on building-compensations
+    expect(src.machine.mcomb().t).toBe("compensating");
 
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    // compensating
     await findAndRunCommand(t2, Ev.withdrawn);
 
-    // t2 and src should be in the compensation mode now?
+    // compensation is done
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(src.machine.mcomb().t).toBe("normal");
+
+    assertHaveSameState([t1, t2, src, manager, dst, t3]);
   });
 });

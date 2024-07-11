@@ -31,6 +31,7 @@ import {
 
 // Stack
 type StackItem<CType extends CTypeProto> =
+  | SCompensate<CType>
   | SMatch<CType>
   | SEvent<CType>
   | SRetry
@@ -38,6 +39,10 @@ type StackItem<CType extends CTypeProto> =
   | SAntiTimeout<CType>
   | SParallel<CType>
   | SAntiParallel;
+
+type SCompensate<CType extends CTypeProto> = Pick<CCompensate, "t"> & {
+  lastEvent: ActyxWFBusiness<CType>;
+};
 
 type SMatch<CType extends CTypeProto> = Pick<CMatch<CType>, "t"> & {
   inner: WFMachine<CType>;
@@ -156,6 +161,7 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const active = {
+    activeCompensateable: new Set() as Set<number>,
     activeTimeout: new Set() as Set<number>,
   };
 
@@ -301,50 +307,33 @@ export const WFMachine = <CType extends CTypeProto>(
         return b.antiIndex - a.antiIndex;
       });
 
-  const firstEventIndexForCompensation = (
-    compensateIndex: number,
-    ccompensate: CCompensate
-  ) => {
-    let index = compensateIndex + 1;
-    while (index < ccompensate.withIndexOffset) {
-      if (index > data.stack.length - 1) return null;
-      if (workflow.at(index)?.t === "event") {
-        const stack = data.stack.at(index);
-        if (stack?.t === "event") return { index, event: stack };
-      }
-      index += 1;
-    }
-    return null;
-  };
-
   /**
    * Find all active compensateable
    * TODO: return next-events of compensate-with as compensations
    */
   const selfAvailableCompensateable = () => {
-    const res = ccompensateIndexer
-      .activeCompensateableIndices(innerstate.stateIndex)
-      .map(({ start: index }) => {
+    const res = Array.from(active.activeCompensateable)
+      .map((index) => {
         const ccompensate = workflow.at(index);
         if (ccompensate?.t !== "compensate") {
           throw new Error(
-            `compensate query fatal error: ctimeout not found at index ${index}`
+            `compensate query fatal error: ccompensate not found at index ${index}`
+          );
+        }
+
+        const sCompensate = data.stack.at(index);
+        if (sCompensate?.t !== "compensate") {
+          throw new Error(
+            `compensate at ${index} not populated when activated at index`
           );
         }
 
         const compensationIndex = index;
-        const firstEventInfo = firstEventIndexForCompensation(
-          index,
-          ccompensate
-        );
+        const triggeringEvent = sCompensate.lastEvent;
         const withIndex = index + ccompensate.withIndexOffset;
         const antiIndex = index + ccompensate.antiIndexOffset;
         const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
-
-        // if first event is not emitted, compensation is not actuallly active
-        if (!firstEventInfo) return null;
-        const firstEvent = firstEventInfo.event;
 
         if (firstCompensation?.t !== "event") {
           throw new Error(
@@ -360,7 +349,7 @@ export const WFMachine = <CType extends CTypeProto>(
           firstCompensationIndex,
           antiTimeoutIndex: antiIndex,
           withIndex,
-          fromTimelineOf: firstEvent.event.meta.eventId,
+          fromTimelineOf: triggeringEvent.meta.eventId,
         };
       })
       .filter((x): x is Exclude<typeof x, null> => x !== null)
@@ -665,19 +654,32 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "compensate") {
+      const lastEvent = innerstate.state?.[1];
+      if (!lastEvent) throw new Error("entered compensate block without state");
+
+      active.activeCompensateable.add(evalContext.index);
+      data.stack[evalContext.index] = {
+        t: "compensate",
+        lastEvent,
+      };
+
       evalContext.index += 1;
       return true;
     }
 
     if (code.t === "compensate-end") {
+      const originalCompensateIndex = evalContext.index + code.baseIndexOffset;
+      active.activeCompensateable.delete(originalCompensateIndex);
+
       const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
       evalContext.index = rightAfterAntiIndex;
       return true;
     }
 
     if (code.t === "anti-compensate") {
-      // NOTE: do nothing else now
-      // we might need to put a marker in the "compensate"'s stack counterpart
+      const originalCompensateIndex = evalContext.index + code.baseIndexOffset;
+      active.activeCompensateable.delete(originalCompensateIndex);
+
       evalContext.index += 1;
       return true;
     }
