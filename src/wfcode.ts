@@ -1,6 +1,15 @@
+/**
+ * @module
+ *
+ * Definitions and constructors for CItem "bytecode" that the WFMachine runs.
+ */
+
 import { CTypeProto } from "./consts.js";
 import { Enum, WrapType } from "./utils.js";
 
+/**
+ * CItem is each "line" of the byte code
+ */
 export type CItem<CType extends CTypeProto> =
   | CAnti
   | CEvent<CType>
@@ -13,6 +22,7 @@ export type CItem<CType extends CTypeProto> =
   | CMatch<CType>
   | CMatchCase
   | CChoice;
+
 type CAnti =
   | CAntiRetry
   | CAntiTimeout
@@ -28,6 +38,9 @@ export type Role<Ctype extends CTypeProto> = WrapType.TypeOf<
   WrapType.Utils.Refine<typeof Role, Ctype["role"]>
 >;
 
+/**
+ * An actor is either a Unique or a Role.
+ */
 export type Actor<CType extends CTypeProto> = Unique | Role<CType>;
 
 export type CEventBinding = { var: string; index: string };
@@ -46,8 +59,13 @@ export type CMatch<CType extends CTypeProto> = {
   args: Record<string, string>;
   casesIndexOffsets: number[];
 };
+
 export const Exact: unique symbol = Symbol("Name");
 export const Otherwise: unique symbol = Symbol("Otherwise");
+
+/**
+ * Match case is matched with the return value of the CMatch's sub-WFMachine.
+ */
 export type CMatchCaseType<CType extends CTypeProto> =
   | [typeof Exact, CType["ev"]]
   | [typeof Otherwise];
@@ -55,6 +73,7 @@ export type CMatchCase = {
   t: "match-case";
   case: [typeof Exact, string] | [typeof Otherwise];
 };
+
 export type CAntiMatchCase = { t: "anti-match-case"; afterIndexOffset: number };
 export type CCompensate = {
   t: "compensate";
@@ -99,7 +118,13 @@ export type CAntiRetry = { t: "anti-retry"; pairOffsetIndex: number };
 export type CAntiTimeout = { t: "anti-timeout"; pairOffsetIndex: number };
 export type CAntiParallel = { t: "anti-par"; pairOffsetIndex: number };
 
+/**
+ * A collection of helper to write CItem.
+ */
 export namespace Code {
+  /**
+   * Marker for Control which concists of "fail" and "return".
+   */
   export const Control = Enum(["fail", "return"] as const);
   export type Control = Enum<typeof Control>;
 
@@ -281,11 +306,20 @@ export namespace Code {
   ];
 }
 
+/**
+ * One of the input of WFMachine; it consists of UniqueParams and the code
+ * itself. UniqueParams are used to bind identity variables from outer WFMachine
+ * to inner WFMachine.
+ */
 export type WFWorkflow<CType extends CTypeProto> = {
   uniqueParams: string[];
   code: Readonly<[CEvent<CType>, ...CItem<CType>[]]>;
 };
 
+/**
+ * Validations run at the beginning of WFMachine. This theoretically could be
+ * run at the point when the WFWorkflow is created.
+ */
 export const validate = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
 ) => {
@@ -356,6 +390,10 @@ export const validateBindings = <CType extends CTypeProto>(
   return errors;
 };
 
+/**
+ * Index WFWorkflow for Parallel codes for faster queries with better-defined
+ * APIs. This is useful for queries done inside WFMachine.
+ */
 export namespace CParallelIndexer {
   export const make = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]
@@ -389,6 +427,10 @@ export namespace CParallelIndexer {
   };
 }
 
+/**
+ * Index WFWorkflow for compensation codes for faster queries with
+ * better-defined APIs. This is useful for queries done inside WFMachine.
+ */
 export namespace CCompensationIndexer {
   const constructWithList = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]

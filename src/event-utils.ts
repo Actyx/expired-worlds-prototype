@@ -1,5 +1,5 @@
 import { ActyxWFBusiness, CTypeProto, sortByEventKey } from "./consts.js";
-import { MultiverseTree } from "./reality.js";
+import { MultiverseTree } from "./multiverse.js";
 
 /**
  * Linear chain = chain where parallels are ignored.

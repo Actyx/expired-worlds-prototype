@@ -7,7 +7,7 @@ import {
   Tag,
   Tags,
 } from "@actyx/sdk";
-import * as Reality from "./reality.js";
+import * as Reality from "./multiverse.js";
 import { WFMachine } from "./wfmachine.js";
 export { Reality };
 import { Node } from "./ax-mock/index.js";
@@ -38,6 +38,11 @@ export type Params<CType extends CTypeProto> = {
 };
 
 type OnEventsOrTimetravel<E> = (data: EventsOrTimetravel<E>) => Promise<void>;
+
+/**
+ * Is a union of state of a MachineCombinator. A MachineCombinator can have
+ * multiple WFMachines to make compensation calculations.
+ */
 type DataModes<CType extends CTypeProto> = {
   wfMachine: WFMachine<CType>;
 } & (
@@ -51,15 +56,19 @@ type DataModes<CType extends CTypeProto> = {
 );
 
 // TODO:
-// - involve participation into compensation calculation (this depends on whether we want to block everyone involved in the task into until a particular compensation is done by a subset of participant)
+// - involve participation into compensation calculation (this depends on
+//   whether we want to block everyone involved in the task into until a
+//   particular compensation is done by a subset of participant)
+
+/**
+ * Creates a machine combinator and listens to an actyx node.
+ */
 export const run = <CType extends CTypeProto>(
   params: Params<CType>,
-  // const node = Node.make<WFEventAndDirective<CType>>({ id: params.id });
   node: Node.Type<WFBusinessOrMarker<CType>>,
   workflow: WFWorkflow<CType>
 ) => {
   const machineCombinator = MachineCombinator.make(params, node, workflow);
-  const { logger } = machineCombinator;
 
   const axSub = perpetualSubscription(node, async (e) => {
     if (e.type === MsgType.timetravel) {
@@ -69,6 +78,9 @@ export const run = <CType extends CTypeProto>(
     }
   });
 
+  /**
+   * This function body is the definition of commands available to this machine
+   */
   const commands = () => {
     const data = machineCombinator.internal();
     if (data.t === "building-compensations") {
@@ -124,13 +136,16 @@ export const run = <CType extends CTypeProto>(
   return {
     commands,
     mcomb: () => machineCombinator.internal(),
-    machine: () => machineCombinator.machine(),
-    state: () => machineCombinator.machine().state(),
+    wfmachine: () => machineCombinator.wfmachine(),
+    state: () => machineCombinator.wfmachine().state(),
     logger: machineCombinator.logger,
     kill: axSub.kill,
   };
 };
 
+/**
+ * Subscribe, always reconnect on connection error.
+ */
 const perpetualSubscription = <E>(
   node: Node.Type<E>,
   onEventsOrTimeTravel: OnEventsOrTimetravel<E>
@@ -164,6 +179,12 @@ const perpetualSubscription = <E>(
 };
 
 export namespace MachineCombinator {
+  /**
+   * Creates a MachineCombinator.
+   *
+   * MachineCombinator manages a multiverse tree and uses several WFMachines to
+   * detect compensations.
+   */
   export const make = <CType extends CTypeProto>(
     params: Params<CType>,
     node: Node.Type<WFBusinessOrMarker<CType>>,
@@ -242,6 +263,9 @@ export namespace MachineCombinator {
       };
     };
 
+    /**
+     * Recalculate supposed actual DataModes for this MachineCombinator.
+     */
     // TODO: should compensation happen in timeouts/failures/retries?
     const recalc = () => {
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
@@ -308,7 +332,7 @@ export namespace MachineCombinator {
       logger,
       recalc,
       internal: () => data,
-      machine: () => data.wfMachine,
+      wfmachine: () => data.wfMachine,
       compensation: currentCompensation,
       last: () => data.wfMachine.latestStateEvent(),
       setToBuildingCompensation: () => {
@@ -404,6 +428,10 @@ export namespace CompensationMap {
   type From = string;
   type To = string;
 
+  /**
+   * A map that keeps track of actors' (that's being referred to by the
+   * identity) need to compensate (or observe a compensation sequence).
+   */
   export const make = () => {
     const data = {
       positive: new Map<
@@ -476,6 +504,10 @@ export namespace CompensationMap {
   };
 }
 
+/**
+ * Calculate the compensation needed when a machine jumps from a point in the
+ * multiverse to the other.
+ */
 const calculateCompensations = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>,
   multiverse: Reality.MultiverseTree.Type<CType>,

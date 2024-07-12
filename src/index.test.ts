@@ -309,9 +309,9 @@ const expectAllToHaveSameState = (
   const first = agents.at(0);
   if (!first) return;
   const rest = agents.slice(1);
-  const firstState = first.machine.machine().state();
+  const firstState = first.machine.wfmachine().state();
   rest.forEach((rest) => {
-    const restState = rest.machine.machine().state();
+    const restState = rest.machine.wfmachine().state();
     expect(firstState).toEqual(restState);
   });
 };
@@ -341,8 +341,8 @@ describe("no-partitions", () => {
     expectAllToHaveSameState([manager, src, t1, t2, t3]);
 
     // assert state at request
-    expect(dst.machine.machine().state().state?.[0]).toBe(One);
-    expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
+    expect(dst.machine.wfmachine().state().state?.[0]).toBe(One);
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe("request");
 
     await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
     await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
@@ -350,24 +350,24 @@ describe("no-partitions", () => {
 
     // assert base state at request
     // and there are 3 bids in parallel
-    expect(dst.machine.machine().state().state?.[0]).toBe(Parallel);
-    expect(dst.machine.machine().state().state?.[1].payload.t).toBe("request");
-    expect(dst.machine.machine().state().state?.[2]?.length).toBe(3);
+    expect(dst.machine.wfmachine().state().state?.[0]).toBe(Parallel);
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe("request");
+    expect(dst.machine.wfmachine().state().state?.[2]?.length).toBe(3);
     expect(
       dst.machine
-        .machine()
+        .wfmachine()
         .state()
         .state?.[2]?.find((x) => x.payload.payload.bidder === t1.identity.id)
     ).toBeTruthy();
     expect(
       dst.machine
-        .machine()
+        .wfmachine()
         .state()
         .state?.[2]?.find((x) => x.payload.payload.bidder === t2.identity.id)
     ).toBeTruthy();
     expect(
       dst.machine
-        .machine()
+        .wfmachine()
         .state()
         .state?.[2]?.find((x) => x.payload.payload.bidder === t3.identity.id)
     ).toBeTruthy();
@@ -386,8 +386,8 @@ describe("no-partitions", () => {
     await findAndRunCommand(t1, Ev.assign, { robotID: winner });
     await findAndRunCommand(t1, Ev.accept);
 
-    expect(dst.machine.machine().state().state?.[0]).toBe(One);
-    expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(dst.machine.wfmachine().state().state?.[0]).toBe(One);
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.accept);
 
     // docking t1 -> src and loading
     await findAndRunCommand(t1, Ev.atSrc);
@@ -395,8 +395,8 @@ describe("no-partitions", () => {
     await findAndRunCommand(src, Ev.doEnter);
     await findAndRunCommand(t1, Ev.inside);
 
-    expect(dst.machine.machine().state().state?.[0]).toBe(One);
-    expect(dst.machine.machine().state().state?.[1].payload.t).toBe(Ev.inside);
+    expect(dst.machine.wfmachine().state().state?.[0]).toBe(One);
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.inside);
 
     await findAndRunCommand(t1, Ev.reqLeave);
     await findAndRunCommand(src, Ev.doLeave);
@@ -465,11 +465,11 @@ describe("partitions-multi-level compensations", () => {
     await scenarioContestingBidOnPartition(scenario);
 
     // expect each of t1 and t2 to have their own "reality"
-    expect(t1.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
-    expect(t1.machine.machine().state().context.t).toBe("t1");
+    expect(t1.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(t1.machine.wfmachine().state().context.t).toBe("t1");
 
-    expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
-    expect(t2.machine.machine().state().context.t).toBe("t2");
+    expect(t2.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(t2.machine.wfmachine().state().context.t).toBe("t2");
 
     expectAllToHaveSameState([manager, t1, t3]);
     expectAllToHaveSameState([src, t2]);
@@ -495,11 +495,11 @@ describe("partitions-multi-level compensations", () => {
     await findAndRunCommand(t2, Ev.reqEnter);
     await findAndRunCommand(src, Ev.doEnter);
 
-    expect(t1.machine.machine().state().state?.[1].payload.t).toBe(Ev.accept);
-    expect(t1.machine.machine().state().context.t).toBe("t1");
+    expect(t1.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(t1.machine.wfmachine().state().context.t).toBe("t1");
 
-    expect(t2.machine.machine().state().state?.[1].payload.t).toBe(Ev.doEnter);
-    expect(t2.machine.machine().state().context.A).toBe("t2");
+    expect(t2.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.doEnter);
+    expect(t2.machine.wfmachine().state().context.A).toBe("t2");
     expectAllToHaveSameState([t1, manager, dst]);
     expectAllToHaveSameState([t2, src]);
 
@@ -563,11 +563,11 @@ describe("partitions-multi-level compensations", () => {
 
     // t2 and src is in doEnter
     [t2, src].forEach((m) =>
-      expect(m.machine.machine().state()?.state?.[1].payload.t).toBe(Ev.doEnter)
+      expect(m.machine.wfmachine().state()?.state?.[1].payload.t).toBe(Ev.doEnter)
     );
 
     [t1, manager, dst, t3].forEach((m) =>
-      expect(m.machine.machine().state()?.state?.[1].payload.t).toBe(Ev.accept)
+      expect(m.machine.wfmachine().state()?.state?.[1].payload.t).toBe(Ev.accept)
     );
 
     expect(t2.machine.mcomb().t).toBe("compensating");
@@ -591,5 +591,11 @@ describe("partitions-multi-level compensations", () => {
     expect(t3.machine.mcomb().t).toBe("normal");
 
     expectAllToHaveSameState([t1, t2, src, manager, dst, t3]);
+  });
+});
+
+describe("return inside compensations", () => {
+  it("exits the compensation block", async () => {
+    // TODO:
   });
 });
