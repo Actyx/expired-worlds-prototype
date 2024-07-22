@@ -497,3 +497,19 @@ export namespace CTimeoutIndexer {
     };
   };
 }
+
+export namespace CRetryIndexer {
+  export const make = <CType extends CTypeProto>(
+    workflow: WFWorkflow<CType>["code"]
+  ) => {
+    const list = extractor(workflow).extractPairs(
+      (line) => line.t === "retry",
+      (line) => line.t === "anti-retry"
+    );
+
+    return {
+      getListMatching: (x: number) =>
+        list.filter((entry) => x > entry.start && x < entry.end),
+    };
+  };
+}

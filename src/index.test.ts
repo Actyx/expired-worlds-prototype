@@ -508,8 +508,8 @@ describe("partitions-multi-level compensations", () => {
   });
 });
 
-describe("timeouts from inside the compensation", () => {
-  it("clears the compensation", async () => {
+describe("timeout invocation from inside the compensation", () => {
+  it("clears the compensations and timeouts", async () => {
     const scenario = genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
@@ -563,10 +563,61 @@ describe("timeouts from inside the compensation", () => {
     [manager, src, t1, t2, t3, dst].forEach((m) => {
       expect(m.machine.mcomb().t).toBe("normal");
       expect(m.machine.wfmachine().availableCompensateable().length).toBe(0);
+      expect(m.machine.wfmachine().availableTimeouts().length).toBe(0);
     });
 
     expect(manager.machine.wfmachine().state().state?.[1].payload.t).toBe(
       Ev.logisticFailed
     );
+  });
+});
+
+describe("retry-fail inside compensation", () => {
+  it("should clear active compensation", async () => {
+    const scenario = genScenario();
+    const { findAndRunCommand } = scenario;
+    const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+    await findAndRunCommand(manager, Ev.request, {
+      from: src.identity.id,
+      to: dst.identity.id,
+      manager: manager.identity.id,
+    });
+
+    await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
+    await findAndRunCommand(t3, Ev.bid, { bidder: t3.identity.id });
+
+    // t1 self assign and accept
+    const winner = (() => {
+      const state = t1.machine.state().state;
+      const winner =
+        state &&
+        state[0] === Parallel &&
+        state[2].find((x) => x.payload.payload.bidder === t1.identity.id)
+          ?.payload.payload.bidder;
+      if (!winner) throw new Error("no winner");
+      return winner;
+    })();
+    await findAndRunCommand(t1, Ev.assign, { robotID: winner });
+    await findAndRunCommand(t1, Ev.accept);
+    // docking t1 -> src and loading
+    await findAndRunCommand(t1, Ev.atSrc);
+    await findAndRunCommand(t1, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.deny);
+
+    await findAndRunCommand(t1, Ev.notPickedUp);
+
+    expect(manager.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      Ev.notPickedUp
+    );
+    expectAllToHaveSameState([manager, src, t1, t2, t3, dst]);
+
+    // bid command is available again for t1,t2,and t3
+    [t1, t2, t3].forEach((x) => {
+      const bidCommands = x.machine
+        .commands()
+        .find((x) => x.info.name === "bid");
+      expect(bidCommands).toBeTruthy();
+    });
   });
 });

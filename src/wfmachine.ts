@@ -36,6 +36,7 @@ import {
   CParallel,
   CParallelIndexer,
   CRetry,
+  CRetryIndexer,
   CTimeout,
   CTimeoutIndexer,
   Code,
@@ -57,7 +58,7 @@ type StackItem<CType extends CTypeProto> =
   | SCompensate<CType>
   | SMatch<CType>
   | SEvent<CType>
-  | SRetry
+  | SRetry<CType>
   | STimeout<CType>
   | SAntiTimeout<CType>
   | SParallel<CType>
@@ -74,7 +75,9 @@ type SEvent<CType extends CTypeProto> = Pick<CEvent<CType>, "t"> & {
   event: ActyxWFBusiness<CType>;
 };
 
-type SRetry = Pick<CRetry, "t">;
+type SRetry<CType extends CTypeProto> = Pick<CRetry, "t"> & {
+  lastState: State<CType> | null;
+};
 type SParallel<CType extends CTypeProto> = Pick<CParallel, "t"> & {
   lastEvent: ActyxWFBusiness<CType>;
   nextEvalIndex: number;
@@ -190,6 +193,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const ccompensateIndexer = CCompensationIndexer.make(workflow);
   const cparallelIndexer = CParallelIndexer.make(workflow);
   const ctimeoutIndexer = CTimeoutIndexer.make(workflow);
+  const cretryIndexer = CRetryIndexer.make(workflow);
 
   const mapUniqueActorOnNext = (res: UnnamedNext<CType>): Next<CType> => ({
     ...res,
@@ -236,24 +240,6 @@ export const WFMachine = <CType extends CTypeProto>(
     innerstate.stateIndex = -1;
   };
 
-  // Finders helpers
-
-  const nullifyMatchingTimeout = (
-    antiTimeout: CAntiTimeout,
-    antiTimeoutIndex: number
-  ) => {
-    const timeoutIndex = antiTimeoutIndex + antiTimeout.pairOffsetIndex;
-    const maybeTimeout = data.stack.at(timeoutIndex);
-
-    if (maybeTimeout?.t === "timeout") {
-      data.stack[timeoutIndex] = null;
-    } else {
-      throw new Error(
-        `timeout not found on stack at ${timeoutIndex} to ${antiTimeoutIndex}`
-      );
-    }
-  };
-
   const findMatchingRetryIndex = (retry: CAntiRetry, indexInput: number) => {
     const pairIndex = retry.pairOffsetIndex + indexInput;
     const code = workflow.at(pairIndex);
@@ -262,55 +248,26 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const findRetryOnStack = (indexInput: number) => {
-    let index = indexInput;
-    while (index >= 0) {
-      index -= 1;
-      const stackItem = data.stack.at(index);
-      if (stackItem?.t === "retry") return index;
-    }
-    return null;
+    const closest = cretryIndexer
+      .getListMatching(indexInput)
+      .sort((a, b) => b.start - a.start)
+      .at(0);
+
+    if (!closest) return null;
+    const index = closest.start;
+
+    const code = workflow.at(index);
+    if (code?.t !== "retry") return null;
+    const stack = data.stack.at(index);
+    if (stack?.t !== "retry") return null;
+
+    return { code, stack, index };
   };
 
   const getSMatchAtIndex = (index: number) => {
     const atStack = data.stack.at(index);
     if (atStack?.t !== "match") return null;
     return atStack;
-  };
-
-  const getLastEventForParallel = (
-    index: number
-  ): ActyxWFBusiness<CType> | null => {
-    let i = index;
-    /**
-     * counter if whether the index is inside a parallel relative to initial
-     * index block level
-     */
-    let inParallel = 0;
-    while (i >= 0) {
-      const code = workflow.at(i);
-      const atStack = data.stack.at(i);
-      if (code?.t === "anti-par") {
-        inParallel += 1;
-      }
-
-      if (code?.t === "par") {
-        if (inParallel > 0) {
-          inParallel -= 1;
-        } else {
-          if (atStack?.t === "par") {
-            return atStack.lastEvent;
-          }
-        }
-      }
-
-      if (code?.t === "event" && atStack?.t === "event") {
-        if (inParallel === 0) {
-          return atStack.event;
-        }
-      }
-      i--;
-    }
-    return null;
   };
 
   /**
@@ -330,7 +287,7 @@ export const WFMachine = <CType extends CTypeProto>(
         }
         if (stimeout?.t !== "timeout") {
           throw new Error(
-            `timeout query fatal error: stimeout not found at index ${index} while inspecting ${data.evalIndex}`
+            `timeout query fatal error: stimeout not found at index ${index} while inspecting ${data.evalIndex}. s shape is ${stimeout}`
           );
         }
 
@@ -483,7 +440,7 @@ export const WFMachine = <CType extends CTypeProto>(
       extractValidNext(data.evalIndex, result, code);
     }
 
-    availableTimeouts().forEach((timeout) => {
+    availableTimeouts(data.evalIndex).forEach((timeout) => {
       const { name, control, actor } = timeout.ctimeout.consequence;
       result.push(
         mapUniqueActorOnNext({
@@ -527,7 +484,7 @@ export const WFMachine = <CType extends CTypeProto>(
     const atStack = ((): SParallel<CType> => {
       const atStack = data.stack.at(evalContext.index);
       if (!atStack) {
-        const lastEvent = getLastEventForParallel(evalContext.index - 1);
+        const lastEvent = innerstate.state?.[1] || null;
         // TODO: maybe support parallel at the beginning?
         // but I don't think that makes sense
         if (lastEvent === null) {
@@ -586,8 +543,21 @@ export const WFMachine = <CType extends CTypeProto>(
         innerstate.state = [One, stackItem.event];
         innerstate.stateIndex = calcIndex;
 
-        if (code.control === "return") {
+        if (code.control === Code.Control.return) {
           innerstate.returned = true;
+        } else if (code.control === Code.Control.fail) {
+          const retry = findRetryOnStack(calcIndex);
+          if (retry === null) {
+            throw new Error(
+              "cannot find retry while dealing with anti-timeout fail"
+            );
+          }
+          data.stack[retry.index] = {
+            t: "retry",
+            lastState: innerstate.state,
+          };
+          resetIndex(evalContext, retry.index + 1);
+          return true;
         }
       }
 
@@ -595,14 +565,21 @@ export const WFMachine = <CType extends CTypeProto>(
         const consequence = stackItem.consequence;
 
         if (consequence.control === Code.Control.fail) {
-          const retryIndex = findRetryOnStack(calcIndex);
-          if (retryIndex === null) {
-            throw new Error("cannot find retry while dealing with ");
+          const retry = findRetryOnStack(calcIndex);
+          if (retry === null) {
+            throw new Error(
+              "cannot find retry while dealing with anti-timeout fail"
+            );
           }
-          resetIndex(evalContext, retryIndex + 1);
+          data.stack[retry.index] = {
+            t: "retry",
+            lastState: innerstate.state,
+          };
+          resetIndex(evalContext, retry.index + 1);
           return true;
         } else if (consequence.control === "return") {
           innerstate.state = [One, stackItem.event];
+          innerstate.stateIndex = calcIndex;
           innerstate.returned = true;
         }
       }
@@ -618,6 +595,16 @@ export const WFMachine = <CType extends CTypeProto>(
             return [Parallel, stackItem.lastEvent, instances];
           }
         })();
+        innerstate.stateIndex = calcIndex;
+      }
+
+      if (
+        code?.t === "retry" &&
+        stackItem?.t === "retry" &&
+        stackItem.lastState !== null
+      ) {
+        innerstate.state = stackItem.lastState;
+        innerstate.stateIndex = calcIndex;
       }
 
       return false;
@@ -650,7 +637,6 @@ export const WFMachine = <CType extends CTypeProto>(
   const autoEvaluateImpl = (evalContext: EvalContext): Continue => {
     // Handle Retry Code
     const code = workflow.at(evalContext.index);
-    logger.log("autoEvaluateImpl", evalContext.index, JSON.stringify(code));
 
     if (!code) {
       innerstate.returned = true;
@@ -664,7 +650,10 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "retry") {
-      data.stack[evalContext.index] = { t: "retry" };
+      data.stack[evalContext.index] = {
+        t: "retry",
+        lastState: innerstate.state,
+      };
       evalContext.index += 1;
       return true;
     }
@@ -694,7 +683,6 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "anti-timeout") {
-      nullifyMatchingTimeout(code, evalContext.index);
       evalContext.index += 1;
       return true;
     }
@@ -996,7 +984,7 @@ export const WFMachine = <CType extends CTypeProto>(
     e: TickInput
   ): TickRes => {
     // Compensation can only be triggered by event, not seek
-    const firstMatching = selfAvailableCompensateable().find(
+    const firstMatching = selfAvailableCompensateable(evalContext.index).find(
       (comp) => e.payload.t === comp.firstCompensation.name
     );
 
@@ -1130,7 +1118,7 @@ export const WFMachine = <CType extends CTypeProto>(
     // calc index
     data.stateCalcIndex = 0;
     data.extraParCalcIndex = null;
-    data.stack = [];
+    data.stack.length = 0;
 
     innerstate.context = { ...contextArg };
     innerstate.state = null;
@@ -1226,6 +1214,11 @@ export const WFMachine = <CType extends CTypeProto>(
     availableTimeouts,
     availableNexts,
     availableCompensateable: () => {
+      logger.log(
+        "availableCompensateable",
+        data.evalIndex,
+        JSON.stringify(workflow.at(data.evalIndex))
+      );
       const res = selfAvailableCompensateable().map((x) => ({
         codeIndex: x.codeIndex,
         fromTimelineOf: x.fromTimelineOf,
@@ -1244,6 +1237,8 @@ export const WFMachine = <CType extends CTypeProto>(
         );
         return res;
       });
+
+      logger.log("availableCompensateable.len", res.length);
 
       return res;
     },
