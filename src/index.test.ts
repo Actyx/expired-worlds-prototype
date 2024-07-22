@@ -1,15 +1,19 @@
 import { describe, expect, it } from "@jest/globals";
-import { run } from "./index.js";
-import { Network, Node } from "./ax-mock/index.js";
 import {
   ActyxWFBusinessOrMarker,
   MakeCType,
   WFBusinessOrMarker,
 } from "./consts.js";
 import { Enum } from "./utils.js";
-import { ActyxEvent, Tags } from "@actyx/sdk";
+import { Tags } from "@actyx/sdk";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
 import { One, Parallel } from "./wfmachine.js";
+import {
+  expectAllToHaveSameState,
+  setup,
+  SetupSystemParams,
+} from "./test-utils/scenario-builder.js";
+import { awhile, log } from "./test-utils/misc.js";
 
 const Ev = Enum([
   "request",
@@ -50,12 +54,9 @@ type Ev = Enum<typeof Ev>;
 const Role = Enum(["manager", "transporter", "storage"] as const);
 type Role = Enum<typeof Role>;
 
-type TheType = MakeCType<{
-  ev: Ev;
-  role: Role;
-}>;
+type TheType = MakeCType<{ ev: Ev; role: Role }>;
 
-const workflowTag = Tags<WFBusinessOrMarker<TheType>>("workflowtag");
+const logisticWorkflowTag = Tags<WFBusinessOrMarker<TheType>>("workflowtag");
 const code = Code.make<TheType>();
 const { role, unique } = code.actor;
 
@@ -67,7 +68,7 @@ const docking: WFWorkflow<TheType> = {
       [
         ...code.choice([
           code.event(unique("B"), Ev.doEnter),
-          code.event(unique("B"), Ev.deny, { control: "return" }),
+          code.event(unique("B"), Ev.deny, { control: code.Control.return }),
         ]),
         code.event(unique("A"), Ev.inside),
       ],
@@ -77,7 +78,7 @@ const docking: WFWorkflow<TheType> = {
       [
         code.event(unique("A"), Ev.reqLeave),
         code.event(unique("B"), Ev.doLeave),
-        code.event(unique("A"), Ev.success, { control: "return" }),
+        code.event(unique("A"), Ev.success, { control: code.Control.return }),
       ],
       [
         code.event(unique("A"), Ev.withdraw),
@@ -134,7 +135,7 @@ const logistic: WFWorkflow<TheType> = {
             ] as const),
             code.matchCase([Otherwise], [
               code.event(unique("t"), Ev.notPickedUp, {
-                control: "fail",
+                control: code.Control.fail,
               }),
             ] as const),
           ]),
@@ -150,7 +151,7 @@ const logistic: WFWorkflow<TheType> = {
                   [Otherwise],
                   [
                     code.event(unique("t"), Ev.notDelivered, {
-                      control: "fail",
+                      control: code.Control.fail,
                     }),
                   ]
                 ),
@@ -166,7 +167,7 @@ const logistic: WFWorkflow<TheType> = {
                   }),
                 ],
                 code.event(unique("t"), Ev.assistanceNeeded, {
-                  control: "return",
+                  control: code.Control.return,
                 })
               ),
               code.event(unique("t"), Ev.atWarehouse),
@@ -179,7 +180,7 @@ const logistic: WFWorkflow<TheType> = {
                   [Otherwise],
                   [
                     code.event(unique("t"), Ev.assistanceNeeded, {
-                      control: "return",
+                      control: code.Control.return,
                     }),
                   ]
                 ),
@@ -196,95 +197,17 @@ const logistic: WFWorkflow<TheType> = {
   ] as const,
 };
 
-/**
- * promise that waits for other timers to resolve
- */
-const awhile = () => new Promise(setImmediate);
-
-/**
- * Scenario Setup Parameters
- */
-type SetupSystemParams = {
-  /**
-   * The initial data that should be loaded by the nodes at initialization
-   */
-  initialStoreData?: ActyxEvent<WFBusinessOrMarker<TheType>>[];
-};
-
-const setup = (
-  params: { id: string; role: Role }[],
-  networkParams?: SetupSystemParams
-) => {
-  const makenetwork = Network.make<WFBusinessOrMarker<TheType>>;
-  const makenode = Node.make<WFBusinessOrMarker<TheType>>;
-
-  const network = makenetwork();
-
-  const agents = params
-    .map((identity) => {
-      // initialize nodes and load all initial data
-      const node = makenode({ id: identity.id });
-      node.logger.sub(log);
-      if (networkParams?.initialStoreData) {
-        node.store.load(networkParams.initialStoreData);
-      }
-      return { identity, node };
-    })
-    .map((x) => {
-      // join network to node
-      network.join(x.node);
-      return x;
-    })
-    .map(({ identity, node }) => {
-      // run machine
-      const machine = run(
-        { self: identity, tags: workflowTag },
-        node,
-        logistic
-      );
-      return { identity, node, machine };
-    });
-
-  type Agent = (typeof agents)[any];
-
-  const findAgent = (fn: (c: Agent) => boolean): Agent => {
-    const agent = agents.find(fn);
-    if (!agent) throw new Error("findAgent error");
-    return agent;
-  };
-
-  const findCommand = (agent: Agent, name: string) => {
-    const found = agent.machine
-      .commands()
-      .find(({ info }) => info.name === name);
-    if (!found)
-      throw new Error(`command ${name} not found in ${agent.identity.id}`);
-    return found;
-  };
-
-  const findAndRunCommand = async (
-    agent: Agent,
-    name: string,
-    payload?: Record<string, unknown>
-  ) => {
-    await awhile();
-    const command = findCommand(agent, name);
-    command.publish(payload);
-    await awhile();
-  };
-
-  return {
-    agents,
-    findAgent,
-    findCommand,
-    findAndRunCommand,
-    network,
-  };
-};
-
 type Scenario = ReturnType<typeof genScenario>;
-const genScenario = (setupSystemParams?: SetupSystemParams) => {
-  const scenario = setup(
+
+const genScenario = (
+  setupSystemParams?: Partial<SetupSystemParams<TheType>>
+) => {
+  const scenario = setup<TheType>(
+    logistic,
+    {
+      ...(setupSystemParams || {}),
+      tags: logisticWorkflowTag,
+    },
     [
       { id: "storage-src", role: Role.storage },
       { id: "storage-dst", role: Role.storage },
@@ -292,8 +215,7 @@ const genScenario = (setupSystemParams?: SetupSystemParams) => {
       { id: "t1", role: Role.transporter },
       { id: "t2", role: Role.transporter },
       { id: "t3", role: Role.transporter },
-    ],
-    setupSystemParams
+    ]
   );
 
   const [src, dst, manager, t1, t2, t3] = scenario.agents;
@@ -303,28 +225,6 @@ const genScenario = (setupSystemParams?: SetupSystemParams) => {
     agents: { src, dst, manager, t1, t2, t3 } as const,
   };
 };
-const expectAllToHaveSameState = (
-  agents: Scenario["agents"][keyof Scenario["agents"]][]
-) => {
-  const first = agents.at(0);
-  if (!first) return;
-  const rest = agents.slice(1);
-  const firstState = first.machine.wfmachine().state();
-  rest.forEach((rest) => {
-    const restState = rest.machine.wfmachine().state();
-    expect(firstState).toEqual(restState);
-  });
-};
-
-const log = (...args: any[]) =>
-  args.forEach((a, i) => {
-    process.stdout.write(String(a));
-    if (i < args.length - 1) {
-      process.stdout.write(" ");
-    } else {
-      process.stdout.write("\n");
-    }
-  });
 
 describe("no-partitions", () => {
   it("works", async () => {
@@ -342,7 +242,9 @@ describe("no-partitions", () => {
 
     // assert state at request
     expect(dst.machine.wfmachine().state().state?.[0]).toBe(One);
-    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe("request");
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      "request"
+    );
 
     await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
     await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
@@ -351,7 +253,9 @@ describe("no-partitions", () => {
     // assert base state at request
     // and there are 3 bids in parallel
     expect(dst.machine.wfmachine().state().state?.[0]).toBe(Parallel);
-    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe("request");
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      "request"
+    );
     expect(dst.machine.wfmachine().state().state?.[2]?.length).toBe(3);
     expect(
       dst.machine
@@ -387,7 +291,9 @@ describe("no-partitions", () => {
     await findAndRunCommand(t1, Ev.accept);
 
     expect(dst.machine.wfmachine().state().state?.[0]).toBe(One);
-    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.accept);
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      Ev.accept
+    );
 
     // docking t1 -> src and loading
     await findAndRunCommand(t1, Ev.atSrc);
@@ -396,7 +302,9 @@ describe("no-partitions", () => {
     await findAndRunCommand(t1, Ev.inside);
 
     expect(dst.machine.wfmachine().state().state?.[0]).toBe(One);
-    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.inside);
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      Ev.inside
+    );
 
     await findAndRunCommand(t1, Ev.reqLeave);
     await findAndRunCommand(src, Ev.doLeave);
@@ -498,7 +406,9 @@ describe("partitions-multi-level compensations", () => {
     expect(t1.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.accept);
     expect(t1.machine.wfmachine().state().context.t).toBe("t1");
 
-    expect(t2.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.doEnter);
+    expect(t2.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      Ev.doEnter
+    );
     expect(t2.machine.wfmachine().state().context.A).toBe("t2");
     expectAllToHaveSameState([t1, manager, dst]);
     expectAllToHaveSameState([t2, src]);
@@ -563,11 +473,15 @@ describe("partitions-multi-level compensations", () => {
 
     // t2 and src is in doEnter
     [t2, src].forEach((m) =>
-      expect(m.machine.wfmachine().state()?.state?.[1].payload.t).toBe(Ev.doEnter)
+      expect(m.machine.wfmachine().state()?.state?.[1].payload.t).toBe(
+        Ev.doEnter
+      )
     );
 
     [t1, manager, dst, t3].forEach((m) =>
-      expect(m.machine.wfmachine().state()?.state?.[1].payload.t).toBe(Ev.accept)
+      expect(m.machine.wfmachine().state()?.state?.[1].payload.t).toBe(
+        Ev.accept
+      )
     );
 
     expect(t2.machine.mcomb().t).toBe("compensating");

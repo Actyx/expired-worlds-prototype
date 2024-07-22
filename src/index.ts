@@ -55,6 +55,8 @@ type DataModes<CType extends CTypeProto> = {
     }
 );
 
+export type Machine<CType extends CTypeProto> = ReturnType<typeof run<CType>>;
+
 // TODO:
 // - involve participation into compensation calculation (this depends on
 //   whether we want to block everyone involved in the task into until a
