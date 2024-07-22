@@ -508,8 +508,65 @@ describe("partitions-multi-level compensations", () => {
   });
 });
 
-describe("return inside compensations", () => {
-  it("exits the compensation block", async () => {
-    // TODO:
+describe("timeouts from inside the compensation", () => {
+  it("clears the compensation", async () => {
+    const scenario = genScenario();
+    const { findAndRunCommand } = scenario;
+    const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+
+    await findAndRunCommand(manager, Ev.request, {
+      from: src.identity.id,
+      to: dst.identity.id,
+      manager: manager.identity.id,
+    });
+    await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
+    await findAndRunCommand(t3, Ev.bid, { bidder: t3.identity.id });
+
+    // t1 self assign and accept
+    const winner = (() => {
+      const state = t1.machine.state().state;
+      const winner =
+        state &&
+        state[0] === Parallel &&
+        state[2].find((x) => x.payload.payload.bidder === t1.identity.id)
+          ?.payload.payload.bidder;
+      if (!winner) throw new Error("no winner");
+      return winner;
+    })();
+    await findAndRunCommand(t1, Ev.assign, { robotID: winner });
+
+    await findAndRunCommand(t1, Ev.accept);
+
+    // docking t1 -> src and loading
+    await findAndRunCommand(t1, Ev.atSrc);
+    await findAndRunCommand(t1, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+    await findAndRunCommand(t1, Ev.inside);
+
+    await findAndRunCommand(t1, Ev.reqLeave);
+    await findAndRunCommand(src, Ev.doLeave);
+    await findAndRunCommand(t1, Ev.success);
+
+    // load
+    await findAndRunCommand(t1, Ev.loaded);
+
+    // docking t1 -> dst and loading
+    await findAndRunCommand(t1, Ev.atDst);
+    await findAndRunCommand(t1, Ev.reqEnter);
+
+    // done
+    await findAndRunCommand(manager, Ev.logisticFailed);
+
+    expectAllToHaveSameState([manager, src, t1, t2, t3, dst]);
+
+    [manager, src, t1, t2, t3, dst].forEach((m) => {
+      expect(m.machine.mcomb().t).toBe("normal");
+      expect(m.machine.wfmachine().availableCompensateable().length).toBe(0);
+    });
+
+    expect(manager.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      Ev.logisticFailed
+    );
   });
 });

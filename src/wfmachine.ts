@@ -37,6 +37,7 @@ import {
   CParallelIndexer,
   CRetry,
   CTimeout,
+  CTimeoutIndexer,
   Code,
   Exact,
   Unique,
@@ -188,6 +189,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const workflow = wfWorkflow.code;
   const ccompensateIndexer = CCompensationIndexer.make(workflow);
   const cparallelIndexer = CParallelIndexer.make(workflow);
+  const ctimeoutIndexer = CTimeoutIndexer.make(workflow);
 
   const mapUniqueActorOnNext = (res: UnnamedNext<CType>): Next<CType> => ({
     ...res,
@@ -210,10 +212,7 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Sets of indices of compensation and timeout that are active.
    */
-  const active = {
-    compensateable: new Set() as Set<number>,
-    timeout: new Set() as Set<number>,
-  };
+  const active = {};
 
   // state-related data
   const innerstate = {
@@ -228,11 +227,6 @@ export const WFMachine = <CType extends CTypeProto>(
     data.stack.length = targetIndex;
     data.evalIndex = targetIndex;
     evalContext.index = targetIndex;
-
-    // remove timeouts after the last item index in stack
-    active.timeout = new Set(
-      Array.from(active.timeout).filter((index) => index >= data.stack.length)
-    );
 
     // force recalculate context
     data.stateCalcIndex = 0;
@@ -251,9 +245,7 @@ export const WFMachine = <CType extends CTypeProto>(
     const timeoutIndex = antiTimeoutIndex + antiTimeout.pairOffsetIndex;
     const maybeTimeout = data.stack.at(timeoutIndex);
 
-    if (active.timeout.has(timeoutIndex) && maybeTimeout?.t === "timeout") {
-      active.timeout.delete(timeoutIndex);
-      active.timeout.delete(timeoutIndex);
+    if (maybeTimeout?.t === "timeout") {
       data.stack[timeoutIndex] = null;
     } else {
       throw new Error(
@@ -324,8 +316,10 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Find all active timeouts
    */
-  const availableTimeouts = () =>
-    Array.from(active.timeout)
+  const availableTimeouts = (evalIndex: number = data.evalIndex) =>
+    ctimeoutIndexer
+      .getListMatching(evalIndex)
+      .map((entry) => entry.start)
       .map((index) => {
         const ctimeout = workflow.at(index);
         const stimeout = data.stack.at(index);
@@ -336,7 +330,7 @@ export const WFMachine = <CType extends CTypeProto>(
         }
         if (stimeout?.t !== "timeout") {
           throw new Error(
-            `timeout query fatal error: stimeout not found at index ${index}`
+            `timeout query fatal error: stimeout not found at index ${index} while inspecting ${data.evalIndex}`
           );
         }
 
@@ -355,8 +349,10 @@ export const WFMachine = <CType extends CTypeProto>(
    * Find all active compensateable
    * TODO: return next-events of compensate-with as compensations
    */
-  const selfAvailableCompensateable = () => {
-    const res = Array.from(active.compensateable)
+  const selfAvailableCompensateable = (evalIndex = data.evalIndex) => {
+    const res = ccompensateIndexer
+      .getMainListMatching(evalIndex)
+      .map((entry) => entry.start)
       .map((index) => {
         const ccompensate = workflow.at(index);
         if (ccompensate?.t !== "compensate") {
@@ -654,6 +650,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const autoEvaluateImpl = (evalContext: EvalContext): Continue => {
     // Handle Retry Code
     const code = workflow.at(evalContext.index);
+    logger.log("autoEvaluateImpl", evalContext.index, JSON.stringify(code));
 
     if (!code) {
       innerstate.returned = true;
@@ -692,7 +689,6 @@ export const WFMachine = <CType extends CTypeProto>(
         t: "timeout",
         startedAt: new Date(),
       };
-      active.timeout.add(evalContext.index);
       evalContext.index += 1;
       return true;
     }
@@ -707,7 +703,6 @@ export const WFMachine = <CType extends CTypeProto>(
       const lastEvent = innerstate.state?.[1];
       if (!lastEvent) throw new Error("entered compensate block without state");
 
-      active.compensateable.add(evalContext.index);
       data.stack[evalContext.index] = {
         t: "compensate",
         lastEvent,
@@ -718,18 +713,12 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "compensate-end") {
-      const originalCompensateIndex = evalContext.index + code.baseIndexOffset;
-      active.compensateable.delete(originalCompensateIndex);
-
       const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
       evalContext.index = rightAfterAntiIndex;
       return true;
     }
 
     if (code.t === "anti-compensate") {
-      const originalCompensateIndex = evalContext.index + code.baseIndexOffset;
-      active.compensateable.delete(originalCompensateIndex);
-
       evalContext.index += 1;
       return true;
     }
@@ -831,9 +820,12 @@ export const WFMachine = <CType extends CTypeProto>(
     recalculateState(evalContext);
   };
 
-  const tickTimeout = (e: ActyxWFBusiness<CType>): TickRes => {
+  const tickTimeout = (
+    evalContext: EvalContext,
+    e: ActyxWFBusiness<CType>
+  ): TickRes => {
     // TODO: there should not be multiple matches, shouldn't timeout be unique?
-    const lastMatching = availableTimeouts()
+    const lastMatching = availableTimeouts(evalContext.index)
       .filter((x) => x.ctimeout.consequence.name === e.payload.t)
       .at(0);
 
@@ -999,7 +991,10 @@ export const WFMachine = <CType extends CTypeProto>(
     };
   };
 
-  const tickCompensation = (e: TickInput): TickRes => {
+  const tickCompensation = (
+    evalContext: EvalContext,
+    e: TickInput
+  ): TickRes => {
     // Compensation can only be triggered by event, not seek
     const firstMatching = selfAvailableCompensateable().find(
       (comp) => e.payload.t === comp.firstCompensation.name
@@ -1063,10 +1058,10 @@ export const WFMachine = <CType extends CTypeProto>(
 
           // Jumps
           // =========
-          const compRes = tickCompensation(e);
+          const compRes = tickCompensation(evalContext, e);
           if (compRes.fed) return compRes;
 
-          const timeoutRes = tickTimeout(e);
+          const timeoutRes = tickTimeout(evalContext, e);
           if (timeoutRes.fed) return timeoutRes;
 
           // Non Jumps
@@ -1136,8 +1131,6 @@ export const WFMachine = <CType extends CTypeProto>(
     data.stateCalcIndex = 0;
     data.extraParCalcIndex = null;
     data.stack = [];
-
-    active.timeout = new Set();
 
     innerstate.context = { ...contextArg };
     innerstate.state = null;

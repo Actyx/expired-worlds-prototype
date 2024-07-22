@@ -427,40 +427,73 @@ export namespace CParallelIndexer {
   };
 }
 
+const extractor = <CType extends CTypeProto>(
+  workflow: WFWorkflow<CType>["code"]
+) => {
+  const extractPairs = (
+    heurBegin: (line: CItem<CType>) => boolean,
+    heurEnd: (line: CItem<CType>) => boolean
+  ) => {
+    const pairEntries: { start: number; end: number }[] = [];
+    let unendedStartIndices: number[] = [];
+
+    workflow.forEach((line, index) => {
+      if (heurBegin(line)) {
+        unendedStartIndices.push(index);
+        return;
+      } else if (heurEnd(line)) {
+        const start = unendedStartIndices.pop();
+        if (!start) return;
+        pairEntries.push({ start: start, end: index });
+      }
+    });
+
+    return pairEntries;
+  };
+
+  return { extractPairs };
+};
+
 /**
  * Index WFWorkflow for compensation codes for faster queries with
  * better-defined APIs. This is useful for queries done inside WFMachine.
  */
 export namespace CCompensationIndexer {
-  const constructWithList = <CType extends CTypeProto>(
-    workflow: WFWorkflow<CType>["code"]
-  ) => {
-    const compensateWithBlock: { start: number; end: number }[] = [];
-
-    let compensationWithStartIndexes: number[] = [];
-    workflow.forEach((line, index) => {
-      if (line.t === "compensate-with") {
-        compensationWithStartIndexes.push(index);
-        return;
-      } else if (line.t === "anti-compensate") {
-        const start = compensationWithStartIndexes.pop();
-        if (!start) return;
-        compensateWithBlock.push({ start: start, end: index });
-      }
-    });
-
-    return compensateWithBlock;
-  };
-
   export const make = <CType extends CTypeProto>(
     workflow: WFWorkflow<CType>["code"]
   ) => {
-    const withList = constructWithList(workflow);
+    const mainList = extractor(workflow).extractPairs(
+      (line) => line.t === "compensate",
+      (line) => line.t === "compensate-end"
+    );
+    const withList = extractor(workflow).extractPairs(
+      (line) => line.t === "compensate-with",
+      (line) => line.t === "anti-compensate"
+    );
 
     return {
+      mainList,
       withList,
+      getMainListMatching: (x: number) =>
+        mainList.filter((entry) => x > entry.start && x < entry.end),
       isInsideWithBlock: (x: number) =>
         withList.findIndex((entry) => x > entry.start && x < entry.end) !== -1,
+    };
+  };
+}
+
+export namespace CTimeoutIndexer {
+  export const make = <CType extends CTypeProto>(
+    workflow: WFWorkflow<CType>["code"]
+  ) => {
+    const list = extractor(workflow).extractPairs(
+      (line) => line.t === "timeout",
+      (line) => line.t === "anti-timeout"
+    );
+
+    return {
+      getListMatching: (x: number) =>
+        list.filter((entry) => x > entry.start && x < entry.end),
     };
   };
 }
