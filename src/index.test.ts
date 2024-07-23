@@ -503,10 +503,10 @@ describe("partitions-multi-level compensations", () => {
 });
 
 describe("timeout", () => {
-  it("combines with retry", async () => {
+  it("failure consequence loops to retry", async () => {
     const scenario = genScenario();
     const { findAndRunCommand } = scenario;
-    const { dst, manager, src, t1 } = scenario.agents;
+    const { dst, manager, src, t1, t2, t3 } = scenario.agents;
 
     await findAndRunCommand(manager, Ev.request, {
       from: src.identity.id,
@@ -518,6 +518,16 @@ describe("timeout", () => {
     await findAndRunCommand(manager, Ev.notAccepted, {});
 
     expect(manager.machine.state().state?.[1].payload.t).toBe(Ev.notAccepted);
+
+    [t1, t2, t3].forEach((m) => {
+      const bidCommand = m.machine
+        .commands()
+        .find((x) => x.info.name === Ev.bid);
+      expect(bidCommand).toBeTruthy();
+    });
+    await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t1, Ev.assign, { robotID: t1.identity.id });
+    await findAndRunCommand(t1, Ev.accept);
   });
 
   it("invocation clears the compensations and timeouts", async () => {
