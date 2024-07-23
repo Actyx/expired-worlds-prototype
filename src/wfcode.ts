@@ -14,7 +14,8 @@ export type CItem<CType extends CTypeProto> =
   | CAnti
   | CEvent<CType>
   | CRetry
-  | CTimeout<CType>
+  | CTimeout
+  | CTimeoutGap
   | CParallel
   | CCompensate
   | CCompensateEnd
@@ -107,12 +108,14 @@ export type CParallel = {
   firstEventIndex: number;
 };
 export type CRetry = { t: "retry"; pairOffsetIndex: number };
-export type CTimeout<CType extends CTypeProto> = {
+export type CTimeout = {
   t: "timeout";
   duration: number;
-  consequence: CEvent<CType>;
-  pairOffsetIndex: number;
+  antiOffsetIndex: number;
+  gapOffsetIndex: number;
 };
+
+export type CTimeoutGap = { t: "timeout-gap"; antiOffsetIndex: number };
 
 export type CAntiRetry = { t: "anti-retry"; pairOffsetIndex: number };
 export type CAntiTimeout = { t: "anti-timeout"; pairOffsetIndex: number };
@@ -294,16 +297,25 @@ export namespace Code {
     duration: number,
     workflow: CItem<CType>[],
     consequence: CEvent<CType>
-  ): CItem<CType>[] => [
-    {
-      t: "timeout",
-      duration,
+  ): CItem<CType>[] => {
+    if (consequence.control === undefined) {
+      throw new Error(`timeout consequence must be fail or return`);
+    }
+    const gapOffsetIndex = workflow.length + 1;
+    const antiOffsetIndex = gapOffsetIndex + 2;
+    return [
+      {
+        t: "timeout",
+        duration,
+        gapOffsetIndex,
+        antiOffsetIndex,
+      },
+      ...workflow,
+      { t: "timeout-gap", antiOffsetIndex: 2 },
       consequence,
-      pairOffsetIndex: workflow.length + 1,
-    },
-    ...workflow,
-    { t: "anti-timeout", pairOffsetIndex: (workflow.length + 1) * -1 },
-  ];
+      { t: "anti-timeout", pairOffsetIndex: -antiOffsetIndex },
+    ];
+  };
 }
 
 /**

@@ -59,8 +59,7 @@ type StackItem<CType extends CTypeProto> =
   | SMatch<CType>
   | SEvent<CType>
   | SRetry<CType>
-  | STimeout<CType>
-  | SAntiTimeout<CType>
+  | STimeout
   | SParallel<CType>
   | SAntiParallel;
 
@@ -87,12 +86,8 @@ type SParallelExecution<CType extends CTypeProto> = {
   entry: ActyxWFBusiness<CType>[];
 };
 
-type STimeout<CType extends CTypeProto> = Pick<CTimeout<CType>, "t"> & {
+type STimeout = Pick<CTimeout, "t"> & {
   startedAt: Date;
-};
-type SAntiTimeout<CType extends CTypeProto> = Pick<CAntiTimeout, "t"> & {
-  consequence: CTimeout<CType>["consequence"];
-  event: ActyxWFBusiness<CType>;
 };
 type SAntiParallel = Pick<CAntiParallel, "t"> & {};
 
@@ -153,7 +148,8 @@ export type WFMachine<CType extends CTypeProto> = {
   latestStateEvent: () => ActyxWFBusiness<CType> | null;
   returned: () => boolean;
   availableTimeouts: () => {
-    ctimeout: CTimeout<CType>;
+    ctimeout: CTimeout;
+    cconsequence: CEvent<CType>;
     lateness: number;
   }[];
   availableCompensateable: () => {
@@ -212,11 +208,6 @@ export const WFMachine = <CType extends CTypeProto>(
     evalIndex: 0,
     stack: [] as (StackItem<CType> | null)[],
   };
-
-  /**
-   * Sets of indices of compensation and timeout that are active.
-   */
-  const active = {};
 
   // state-related data
   const innerstate = {
@@ -291,11 +282,30 @@ export const WFMachine = <CType extends CTypeProto>(
           );
         }
 
-        const antiIndex = index + ctimeout.pairOffsetIndex;
+        const gapIndex = index + ctimeout.gapOffsetIndex;
+        const antiIndex = index + ctimeout.antiOffsetIndex;
+        const cconsquenceIndex = gapIndex + 1;
+
+        const cconsequence = workflow.at(cconsquenceIndex);
+
+        if (cconsequence?.t !== "event") {
+          throw new Error(
+            `timeout query fatal error: cevent consequence not found at index ${cconsquenceIndex} while inspecting ${data.evalIndex}.`
+          );
+        }
+
         const dueDate = stimeout.startedAt.getTime() + ctimeout.duration;
         const lateness = Date.now() - dueDate;
 
-        return { timeoutIndex: index, stimeout, ctimeout, lateness, antiIndex };
+        return {
+          timeoutIndex: index,
+          stimeout,
+          ctimeout,
+          cconsquenceIndex,
+          cconsequence,
+          lateness,
+          antiIndex,
+        };
       })
       .sort((a, b) => {
         // in case of nested timeouts: sorted by last / outermost timeout
@@ -441,7 +451,7 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     availableTimeouts(data.evalIndex).forEach((timeout) => {
-      const { name, control, actor } = timeout.ctimeout.consequence;
+      const { name, control, actor } = timeout.cconsequence;
       result.push(
         mapUniqueActorOnNext({
           name,
@@ -561,29 +571,6 @@ export const WFMachine = <CType extends CTypeProto>(
         }
       }
 
-      if (code?.t === "anti-timeout" && stackItem?.t === "anti-timeout") {
-        const consequence = stackItem.consequence;
-
-        if (consequence.control === Code.Control.fail) {
-          const retry = findRetryOnStack(calcIndex);
-          if (retry === null) {
-            throw new Error(
-              "cannot find retry while dealing with anti-timeout fail"
-            );
-          }
-          data.stack[retry.index] = {
-            t: "retry",
-            lastState: innerstate.state,
-          };
-          resetIndex(evalContext, retry.index + 1);
-          return true;
-        } else if (consequence.control === "return") {
-          innerstate.state = [One, stackItem.event];
-          innerstate.stateIndex = calcIndex;
-          innerstate.returned = true;
-        }
-      }
-
       if (code?.t === "par" && stackItem?.t === "par") {
         innerstate.state = (() => {
           const instances = stackItem.instances.map(
@@ -646,6 +633,18 @@ export const WFMachine = <CType extends CTypeProto>(
     if (code.t === "par") {
       readInnerParallelProcessInstances(evalContext, code);
       data.extraParCalcIndex = evalContext.index;
+
+      // recursive autoEvaluate on "par" next
+      const { atStack, minCompletedReached } = generateParallelCriteria(
+        evalContext,
+        code
+      );
+      if (minCompletedReached) {
+        const nextEvalContext = { index: atStack.nextEvalIndex };
+        autoEvaluate(nextEvalContext);
+        atStack.nextEvalIndex = nextEvalContext.index;
+      }
+
       return false;
     }
 
@@ -682,9 +681,13 @@ export const WFMachine = <CType extends CTypeProto>(
       return true;
     }
 
-    if (code.t === "anti-timeout") {
-      evalContext.index += 1;
+    if (code.t === "timeout-gap") {
+      evalContext.index += code.antiOffsetIndex + 1;
       return true;
+    }
+
+    if (code.t === "anti-timeout") {
+      return false;
     }
 
     if (code.t === "compensate") {
@@ -814,17 +817,15 @@ export const WFMachine = <CType extends CTypeProto>(
   ): TickRes => {
     // TODO: there should not be multiple matches, shouldn't timeout be unique?
     const lastMatching = availableTimeouts(evalContext.index)
-      .filter((x) => x.ctimeout.consequence.name === e.payload.t)
+      .filter((x) => x.cconsequence.name === e.payload.t)
       .at(0);
 
     if (lastMatching) {
-      data.stack[lastMatching.antiIndex] = {
-        t: "anti-timeout",
-        consequence: lastMatching.ctimeout.consequence,
-        event: e,
-      };
-
-      return { fed: true, jumpToIndex: lastMatching.antiIndex + 1 };
+      const { cconsquenceIndex, cconsequence } = lastMatching;
+      const fed = feedEvent({ index: cconsquenceIndex }, cconsequence, e);
+      if (fed) {
+        return { fed: true, jumpToIndex: cconsquenceIndex + 1 };
+      }
     }
     return { fed: false, jumpToIndex: null };
   };
@@ -952,9 +953,6 @@ export const WFMachine = <CType extends CTypeProto>(
     if (minCompletedReached) {
       // Can advance, how to advance? It depends if `min` is 0 or not.
       const nextEvalContext = { index: atStack.nextEvalIndex };
-      // move nextEvalIndex as far as it can
-      autoEvaluate(nextEvalContext);
-
       fed = tickAt(nextEvalContext, input);
       atStack.nextEvalIndex = nextEvalContext.index;
 
@@ -1035,6 +1033,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const tickAt = (evalContext: EvalContext, e: TickInput | null): boolean => {
     let fed = false;
     const code = workflow.at(evalContext.index);
+
     if (e) {
       if (code) {
         const res = (() => {
@@ -1214,11 +1213,6 @@ export const WFMachine = <CType extends CTypeProto>(
     availableTimeouts,
     availableNexts,
     availableCompensateable: () => {
-      logger.log(
-        "availableCompensateable",
-        data.evalIndex,
-        JSON.stringify(workflow.at(data.evalIndex))
-      );
       const res = selfAvailableCompensateable().map((x) => ({
         codeIndex: x.codeIndex,
         fromTimelineOf: x.fromTimelineOf,
@@ -1237,8 +1231,6 @@ export const WFMachine = <CType extends CTypeProto>(
         );
         return res;
       });
-
-      logger.log("availableCompensateable.len", res.length);
 
       return res;
     },

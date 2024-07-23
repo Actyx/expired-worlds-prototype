@@ -413,12 +413,6 @@ describe("partitions-multi-level compensations", () => {
     expectAllToHaveSameState([t1, manager, dst]);
     expectAllToHaveSameState([t2, src]);
 
-    network.logger.sub(log);
-    src.node.logger.sub(log);
-    t2.node.logger.sub(log);
-    src.machine.logger.sub(log);
-    t2.machine.logger.sub(log);
-
     await network.partitions.clear();
 
     expect(t2.machine.mcomb().t).toBe("compensating");
@@ -508,8 +502,25 @@ describe("partitions-multi-level compensations", () => {
   });
 });
 
-describe("timeout invocation from inside the compensation", () => {
-  it("clears the compensations and timeouts", async () => {
+describe("timeout", () => {
+  it("combines with retry", async () => {
+    const scenario = genScenario();
+    const { findAndRunCommand } = scenario;
+    const { dst, manager, src, t1 } = scenario.agents;
+
+    await findAndRunCommand(manager, Ev.request, {
+      from: src.identity.id,
+      to: dst.identity.id,
+      manager: manager.identity.id,
+    });
+    await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t1, Ev.assign, { robotID: t1.identity.id });
+    await findAndRunCommand(manager, Ev.notAccepted, {});
+
+    expect(manager.machine.state().state?.[1].payload.t).toBe(Ev.notAccepted);
+  });
+
+  it("invocation clears the compensations and timeouts", async () => {
     const scenario = genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
