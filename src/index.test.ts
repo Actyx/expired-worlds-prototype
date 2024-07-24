@@ -14,6 +14,7 @@ import {
   SetupSystemParams,
 } from "./test-utils/scenario-builder.js";
 import { awhile, log } from "./test-utils/misc.js";
+import { createLinearChain } from "./event-utils.js";
 
 const Ev = Enum([
   "request",
@@ -227,10 +228,12 @@ const genScenario = (
 };
 
 describe("no-partitions", () => {
-  it("works", async () => {
+  it("works and build history correctly", async () => {
     const scenario = genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+
+    t1.machine.logger.sub(log);
 
     await findAndRunCommand(manager, Ev.request, {
       from: src.identity.id,
@@ -310,6 +313,11 @@ describe("no-partitions", () => {
     await findAndRunCommand(src, Ev.doLeave);
     await findAndRunCommand(t1, Ev.success);
 
+    // make sure match state is detected from parent state
+    expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(
+      Ev.success
+    );
+
     // load
     await findAndRunCommand(t1, Ev.loaded);
 
@@ -329,18 +337,53 @@ describe("no-partitions", () => {
     await findAndRunCommand(manager, Ev.done);
 
     expectAllToHaveSameState([manager, src, t1, t2, t3]);
+
+    const lastEvent = t1.machine.state().state?.[1];
+    if (!lastEvent) throw new Error("machine don't have last event");
+
+    const historyChain = createLinearChain(
+      t1.machine.multiverseTree(),
+      lastEvent
+    );
+    expect(historyChain.map((x) => x.payload.t)).toEqual([
+      Ev.request,
+      // Ev.bid, // parallel is not included in the history chain
+      Ev.assign,
+      Ev.accept,
+      Ev.atSrc,
+      Ev.reqEnter,
+      Ev.doEnter,
+      Ev.inside,
+      Ev.reqLeave,
+      Ev.doLeave,
+      Ev.success,
+      Ev.loaded,
+      Ev.atDst,
+      Ev.reqEnter,
+      Ev.doEnter,
+      Ev.inside,
+      Ev.reqLeave,
+      Ev.doLeave,
+      Ev.success,
+      Ev.unloaded,
+      Ev.done,
+    ]);
+    // validate history in multiverse
   });
 });
 
-describe("partitions-multi-level compensations", () => {
+describe("partitions and compensations", () => {
   /**
    * Partitions src and t2 alone
    */
-  const scenarioContestingBidOnPartition = async ({
-    findAndRunCommand,
-    network,
-    agents: { dst, manager, src, t1, t2, t3 },
-  }: Scenario) => {
+  const scenarioContestingBidOnPartition = async (
+    {
+      findAndRunCommand,
+      network,
+      agents: { dst, manager, src, t1, t2, t3 },
+    }: Scenario,
+    whoToPartitions: Scenario["agents"][keyof Scenario["agents"]][]
+  ) => {
     await findAndRunCommand(manager, Ev.request, {
       from: src.identity.id,
       to: dst.identity.id,
@@ -348,7 +391,7 @@ describe("partitions-multi-level compensations", () => {
     });
 
     // partitions
-    network.partitions.make([t2.node, src.node]);
+    network.partitions.make(whoToPartitions.map((x) => x.node));
 
     // both t1 and t2 assign and accepts
     // both will have the same lamport timestamp because of the partition,
@@ -370,7 +413,7 @@ describe("partitions-multi-level compensations", () => {
       agents: { dst, manager, src, t1, t2, t3 },
     } = scenario;
 
-    await scenarioContestingBidOnPartition(scenario);
+    await scenarioContestingBidOnPartition(scenario, [t2, src]);
 
     // expect each of t1 and t2 to have their own "reality"
     expect(t1.machine.wfmachine().state().state?.[1].payload.t).toBe(Ev.accept);
@@ -397,7 +440,7 @@ describe("partitions-multi-level compensations", () => {
 
     // isolate t2 and src together
     // t2 and src believes that they should be working together
-    await scenarioContestingBidOnPartition(scenario);
+    await scenarioContestingBidOnPartition(scenario, [t2, src]);
 
     await findAndRunCommand(t2, Ev.atSrc);
     await findAndRunCommand(t2, Ev.reqEnter);
@@ -436,6 +479,66 @@ describe("partitions-multi-level compensations", () => {
     expect(t3.machine.mcomb().t).toBe("normal");
 
     expectAllToHaveSameState([t1, t2, src, manager, dst, t3]);
+  });
+
+  it("does nested compensation from the inside first", async () => {
+    const scenario = genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { dst, manager, src, t1, t2, t3 },
+    } = scenario;
+
+    // isolate t2 and src together
+    // t2, src, and dst believes that they should be working together
+    await scenarioContestingBidOnPartition(scenario, [t2, src, dst]);
+
+    await findAndRunCommand(t2, Ev.atSrc);
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+
+    expectAllToHaveSameState([t1, t3, manager]);
+    expectAllToHaveSameState([t2, src, dst]);
+
+    await findAndRunCommand(t2, Ev.inside);
+    await findAndRunCommand(t2, Ev.reqLeave);
+    await findAndRunCommand(src, Ev.doLeave);
+    await findAndRunCommand(t2, Ev.success);
+
+    // load
+    await findAndRunCommand(t2, Ev.loaded);
+
+    // docking t2 -> dst and loading
+    await findAndRunCommand(t2, Ev.atDst);
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(dst, Ev.doEnter);
+
+    expectAllToHaveSameState([t1, t3, manager]);
+    expectAllToHaveSameState([t2, src, dst]);
+
+    t2.machine.logger.sub(log);
+
+    await network.partitions.clear();
+
+    expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(dst.machine.mcomb().t).toBe("compensating");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    await findAndRunCommand(t2, Ev.withdrawn);
+
+    [manager, src, dst, t1, t2, t3].forEach((x) =>
+      log(x.identity.id, JSON.stringify(x.machine.mcomb().t))
+    );
+
+    log("t2", JSON.stringify(t2.machine.commands(), null, 2));
+    log("src", JSON.stringify(src.machine.commands(), null, 2));
+    log("dst", JSON.stringify(dst.machine.commands(), null, 2));
+
+    // first layer compensation
   });
 
   // prettier-ignore

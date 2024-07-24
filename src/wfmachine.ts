@@ -148,14 +148,14 @@ export type WFMachine<CType extends CTypeProto> = {
   latestStateEvent: () => ActyxWFBusiness<CType> | null;
   returned: () => boolean;
   availableTimeouts: () => {
+    codeIndex: NestedCodeIndexAddress.Type;
     ctimeout: CTimeout;
     cconsequence: CEvent<CType>;
     lateness: number;
   }[];
   availableCompensateable: () => {
     codeIndex: NestedCodeIndexAddress.Type;
-    actor: Actor<CType>;
-    name: CType["ev"];
+    firstCompensation: CEvent<CType>;
     fromTimelineOf: string;
   }[];
   availableNexts: () => Next<CType>[];
@@ -231,13 +231,6 @@ export const WFMachine = <CType extends CTypeProto>(
     innerstate.stateIndex = -1;
   };
 
-  const findMatchingRetryIndex = (retry: CAntiRetry, indexInput: number) => {
-    const pairIndex = retry.pairOffsetIndex + indexInput;
-    const code = workflow.at(pairIndex);
-    if (code?.t === "retry") return pairIndex;
-    return null;
-  };
-
   const findRetryOnStack = (indexInput: number) => {
     const closest = cretryIndexer
       .getListMatching(indexInput)
@@ -264,7 +257,7 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Find all active timeouts
    */
-  const availableTimeouts = (evalIndex: number = data.evalIndex) =>
+  const selfAvailableTimeouts = (evalIndex: number = data.evalIndex) =>
     ctimeoutIndexer
       .getListMatching(evalIndex)
       .map((entry) => entry.start)
@@ -298,7 +291,7 @@ export const WFMachine = <CType extends CTypeProto>(
         const lateness = Date.now() - dueDate;
 
         return {
-          timeoutIndex: index,
+          codeIndex: wfMachineCodeIndexPrefix.concat([index]),
           stimeout,
           ctimeout,
           cconsquenceIndex,
@@ -335,10 +328,7 @@ export const WFMachine = <CType extends CTypeProto>(
           );
         }
 
-        const compensationIndex = index;
         const triggeringEvent = sCompensate.lastEvent;
-        const withIndex = index + ccompensate.withIndexOffset;
-        const antiIndex = index + ccompensate.antiIndexOffset;
         const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
 
@@ -350,20 +340,12 @@ export const WFMachine = <CType extends CTypeProto>(
 
         return {
           codeIndex: wfMachineCodeIndexPrefix.concat([index]),
-          compensationIndex,
-          code: ccompensate,
           firstCompensation,
           firstCompensationIndex,
-          antiTimeoutIndex: antiIndex,
-          withIndex,
           fromTimelineOf: triggeringEvent.meta.eventId,
         };
       })
-      .filter((x): x is Exclude<typeof x, null> => x !== null)
-      .sort((a, b) => {
-        // in case of nested compensations: sort by last/innermost timeout
-        return b.compensationIndex - a.compensationIndex;
-      });
+      .filter((x): x is Exclude<typeof x, null> => x !== null);
 
     return res;
   };
@@ -450,7 +432,7 @@ export const WFMachine = <CType extends CTypeProto>(
       extractValidNext(data.evalIndex, result, code);
     }
 
-    availableTimeouts(data.evalIndex).forEach((timeout) => {
+    selfAvailableTimeouts(data.evalIndex).forEach((timeout) => {
       const { name, control, actor } = timeout.cconsequence;
       result.push(
         mapUniqueActorOnNext({
@@ -594,6 +576,14 @@ export const WFMachine = <CType extends CTypeProto>(
         innerstate.stateIndex = calcIndex;
       }
 
+      if (code?.t === "match") {
+        const inner = getSMatchAtIndex(calcIndex)?.inner;
+        if (inner && inner.returned()) {
+          innerstate.state = inner.state().state;
+          innerstate.stateIndex = calcIndex;
+        }
+      }
+
       return false;
     };
 
@@ -658,14 +648,12 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "anti-retry") {
-      const matchingRetryIndex = findMatchingRetryIndex(
-        code,
-        evalContext.index
-      );
-      if (typeof matchingRetryIndex !== "number") {
+      const pairIndex = code.pairOffsetIndex + evalContext.index;
+      if (workflow.at(pairIndex)?.t !== "retry") {
         throw new Error("retry not found");
       }
-      data.stack[matchingRetryIndex] = null;
+
+      data.stack[pairIndex] = null;
       evalContext.index += 1;
       return true;
     }
@@ -816,7 +804,7 @@ export const WFMachine = <CType extends CTypeProto>(
     e: ActyxWFBusiness<CType>
   ): TickRes => {
     // TODO: there should not be multiple matches, shouldn't timeout be unique?
-    const lastMatching = availableTimeouts(evalContext.index)
+    const lastMatching = selfAvailableTimeouts(evalContext.index)
       .filter((x) => x.cconsequence.name === e.payload.t)
       .at(0);
 
@@ -1085,6 +1073,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const state = (): WFMachineState<CType> => {
     const evalContext = { index: data.evalIndex };
     const atStack = getSMatchAtIndex(evalContext.index);
+
     if (atStack) {
       const state = atStack.inner.state();
       if (state.state) {
@@ -1172,6 +1161,7 @@ export const WFMachine = <CType extends CTypeProto>(
       if (!point) return null;
 
       const chain = createLinearChain(multiverse, point);
+
       const latestEvent = getLatestStateEvent();
       if (!latestEvent) {
         return chain;
@@ -1210,26 +1200,46 @@ export const WFMachine = <CType extends CTypeProto>(
     state,
     latestStateEvent: getLatestStateEvent,
     returned,
-    availableTimeouts,
-    availableNexts,
-    availableCompensateable: () => {
-      const res = selfAvailableCompensateable().map((x) => ({
-        codeIndex: x.codeIndex,
-        fromTimelineOf: x.fromTimelineOf,
-        name: x.firstCompensation.name,
-        actor: x.firstCompensation.actor,
-      }));
+    availableTimeouts: () => {
+      const res = selfAvailableTimeouts().map(
+        ({ ctimeout, cconsequence, lateness, codeIndex }) => ({
+          codeIndex,
+          ctimeout,
+          cconsequence,
+          lateness,
+        })
+      );
 
       const match = getSMatchAtIndex(data.evalIndex);
       if (match) {
-        res.push(...match.inner.availableCompensateable());
+        const inner = match.inner.availableTimeouts();
+        res.push(...inner);
       }
 
       res.sort((a, b) => {
-        const res = Ord.toNum(
-          NestedCodeIndexAddress.cmp(b.codeIndex, a.codeIndex)
-        );
-        return res;
+        return Ord.toNum(NestedCodeIndexAddress.cmp(b.codeIndex, a.codeIndex));
+      });
+
+      return res;
+    },
+    availableNexts,
+    availableCompensateable: () => {
+      const res = selfAvailableCompensateable().map(
+        ({ codeIndex, firstCompensation, fromTimelineOf }) => ({
+          codeIndex,
+          firstCompensation,
+          fromTimelineOf,
+        })
+      );
+
+      const match = getSMatchAtIndex(data.evalIndex);
+      if (match) {
+        const inner = match.inner.availableCompensateable();
+        res.push(...inner);
+      }
+
+      res.sort((a, b) => {
+        return Ord.toNum(NestedCodeIndexAddress.cmp(b.codeIndex, a.codeIndex));
       });
 
       return res;

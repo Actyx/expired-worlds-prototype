@@ -138,6 +138,7 @@ export const run = <CType extends CTypeProto>(
   return {
     commands,
     mcomb: () => machineCombinator.internal(),
+    multiverseTree: () => machineCombinator.multiverseTree,
     wfmachine: () => machineCombinator.wfmachine(),
     state: () => machineCombinator.wfmachine().state(),
     logger: machineCombinator.logger,
@@ -332,6 +333,7 @@ export namespace MachineCombinator {
 
     return {
       logger,
+      multiverseTree,
       recalc,
       internal: () => data,
       wfmachine: () => data.wfMachine,
@@ -368,12 +370,13 @@ export namespace MachineCombinator {
               canonLastEvent,
               logger
             )?.compensations;
+
           if (compensations) {
             // register compensations to both compensation map and the persistence
             // layer: ax
             compensations.forEach(
               ({ fromTimelineOf, toTimelineOf, codeIndex }) => {
-                const directive: WFMarker = {
+                const directive: WFMarkerCompensationNeeded = {
                   ax: InternalTag.CompensationNeeded.write(""),
                   actor: params.self.id,
                   fromTimelineOf,
@@ -536,6 +539,7 @@ const calculateCompensations = <CType extends CTypeProto>(
   // Comps before divergence should not be accounted for
   const compsBeforeDivergence = simulation.availableCompensateable();
 
+  // "divergence.all");
   simulation.resetAndAdvanceToEventId(fromPoint.meta.eventId);
   // advancing most canon might resolve some compensations.
   // `advanceToMostCanon` is the key function call that will eventually trigger CompensationDone
