@@ -203,7 +203,6 @@ export const WFMachine = <CType extends CTypeProto>(
 
   // pointers and stack
   const data = {
-    extraParCalcIndex: 0 as number | null, // does not support nested parallel
     stateCalcIndex: 0,
     evalIndex: 0,
     stack: [] as (StackItem<CType> | null)[],
@@ -213,7 +212,6 @@ export const WFMachine = <CType extends CTypeProto>(
   const innerstate = {
     context: { ...contextArg } as Record<string, unknown>,
     state: null as State<CType> | null,
-    stateIndex: -1 as number,
     returned: false,
   };
 
@@ -225,10 +223,8 @@ export const WFMachine = <CType extends CTypeProto>(
 
     // force recalculate context
     data.stateCalcIndex = 0;
-    data.extraParCalcIndex = null; // does not support nested parallel
     innerstate.context = { ...contextArg };
     innerstate.state = null;
-    innerstate.stateIndex = -1;
   };
 
   const findRetryOnStack = (indexInput: number) => {
@@ -533,7 +529,6 @@ export const WFMachine = <CType extends CTypeProto>(
           innerstate.context[x.var] = stackItem.event.payload.payload[index];
         });
         innerstate.state = [One, stackItem.event];
-        innerstate.stateIndex = calcIndex;
 
         if (code.control === Code.Control.return) {
           innerstate.returned = true;
@@ -564,7 +559,6 @@ export const WFMachine = <CType extends CTypeProto>(
             return [Parallel, stackItem.lastEvent, instances];
           }
         })();
-        innerstate.stateIndex = calcIndex;
       }
 
       if (
@@ -573,38 +567,30 @@ export const WFMachine = <CType extends CTypeProto>(
         stackItem.lastState !== null
       ) {
         innerstate.state = stackItem.lastState;
-        innerstate.stateIndex = calcIndex;
       }
 
       if (code?.t === "match") {
         const inner = getSMatchAtIndex(calcIndex)?.inner;
         if (inner && inner.returned()) {
           innerstate.state = inner.state().state;
-          innerstate.stateIndex = calcIndex;
         }
       }
 
       return false;
     };
 
-    // `stateCalcIndex` needs to be rolled back to the last `stateIndex` to make
-    // sure that no updates are missed. (this has been an issue with events
-    // inside `compensate-with` blocks)
-    data.stateCalcIndex = Math.min(data.stateCalcIndex, innerstate.stateIndex);
-
     while (data.stateCalcIndex < evalContext.index) {
-      if (calc(data.stateCalcIndex)) {
-        continue;
+      if (data.stateCalcIndex >= 0) {
+        if (calc(data.stateCalcIndex)) {
+          continue;
+        }
       }
       data.stateCalcIndex += 1;
     }
 
     // special case for parallel
-    if (
-      data.extraParCalcIndex !== null &&
-      data.extraParCalcIndex === evalContext.index
-    ) {
-      calc(data.extraParCalcIndex);
+    if (data.stack.at(evalContext.index)?.t === "par") {
+      calc(evalContext.index);
     }
   };
 
@@ -622,7 +608,6 @@ export const WFMachine = <CType extends CTypeProto>(
 
     if (code.t === "par") {
       readInnerParallelProcessInstances(evalContext, code);
-      data.extraParCalcIndex = evalContext.index;
 
       // recursive autoEvaluate on "par" next
       const { atStack, minCompletedReached } = generateParallelCriteria(
@@ -1105,12 +1090,10 @@ export const WFMachine = <CType extends CTypeProto>(
     data.evalIndex = 0;
     // calc index
     data.stateCalcIndex = 0;
-    data.extraParCalcIndex = null;
     data.stack.length = 0;
 
     innerstate.context = { ...contextArg };
     innerstate.state = null;
-    innerstate.stateIndex = -1;
     innerstate.returned = false;
   };
 

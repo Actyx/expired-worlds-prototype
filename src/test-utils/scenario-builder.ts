@@ -5,6 +5,7 @@ import { Network, Node } from "../ax-mock/index.js";
 import { awhile, log } from "./misc.js";
 import { Machine, run } from "../index.js";
 import { expect } from "@jest/globals";
+import { createLinearChain } from "../event-utils.js";
 
 /**
  * Scenario Setup Parameters
@@ -105,4 +106,11 @@ export const expectAllToHaveSameState = <CType extends CTypeProto>(
     const restState = rest.machine.wfmachine().state();
     expect(firstState).toEqual(restState);
   });
+};
+
+export const historyOf = <CType extends CTypeProto>(agent: Agent<CType>) => {
+  const multiverse = agent.machine.multiverseTree();
+  const lastState = agent.machine.wfmachine().state().state?.[1];
+  if (!lastState) return [];
+  return createLinearChain(multiverse, lastState);
 };

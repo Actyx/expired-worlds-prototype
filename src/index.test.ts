@@ -10,11 +10,11 @@ import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
 import { One, Parallel } from "./wfmachine.js";
 import {
   expectAllToHaveSameState,
+  historyOf,
   setup,
   SetupSystemParams,
 } from "./test-utils/scenario-builder.js";
 import { awhile, log } from "./test-utils/misc.js";
-import { createLinearChain } from "./event-utils.js";
 
 const Ev = Enum([
   "request",
@@ -338,14 +338,7 @@ describe("no-partitions", () => {
 
     expectAllToHaveSameState([manager, src, t1, t2, t3]);
 
-    const lastEvent = t1.machine.state().state?.[1];
-    if (!lastEvent) throw new Error("machine don't have last event");
-
-    const historyChain = createLinearChain(
-      t1.machine.multiverseTree(),
-      lastEvent
-    );
-    expect(historyChain.map((x) => x.payload.t)).toEqual([
+    expect(historyOf(t1).map((x) => x.payload.t)).toEqual([
       Ev.request,
       // Ev.bid, // parallel is not included in the history chain
       Ev.assign,
@@ -530,14 +523,6 @@ describe("partitions and compensations", () => {
 
     await findAndRunCommand(t2, Ev.withdrawn);
 
-    [manager, src, dst, t1, t2, t3].forEach((x) =>
-      log(x.identity.id, JSON.stringify(x.machine.mcomb().t))
-    );
-
-    log("t2", JSON.stringify(t2.machine.commands(), null, 2));
-    log("src", JSON.stringify(src.machine.commands(), null, 2));
-    log("dst", JSON.stringify(dst.machine.commands(), null, 2));
-
     // first layer compensation
   });
 
@@ -631,6 +616,15 @@ describe("timeout", () => {
     await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
     await findAndRunCommand(t1, Ev.assign, { robotID: t1.identity.id });
     await findAndRunCommand(t1, Ev.accept);
+
+    // the history also loops
+    expect(historyOf(t1).map((x) => x.payload.t)).toEqual([
+      Ev.request,
+      Ev.assign,
+      Ev.notAccepted,
+      Ev.assign,
+      Ev.accept,
+    ]);
   });
 
   it("invocation clears the compensations and timeouts", async () => {
@@ -743,5 +737,16 @@ describe("retry-fail inside compensation", () => {
         .find((x) => x.info.name === "bid");
       expect(bidCommands).toBeTruthy();
     });
+
+    // history test
+    expect(historyOf(t1).map((x) => x.payload.t)).toEqual([
+      Ev.request,
+      Ev.assign,
+      Ev.accept,
+      Ev.atSrc,
+      Ev.reqEnter,
+      Ev.deny,
+      Ev.notPickedUp,
+    ]);
   });
 });
