@@ -11,6 +11,23 @@
  * - append events to the tree.
  * - call its methods e.g. `advanceToMostCanon`, `resetAndAdvanceToEventId`, and
  *   `reset`.
+ *
+ * WFMachine operates in two different level:
+ * - advance* - which tells the WFMachine to advance through the point in
+ *   multiverse
+ * - tick() - which tells the WFMachine to move once
+ *
+ * Within a tick, WFMachine goes through two steps:
+ * - tick* - which, on the existence of an input, pattern-match the input to the
+ *   code pointed by evalIndex, and suggest a jump to the evalIndex.
+ * - autoEvaluate - which calculates the state and moves the evalIndex
+ *   automatically when possible, in an interlaced manner. It is IMPORTANT that
+ *   `tick*` does not cause any side effect the pointers and only "suggest"
+ *   jumps to the evalIndex and keep the responsibility of evalIndex movements
+ *   to autoEvaluate.
+ *   - State calculation has a separate pointer from autoEvaluate called
+ *     stateCalcIndex. stateCalcIndex will always follow evalIndex but not
+ *     match. Its value will always be lower than evalIndex.
  */
 
 import {
@@ -25,8 +42,6 @@ import { Logger, makeLogger, Ord } from "./utils.js";
 import {
   Actor,
   CAntiParallel,
-  CAntiRetry,
-  CAntiTimeout,
   CChoice,
   CCompensate,
   CCompensationIndexer,
@@ -43,7 +58,7 @@ import {
   Exact,
   Unique,
   WFWorkflow,
-  validateBindings,
+  validate,
 } from "./wfcode.js";
 
 /**
@@ -182,7 +197,7 @@ export const WFMachine = <CType extends CTypeProto>(
   type TickInput = ActyxWFBusiness<CType>;
   type TickRes = { jumpToIndex: number | null; fed: boolean };
 
-  validateBindings(wfWorkflow);
+  validate(wfWorkflow);
 
   const logger = makeLogger();
   const workflow = wfWorkflow.code;
@@ -303,7 +318,6 @@ export const WFMachine = <CType extends CTypeProto>(
 
   /**
    * Find all active compensateable
-   * TODO: return next-events of compensate-with as compensations
    */
   const selfAvailableCompensateable = (evalIndex = data.evalIndex) => {
     const res = ccompensateIndexer
@@ -535,9 +549,7 @@ export const WFMachine = <CType extends CTypeProto>(
         } else if (code.control === Code.Control.fail) {
           const retry = findRetryOnStack(calcIndex);
           if (retry === null) {
-            throw new Error(
-              "cannot find retry while dealing with anti-timeout fail"
-            );
+            throw new Error("cannot find retry while dealing with fail event");
           }
           data.stack[retry.index] = {
             t: "retry",
@@ -788,10 +800,9 @@ export const WFMachine = <CType extends CTypeProto>(
     evalContext: EvalContext,
     e: ActyxWFBusiness<CType>
   ): TickRes => {
-    // TODO: there should not be multiple matches, shouldn't timeout be unique?
-    const lastMatching = selfAvailableTimeouts(evalContext.index)
-      .filter((x) => x.cconsequence.name === e.payload.t)
-      .at(0);
+    const lastMatching = selfAvailableTimeouts(evalContext.index).find(
+      (x) => x.cconsequence.name === e.payload.t
+    );
 
     if (lastMatching) {
       const { cconsquenceIndex, cconsequence } = lastMatching;

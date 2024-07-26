@@ -2,6 +2,47 @@
  * @module
  *
  * Definitions and constructors for CItem "bytecode" that the WFMachine runs.
+ *
+ * Some design principles that has been useful for designing CItem subtypes:
+ * - "time flows downwards": the CItem below will be inspected later than the
+ *   one above. This helps minimize the need for the WFMachine to jump back or
+ *   reinspect previous code indices.
+ * - "indexable": A line should include no more than one CItem. A CItem should
+ *   be indexable directly, thus can have a stack counterpart. (in the rust
+ *   version, the stack counterpart can rest together with the CItem as an
+ *   option).
+ * - "granular and unambiguous": When a subtype has too big of a responsibility,
+ *   opt for creating more subtype. WFMachine can always autoEvaluate through
+ *   two codes. Also, this principle will help because stateCalcIndex is always
+ *   lower than evalIndex so that stateCalcIndex will not calculate the code
+ *   pointed by evalIndex. (might change in the future)
+ *
+ * As an example, a timeout consequence used to be encoded as:
+ *
+ * ```
+ * CTimeout { consequence: CEvent }
+ *  ...CItem[]
+ * CAntiTimeout
+ * ```
+ *
+ * This causes a problem because the stack counterpart needs an SAntiTimeout to
+ * store the event described in the consequence. In turn, a new function needs
+ * to be defined to handle SAntiTimeout in a similar manner to SEvent.
+ *
+ * Then CTimeout was changed into this.
+ *
+ * ```
+ * CTimeout
+ * ...CItem[]
+ * CTimeoutGap
+ * CEvent           // the consequence
+ * CAntiTimeout
+ * ```
+ *
+ * This way, if an event matching the consequence is detected, WFMachine's
+ * evalIndex only needs to populate SEvent at the same index as the consequence
+ * CEvent using the same function to populate any other CEvent, and then jump
+ * right below the CEvent.
  */
 
 import { CTypeProto } from "./consts.js";
@@ -337,7 +378,9 @@ export const validate = <CType extends CTypeProto>(
 ) => {
   const errors = ([] as string[])
     .concat(validateBindings(workflow))
-    .concat(validateCompensateNotFirstEvent(workflow));
+    .concat(validateCompensateNotFirstEvent(workflow))
+    .concat(validateFirstItemIsEvent(workflow))
+    .concat(validateCompensationFirstEvent(workflow));
 
   if (errors.length > 0) {
     throw new Error(errors.map((x) => `- ${x.trim()}`).join("\n"));
@@ -398,6 +441,36 @@ export const validateBindings = <CType extends CTypeProto>(
       });
     }
   });
+
+  return errors;
+};
+
+export const validateFirstItemIsEvent = <CType extends CTypeProto>(
+  workflow: WFWorkflow<CType>
+): string[] => {
+  const code: ReadonlyArray<CItem<CType>> = workflow.code;
+  if (code.at(0)?.t !== "event") return ["first item cannot be non-event"];
+  return [];
+};
+
+export const validateCompensationFirstEvent = <CType extends CTypeProto>(
+  workflow: WFWorkflow<CType>
+) => {
+  const compensateWithIndices = workflow.code
+    .map((x, i) => [i, x] as const)
+    .filter(([i, x]) => x.t === "compensate-with")
+    .map(([i]) => i);
+  const firstCompIndicies = compensateWithIndices.map((x) => x + 1);
+  const errors = firstCompIndicies
+    .map((index) => {
+      const item = workflow.code.at(index);
+      return [index, item] as const;
+    })
+    .filter(([index, item]) => item?.t !== "event")
+    .map(
+      ([index]) =>
+        `first item at ${index} must be an event because it is right after a compensate-with block`
+    );
 
   return errors;
 };
