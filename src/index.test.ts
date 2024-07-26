@@ -9,6 +9,7 @@ import { Tags } from "@actyx/sdk";
 import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
 import { One, Parallel } from "./wfmachine.js";
 import {
+  expectAllToHaveSameHistory,
   expectAllToHaveSameState,
   historyOf,
   setup,
@@ -172,7 +173,7 @@ const logistic: WFWorkflow<TheType> = {
                 })
               ),
               code.event(unique("t"), Ev.atWarehouse),
-              ...code.match(docking, { A: "t", B: "s" }, [
+              ...code.match(docking, { A: "t", B: "src" }, [
                 code.matchCase(
                   [Exact, Ev.success],
                   [code.event(unique("t"), Ev.stashed)]
@@ -472,6 +473,9 @@ describe("partitions and compensations", () => {
     expect(t3.machine.mcomb().t).toBe("normal");
 
     expectAllToHaveSameState([t1, t2, src, manager, dst, t3]);
+
+    // history of t2 and t1 must match regardless of compensations
+    expectAllToHaveSameHistory([t1, t2, src, manager, dst, t3]);
   });
 
   it("does nested compensation from the inside first", async () => {
@@ -523,7 +527,40 @@ describe("partitions and compensations", () => {
 
     await findAndRunCommand(t2, Ev.withdrawn);
 
-    // first layer compensation
+    expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(dst.machine.mcomb().t).toBe("compensating");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    // docking
+    await findAndRunCommand(t2, Ev.reqStorage);
+    await findAndRunCommand(src, Ev.offerStorage);
+    await findAndRunCommand(t2, Ev.atWarehouse);
+
+    Object.entries(scenario.agents).forEach(([key, value]) => {
+      log(key, JSON.stringify(value.machine.wfmachine().availableNexts()));
+    });
+
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+    await findAndRunCommand(t2, Ev.inside);
+    await findAndRunCommand(t2, Ev.reqLeave);
+    await findAndRunCommand(src, Ev.doLeave);
+    await findAndRunCommand(t2, Ev.success);
+
+    await findAndRunCommand(t2, Ev.stashed);
+
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(src.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    expectAllToHaveSameHistory([t1, t2, src, manager, dst, t3]);
   });
 
   // prettier-ignore
@@ -587,6 +624,8 @@ describe("partitions and compensations", () => {
     expect(t3.machine.mcomb().t).toBe("normal");
 
     expectAllToHaveSameState([t1, t2, src, manager, dst, t3]);
+
+    expectAllToHaveSameHistory([t1, t2, src, manager, dst, t3]);
   });
 });
 

@@ -129,7 +129,7 @@ export const run = <CType extends CTypeProto>(
       }));
 
     if (data.t === "compensating") {
-      return commands.filter((x) => x.info.reason === "compensation");
+      return commands.filter((x) => x.info.reason.has("compensation"));
     }
 
     return commands;
@@ -406,7 +406,7 @@ export namespace MachineCombinator {
           // check if compensation still applies
           // TODO: optimize compensation query
           const activeCompensationCode = currentData.wfMachine
-            .availableCompensateable()
+            .activeCompensation()
             .find(
               (x) =>
                 x.fromTimelineOf ===

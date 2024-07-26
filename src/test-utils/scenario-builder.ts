@@ -108,6 +108,19 @@ export const expectAllToHaveSameState = <CType extends CTypeProto>(
   });
 };
 
+export const expectAllToHaveSameHistory = <CType extends CTypeProto>(
+  agents: Agent<CType>[]
+) => {
+  const first = agents.at(0);
+  if (!first) return;
+  const rest = agents.slice(1);
+  const firstHistory = historyOf(first);
+  rest.forEach((rest) => {
+    const restState = historyOf(rest);
+    expect(firstHistory).toEqual(restState);
+  });
+};
+
 export const historyOf = <CType extends CTypeProto>(agent: Agent<CType>) => {
   const multiverse = agent.machine.multiverseTree();
   const lastState = agent.machine.wfmachine().state().state?.[1];

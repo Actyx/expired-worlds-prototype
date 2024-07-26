@@ -135,6 +135,8 @@ export type WFMachineState<CType extends CTypeProto> = {
   context: Record<string, unknown>;
 };
 
+type ReasonSet = Set<null | "compensation" | "timeout" | "parallel">;
+
 /**
  * A "next" is the next event that can be fed into the machine.
  * If the Actor is a Unique, the value is the unique binding's bound identity.
@@ -143,7 +145,7 @@ type Next<CType extends CTypeProto> = {
   actor: Actor<CType>;
   name: CType["ev"];
   control?: Code.Control;
-  reason: null | "compensation" | "timeout" | "parallel";
+  reason: ReasonSet;
 };
 
 /**
@@ -154,7 +156,7 @@ type UnnamedNext<CType extends CTypeProto> = {
   unnamedActor: Actor<CType>;
   name: CType["ev"];
   control?: Code.Control;
-  reason: null | "compensation" | "timeout" | "parallel";
+  reason: ReasonSet;
 };
 
 export type WFMachine<CType extends CTypeProto> = {
@@ -169,6 +171,11 @@ export type WFMachine<CType extends CTypeProto> = {
     lateness: number;
   }[];
   availableCompensateable: () => {
+    codeIndex: NestedCodeIndexAddress.Type;
+    firstCompensation: CEvent<CType>;
+    fromTimelineOf: string;
+  }[];
+  activeCompensation: () => {
     codeIndex: NestedCodeIndexAddress.Type;
     firstCompensation: CEvent<CType>;
     fromTimelineOf: string;
@@ -207,7 +214,9 @@ export const WFMachine = <CType extends CTypeProto>(
   const cretryIndexer = CRetryIndexer.make(workflow);
 
   const mapUniqueActorOnNext = (res: UnnamedNext<CType>): Next<CType> => ({
-    ...res,
+    control: res.control,
+    name: res.name,
+    reason: res.reason,
     actor: (() => {
       if (res.unnamedActor.t === "Unique") {
         return Unique(innerstate.context[res.unnamedActor.get()]);
@@ -316,6 +325,51 @@ export const WFMachine = <CType extends CTypeProto>(
         return b.antiIndex - a.antiIndex;
       });
 
+  const selfActiveCompensation = (evalIndex = data.evalIndex) => {
+    const res = ccompensateIndexer
+      .getWithListMatching(evalIndex)
+      .map((entry) => {
+        const withStart = workflow.at(entry.start);
+        if (withStart?.t !== "compensate-with") {
+          return null;
+        }
+        const index = entry.start + withStart.baseIndexOffset;
+        const ccompensate = workflow.at(index);
+        if (ccompensate?.t !== "compensate") {
+          throw new Error(
+            `compensate query fatal error: ccompensate not found at index ${index}`
+          );
+        }
+
+        const sCompensate = data.stack.at(index);
+        if (sCompensate?.t !== "compensate") {
+          throw new Error(
+            `compensate at ${index} not populated when activated at index`
+          );
+        }
+
+        const triggeringEvent = sCompensate.lastEvent;
+        const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
+        const firstCompensation = workflow.at(firstCompensationIndex);
+
+        if (firstCompensation?.t !== "event") {
+          throw new Error(
+            `compensate query fatal error: compensation.with first code is not of type event`
+          );
+        }
+
+        return {
+          codeIndex: wfMachineCodeIndexPrefix.concat([index]),
+          firstCompensation,
+          firstCompensationIndex,
+          fromTimelineOf: triggeringEvent.meta.eventId,
+        };
+      })
+      .filter((x): x is Exclude<typeof x, null> => x !== null);
+
+    return res;
+  };
+
   /**
    * Find all active compensateable
    */
@@ -397,7 +451,11 @@ export const WFMachine = <CType extends CTypeProto>(
     if (code?.t === "match") {
       const smatch = data.stack.at(data.evalIndex);
       if (smatch && smatch.t === "match") {
-        result.push(...smatch.inner.availableNexts());
+        const subNexts = smatch.inner.availableNexts();
+        if (ccompensateIndexer.isInsideWithBlock(index)) {
+          subNexts.forEach((next) => next.reason.add("compensation"));
+        }
+        result.push(...subNexts);
       }
       return;
     }
@@ -409,11 +467,12 @@ export const WFMachine = <CType extends CTypeProto>(
           name,
           unnamedActor: code.actor,
           control,
-          reason: (() => {
+          reason: ((): ReasonSet => {
             if (ccompensateIndexer.isInsideWithBlock(index))
-              return "compensation";
-            if (cparallelIndexer.isParallelStart(index)) return "parallel";
-            return null;
+              return new Set(["compensation"]);
+            if (cparallelIndexer.isParallelStart(index))
+              return new Set(["parallel"]);
+            return new Set();
           })(),
         })
       );
@@ -449,7 +508,7 @@ export const WFMachine = <CType extends CTypeProto>(
           name,
           unnamedActor: actor,
           control,
-          reason: "timeout",
+          reason: new Set(["timeout"]),
         })
       );
     });
@@ -1119,7 +1178,7 @@ export const WFMachine = <CType extends CTypeProto>(
       // parallel and compensation may lead to dead ends.
       const validNextNames = new Set(
         availableNexts()
-          .filter((x) => x.reason !== "parallel")
+          .filter((x) => !x.reason.has("parallel"))
           .map((x) => x.name)
       );
 
@@ -1229,6 +1288,27 @@ export const WFMachine = <CType extends CTypeProto>(
       const match = getSMatchAtIndex(data.evalIndex);
       if (match) {
         const inner = match.inner.availableCompensateable();
+        res.push(...inner);
+      }
+
+      res.sort((a, b) => {
+        return Ord.toNum(NestedCodeIndexAddress.cmp(b.codeIndex, a.codeIndex));
+      });
+
+      return res;
+    },
+    activeCompensation: () => {
+      const res = selfActiveCompensation().map(
+        ({ codeIndex, firstCompensation, fromTimelineOf }) => ({
+          codeIndex,
+          firstCompensation,
+          fromTimelineOf,
+        })
+      );
+
+      const match = getSMatchAtIndex(data.evalIndex);
+      if (match) {
+        const inner = match.inner.activeCompensation();
         res.push(...inner);
       }
 

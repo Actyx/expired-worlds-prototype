@@ -559,6 +559,8 @@ export namespace CCompensationIndexer {
     return {
       mainList,
       withList,
+      getWithListMatching: (x: number) =>
+        withList.filter((entry) => x > entry.start && x < entry.end),
       getMainListMatching: (x: number) =>
         mainList.filter((entry) => x > entry.start && x < entry.end),
       isInsideWithBlock: (x: number) =>
