@@ -596,6 +596,12 @@ describe("partitions and compensations", () => {
 
     t2.machine.logger.sub(log);
 
+    // shuffle through partitions
+    await network.partitions.group(
+      [t1.node, t3.node, manager.node],
+      [src.node, dst.node],
+      [t2.node]
+    ); // isolate t2
     await network.partitions.group([t2.node]); // isolate t2
 
     // src and dst now realize they are in a compensation group
