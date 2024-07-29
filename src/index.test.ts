@@ -559,6 +559,99 @@ describe("partitions and compensations", () => {
     expectAllToHaveSameHistory([t1, t2, src, manager, dst, t3]);
   });
 
+  it("is consistent despite changing partitions", async () => {
+    const scenario = genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { dst, manager, src, t1, t2, t3 },
+    } = scenario;
+
+    // isolate t2 and src together
+    // t2, src, and dst believes that they should be working together
+    await scenarioContestingBidOnPartition(scenario, [t2, src, dst]);
+
+    await findAndRunCommand(t2, Ev.atSrc);
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+
+    expectAllToHaveSameState([t1, t3, manager]);
+    expectAllToHaveSameState([t2, src, dst]);
+
+    await findAndRunCommand(t2, Ev.inside);
+    await findAndRunCommand(t2, Ev.reqLeave);
+    await findAndRunCommand(src, Ev.doLeave);
+    await findAndRunCommand(t2, Ev.success);
+
+    // load
+    await findAndRunCommand(t2, Ev.loaded);
+
+    // docking t2 -> dst and loading
+    await findAndRunCommand(t2, Ev.atDst);
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(dst, Ev.doEnter);
+
+    expectAllToHaveSameState([t1, t3, manager]);
+    expectAllToHaveSameState([t2, src, dst]);
+
+    t2.machine.logger.sub(log);
+
+    await network.partitions.group([t2.node]); // isolate t2
+
+    // src and dst now realize they are in a compensation group
+    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(dst.machine.mcomb().t).toBe("compensating");
+    // but t2 hasn't yet since it is still partitioned
+    expect(t2.machine.mcomb().t).toBe("normal");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    await network.partitions.clear();
+
+    expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(dst.machine.mcomb().t).toBe("compensating");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    await findAndRunCommand(t2, Ev.withdrawn);
+
+    expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(dst.machine.mcomb().t).toBe("compensating");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    // docking
+    await findAndRunCommand(t2, Ev.reqStorage);
+    await findAndRunCommand(src, Ev.offerStorage);
+    await findAndRunCommand(t2, Ev.atWarehouse);
+
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+    await findAndRunCommand(t2, Ev.inside);
+    await findAndRunCommand(t2, Ev.reqLeave);
+    await findAndRunCommand(src, Ev.doLeave);
+    await findAndRunCommand(t2, Ev.success);
+
+    await findAndRunCommand(t2, Ev.stashed);
+
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(src.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    expectAllToHaveSameHistory([t1, t2, src, manager, dst, t3]);
+  });
+
   // prettier-ignore
   const comp_history = ([{"meta":{"offset":0,"appId":"","eventId":"6dc3039e-2894-4914-ae4a-9d8688c9ff6d","isLocalEvent":true,"lamport":0,"stream":"manager","tags":["workflowtag"],"timestampMicros":1720698809630000},"payload":{"t":"request","payload":{"from":"storage-src","to":"storage-dst","manager":"manager"}}},{"meta":{"offset":0,"appId":"","eventId":"0b05a57a-ecc5-42dc-90a5-da74206c5935","isLocalEvent":true,"lamport":6,"stream":"storage-src","tags":["workflowtag","ax:wf:predecessor:07528c25-bfef-4a17-8861-1d3cbe0a1bdf"],"timestampMicros":1720698809635000},"payload":{"t":"doEnter","payload":{}}},{"meta":{"offset":1,"appId":"","eventId":"181b0e65-642a-436b-b542-d1e7911deea3","isLocalEvent":true,"lamport":7,"stream":"storage-src","tags":["workflowtag"],"timestampMicros":1720698809649000},"payload":{"ax":"ax:wf:compensation:needed:","actor":"storage-src","fromTimelineOf":"07528c25-bfef-4a17-8861-1d3cbe0a1bdf","toTimelineOf":"9967f952-db85-493c-b5f0-2ee1fcfe2989","codeIndex":[13,1]}},{"meta":{"offset":0,"appId":"","eventId":"349059c3-62f0-475d-bd61-010caf680b0c","isLocalEvent":true,"lamport":1,"stream":"t1","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809631000},"payload":{"t":"bid","payload":{"bidder":"t1"}}},{"meta":{"offset":1,"appId":"","eventId":"07126407-1274-4b3c-8087-1f7ee57c0821","isLocalEvent":true,"lamport":2,"stream":"t1","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809632000},"payload":{"t":"assign","payload":{"robotID":"t1"}}},{"meta":{"offset":2,"appId":"","eventId":"9967f952-db85-493c-b5f0-2ee1fcfe2989","isLocalEvent":true,"lamport":3,"stream":"t1","tags":["workflowtag","ax:wf:predecessor:07126407-1274-4b3c-8087-1f7ee57c0821"],"timestampMicros":1720698809632000},"payload":{"t":"accept","payload":{}}},{"meta":{"offset":0,"appId":"","eventId":"b183f4b8-8a66-455b-ac0c-688dd52b5d78","isLocalEvent":true,"lamport":1,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809633000},"payload":{"t":"bid","payload":{"bidder":"t2"}}},{"meta":{"offset":1,"appId":"","eventId":"802bd3c7-36c1-4d52-9179-936f8fbdcdee","isLocalEvent":true,"lamport":2,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:6dc3039e-2894-4914-ae4a-9d8688c9ff6d"],"timestampMicros":1720698809633000},"payload":{"t":"assign","payload":{"robotID":"t2"}}},{"meta":{"offset":2,"appId":"","eventId":"2586ee84-1c57-4866-9c9c-225915a62adf","isLocalEvent":true,"lamport":3,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:802bd3c7-36c1-4d52-9179-936f8fbdcdee"],"timestampMicros":1720698809633000},"payload":{"t":"accept","payload":{}}},{"meta":{"offset":3,"appId":"","eventId":"f82d80ba-cecb-4f52-be7e-48fce4404872","isLocalEvent":true,"lamport":4,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:2586ee84-1c57-4866-9c9c-225915a62adf"],"timestampMicros":1720698809634000},"payload":{"t":"atSrc","payload":{}}},{"meta":{"offset":4,"appId":"","eventId":"07528c25-bfef-4a17-8861-1d3cbe0a1bdf","isLocalEvent":true,"lamport":5,"stream":"t2","tags":["workflowtag","ax:wf:predecessor:f82d80ba-cecb-4f52-be7e-48fce4404872"],"timestampMicros":1720698809634000},"payload":{"t":"reqEnter","payload":{}}},{"meta":{"offset":5,"appId":"","eventId":"b7d342ef-cedf-44b5-a601-72aa168d50f5","isLocalEvent":true,"lamport":8,"stream":"t2","tags":["workflowtag"],"timestampMicros":1720698809652000},"payload":{"ax":"ax:wf:compensation:needed:","actor":"t2","fromTimelineOf":"07528c25-bfef-4a17-8861-1d3cbe0a1bdf","toTimelineOf":"9967f952-db85-493c-b5f0-2ee1fcfe2989","codeIndex":[13,1]}}])
     .map((entry) => {

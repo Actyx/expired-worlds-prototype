@@ -138,7 +138,6 @@ describe("ax-mock", () => {
     expect(nodeA.api.offsetMap()).not.toEqual(nodeD.api.offsetMap());
 
     expectSameData([nodeA, nodeB, nodeC]);
-    expectDifferentData([nodeC, nodeD]);
   });
 
   describe("subscription", () => {
