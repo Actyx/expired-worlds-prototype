@@ -10,6 +10,7 @@ import {
 import { Obs } from "systemic-ts-utils";
 import * as uuid from "uuid";
 import { Logger, makeLogger, Ord } from "../utils.js";
+import { sortByEventKey } from "../consts.js";
 
 type NodeId = string;
 type PartitionId = string;
@@ -373,25 +374,36 @@ export namespace Node {
       recAsk: (ask) => {
         const selfOffset = ask.offsetMap[params.id] || 0;
         const answer = data.own.slice(selfOffset);
+
+        Object.keys(offsetMap())
+          .map((id) => [id, data.remote.get(id)] as const)
+          .map(([peerId, peer]) => {
+            if (!peer) return;
+            const offset = ask.offsetMap[peerId] || 0;
+            answer.push(...peer.slice(offset));
+          });
+
         if (answer.length === 0) return;
-        coord.answer.emit({ from: params.id, evs: answer });
+        coord.answer.emit({ from: params.id, evs: sortByEventKey(answer) });
       },
       answer: Obs.Obs.make(),
       recAnswer: (answer) => {
-        const streamStore = getOrCreateStream(answer.from);
         let timetravel = false;
 
-        answer.evs.forEach((e) => {
-          streamStore.set(e);
-          const evLamport = XLamport.make(e.meta.lamport);
+        answer.evs
+          .filter((e) => e.meta.stream !== params.id)
+          .forEach((e) => {
+            const streamStore = getOrCreateStream(e.meta.stream);
+            streamStore.set(e);
+            const evLamport = XLamport.make(e.meta.lamport);
 
-          const ord = Ord.cmp(evLamport, data.nextLamport);
-          if (ord === Ord.Lesser || ord === Ord.Equal) {
-            timetravel = true;
-          }
+            const ord = Ord.cmp(evLamport, data.nextLamport);
+            if (ord === Ord.Lesser || ord === Ord.Equal) {
+              timetravel = true;
+            }
 
-          data.nextLamport = XLamport.max(data.nextLamport, evLamport.incr());
-        });
+            data.nextLamport = XLamport.max(data.nextLamport, evLamport.incr());
+          });
 
         if (timetravel) {
           data.timeTravelAlert.emit();
@@ -432,6 +444,7 @@ export namespace Network {
     logger: Logger;
     join: (_: Node.Type<E>) => Promise<void>;
     partitions: {
+      group: (...groups: Node.Type<E>[][]) => Promise<void>;
       make: (nodes: Node.Type<E>[]) => void;
       clear: () => Promise<void>;
     };
@@ -474,6 +487,16 @@ export namespace Network {
       return neighbors;
     };
 
+    const sync = () =>
+      new Promise<void>((res) =>
+        setImmediate(() => {
+          data.nodes.forEach((node) => node.coord.startSync());
+          data.nodes.forEach((node) => node.coord.afterSync());
+
+          res();
+        })
+      );
+
     const res: Type<E> = {
       logger,
       join: (node) => {
@@ -501,6 +524,48 @@ export namespace Network {
         );
       },
       partitions: {
+        group: (...groups) => {
+          const namedGroups = groups.map((group) => {
+            return {
+              partitionId: uuid.v4(),
+              members: group.filter((node) => data.nodes.has(node.id)),
+            };
+          });
+
+          // duplicate checks
+          const mentioned = new Set<string>();
+          const duplicates = new Set<string>();
+          namedGroups.forEach((group) => {
+            group.members.forEach((member) => {
+              if (mentioned.has(member.id)) {
+                duplicates.add(member.id);
+              }
+              mentioned.add(member.id);
+            });
+          });
+
+          if (duplicates.size > 0) {
+            const memberIds = JSON.stringify(Array.from(duplicates).sort());
+            throw new Error(
+              `error while making groups. these Ids are duplicated across different groups: ${memberIds}`
+            );
+          }
+
+          data.partitions.forward.clear();
+          data.partitions.reverse.clear();
+
+          namedGroups.forEach((group) => {
+            const groupIds = group.members.map((x) => x.id);
+            groupIds.map((id) =>
+              data.partitions.forward.set(id, {
+                partitionId: group.partitionId,
+              })
+            );
+            data.partitions.reverse.set(group.partitionId, { nodes: groupIds });
+          });
+
+          return sync();
+        },
         make: (nodes) => {
           const nodeIds = nodes
             .map((x) => x.id)
@@ -530,14 +595,7 @@ export namespace Network {
           data.partitions.forward = new Map();
           data.partitions.reverse = new Map();
 
-          return new Promise((res) =>
-            setImmediate(() => {
-              data.nodes.forEach((node) => node.coord.startSync());
-              data.nodes.forEach((node) => node.coord.afterSync());
-
-              res();
-            })
-          );
+          return sync();
         },
       },
     };

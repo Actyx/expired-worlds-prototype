@@ -86,9 +86,7 @@ export type ActyxWFBusinessOrMarker<CType extends CTypeProto> = ActyxEvent<
 // the history can actually be a graph, unlike for example, git
 export type Chain<CType extends CTypeProto> = ActyxWFBusiness<CType>[];
 
-export const sortByEventKey = <CType extends CTypeProto>(
-  chain: Chain<CType>
-) => {
+export const sortByEventKey = <E>(chain: ActyxEvent<E>[]) => {
   if (chain.length <= 1) return chain;
   return chain
     .map((ev) => ({ ev, eventKey: XEventKey.fromMeta(ev.meta) }))

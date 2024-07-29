@@ -540,10 +540,6 @@ describe("partitions and compensations", () => {
     await findAndRunCommand(src, Ev.offerStorage);
     await findAndRunCommand(t2, Ev.atWarehouse);
 
-    Object.entries(scenario.agents).forEach(([key, value]) => {
-      log(key, JSON.stringify(value.machine.wfmachine().availableNexts()));
-    });
-
     await findAndRunCommand(t2, Ev.reqEnter);
     await findAndRunCommand(src, Ev.doEnter);
     await findAndRunCommand(t2, Ev.inside);

@@ -5,8 +5,28 @@ import { afterEach } from "node:test";
 import { Ord, sleep } from "../utils.js";
 
 const streamOf = <E>(node: Node.Type<E>) => node.api.stores().own.slice();
-const accordingToStreamOf = <E>(observer: Node.Type<E>, node: Node.Type<E>) =>
-  observer.api.stores().remote.get(node.id)?.slice() || [];
+const accordingTo = <E>(observer: Node.Type<E>) => ({
+  streamOf: (node: Node.Type<E>) =>
+    observer.api.stores().remote.get(node.id)?.slice() || [],
+});
+
+const expectSameData = <E>(nodes: Node.Type<E>[]) =>
+  nodes.forEach((self) => {
+    const rest = nodes.filter((x) => x != self);
+    const streamOfSelf = streamOf(self);
+    rest.forEach((other) =>
+      expect(streamOfSelf).toEqual(accordingTo(other).streamOf(self))
+    );
+  });
+
+const expectDifferentData = <E>(nodes: Node.Type<E>[]) =>
+  nodes.forEach((self) => {
+    const rest = nodes.filter((x) => x != self);
+    const streamOfSelf = streamOf(self);
+    rest.forEach((other) =>
+      expect(streamOfSelf).not.toEqual(accordingTo(other).streamOf(self))
+    );
+  });
 
 const DefaultTags = Tag<string>("default");
 const tag = (p: string) => DefaultTags.applyTyped(p);
@@ -38,7 +58,7 @@ describe("ax-mock", () => {
     expect(nodeD.api.offsetMap()[nodeA.id]).toBe(2);
   });
 
-  it("should propagate events", async () => {
+  it("should sync after partition is cleared", async () => {
     const {
       network,
       nodes: [nodeA, nodeB, nodeC, nodeD],
@@ -55,10 +75,8 @@ describe("ax-mock", () => {
     expect(nodeC.api.offsetMap()[nodeA.id]).toBe(1);
     expect(nodeD.api.offsetMap()[nodeA.id]).toBe(1);
 
-    expect(streamOf(nodeA)).toEqual(accordingToStreamOf(nodeB, nodeA));
-    expect(streamOf(nodeB)).toEqual(accordingToStreamOf(nodeA, nodeB));
-    expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeD, nodeC));
-    expect(streamOf(nodeD)).toEqual(accordingToStreamOf(nodeC, nodeD));
+    expectSameData([nodeA, nodeB]);
+    expectSameData([nodeC, nodeD]);
 
     nodeC.api.publish(tag("a"));
 
@@ -67,10 +85,8 @@ describe("ax-mock", () => {
     expect(nodeC.api.offsetMap()[nodeC.id]).toBe(1);
     expect(nodeD.api.offsetMap()[nodeC.id]).toBe(1);
 
-    expect(streamOf(nodeA)).toEqual(accordingToStreamOf(nodeB, nodeA));
-    expect(streamOf(nodeB)).toEqual(accordingToStreamOf(nodeA, nodeB));
-    expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeD, nodeC));
-    expect(streamOf(nodeD)).toEqual(accordingToStreamOf(nodeC, nodeD));
+    expectSameData([nodeA, nodeB]);
+    expectSameData([nodeC, nodeD]);
 
     await network.partitions.clear();
 
@@ -78,12 +94,51 @@ describe("ax-mock", () => {
     expect(nodeA.api.offsetMap()).toEqual(nodeC.api.offsetMap());
     expect(nodeA.api.offsetMap()).toEqual(nodeD.api.offsetMap());
 
-    expect(streamOf(nodeA)).toEqual(accordingToStreamOf(nodeB, nodeA));
-    expect(streamOf(nodeA)).toEqual(accordingToStreamOf(nodeC, nodeA));
-    expect(streamOf(nodeA)).toEqual(accordingToStreamOf(nodeD, nodeA));
-    expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeA, nodeC));
-    expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeB, nodeC));
-    expect(streamOf(nodeC)).toEqual(accordingToStreamOf(nodeD, nodeC));
+    expectSameData([nodeA, nodeB, nodeC, nodeD]);
+  });
+
+  it("should sync after grouping", async () => {
+    const {
+      network,
+      nodes: [nodeA, nodeB, nodeC, nodeD],
+    } = await prepare();
+
+    nodeA.api.publish(tag("a"));
+
+    await network.partitions.group([nodeA, nodeB], [nodeC, nodeD]);
+
+    nodeA.api.publish(tag("a"));
+
+    expect(nodeA.api.offsetMap()[nodeA.id]).toBe(2);
+    expect(nodeB.api.offsetMap()[nodeA.id]).toBe(2);
+    expect(nodeC.api.offsetMap()[nodeA.id]).toBe(1);
+    expect(nodeD.api.offsetMap()[nodeA.id]).toBe(1);
+
+    expectSameData([nodeA, nodeB]);
+    expectSameData([nodeC, nodeD]);
+
+    nodeA.api.publish(tag("a"));
+    nodeB.api.publish(tag("a"));
+    nodeC.api.publish(tag("a"));
+    nodeD.api.publish(tag("a"));
+
+    expect(nodeA.api.offsetMap()[nodeC.id]).toBe(undefined);
+    expect(nodeB.api.offsetMap()[nodeC.id]).toBe(undefined);
+    expect(nodeC.api.offsetMap()[nodeC.id]).toBe(1);
+    expect(nodeD.api.offsetMap()[nodeC.id]).toBe(1);
+
+    expectSameData([nodeA, nodeB]);
+    expectSameData([nodeC, nodeD]);
+    expectDifferentData([nodeA, nodeC]);
+
+    await network.partitions.group([nodeA, nodeB, nodeC], [nodeD]);
+
+    expect(nodeA.api.offsetMap()).toEqual(nodeB.api.offsetMap());
+    expect(nodeA.api.offsetMap()).toEqual(nodeC.api.offsetMap());
+    expect(nodeA.api.offsetMap()).not.toEqual(nodeD.api.offsetMap());
+
+    expectSameData([nodeA, nodeB, nodeC]);
+    expectDifferentData([nodeC, nodeD]);
   });
 
   describe("subscription", () => {
