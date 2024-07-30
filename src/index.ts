@@ -346,6 +346,7 @@ export namespace MachineCombinator {
         };
       },
       pipe: (e: EventsMsg<WFBusinessOrMarker<CType>>) => {
+        // populate multiverse and compensation map
         extractWFEvents(e.events).map(multiverseTree.register);
         extractWFDirective(e.events).map((ev) => {
           compensationMap.register(ev.payload);
@@ -357,7 +358,9 @@ export namespace MachineCombinator {
           canonWFMachine.logger.sub(logger.log);
           canonWFMachine.advanceToMostCanon();
 
+          // the state before time travel
           const lastEvent = currentData.wfMachine.latestStateEvent();
+          // the state after time travel
           const canonLastEvent = canonWFMachine.latestStateEvent();
 
           const compensations =
@@ -383,6 +386,7 @@ export namespace MachineCombinator {
                   toTimelineOf,
                   codeIndex,
                 };
+                // TODO: check if this directive needs to be published.
                 // TODO: fix tag
                 node.api.publish(params.tags.apply(directive));
                 compensationMap.register(directive);
@@ -539,10 +543,10 @@ const calculateCompensations = <CType extends CTypeProto>(
   // Comps before divergence should not be accounted for
   const compsBeforeDivergence = simulation.availableCompensateable();
 
-  // "divergence.all");
   simulation.resetAndAdvanceToEventId(fromPoint.meta.eventId);
   // advancing most canon might resolve some compensations.
   // `advanceToMostCanon` is the key function call that will eventually trigger CompensationDone
+  // it accounts for the possible with-block completions from the current `fromPoint`.
   simulation.advanceToMostCanon();
   const allActiveCompensations = simulation.availableCompensateable();
 
