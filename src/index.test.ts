@@ -1,240 +1,22 @@
 import { describe, expect, it } from "@jest/globals";
-import {
-  ActyxWFBusinessOrMarker,
-  MakeCType,
-  WFBusinessOrMarker,
-} from "./consts.js";
-import { Enum } from "./utils.js";
-import { Tags } from "@actyx/sdk";
-import { Code, Exact, Otherwise, WFWorkflow } from "./wfcode.js";
+import { ActyxWFBusinessOrMarker } from "./consts.js";
 import { One, Parallel } from "./wfmachine.js";
 import {
   expectAllToHaveSameHistory,
   expectAllToHaveSameState,
   historyOf,
-  setup,
-  SetupSystemParams,
 } from "./test-utils/scenario-builder.js";
 import { awhile, log } from "./test-utils/misc.js";
-
-const Ev = Enum([
-  "request",
-  "bid",
-  "cancelled",
-  "assign",
-  "accept",
-  "notAccepted",
-  "atSrc",
-  "reqEnter",
-  "doEnter",
-  "deny",
-  "inside",
-  "withdrawn",
-  "reqLeave",
-  "doLeave",
-  "success",
-  "withdraw",
-  "doLeave",
-  "withdrawn",
-  "loaded",
-  "notPickedUp",
-  "atDst",
-  "notDelivered",
-  "unloaded",
-  "reqStorage",
-  "offerStorage",
-  "acceptStorage",
-  "assistanceNeeded",
-  "atWarehouse",
-  "stashed",
-  "assistanceNeeded",
-  "logisticFailed",
-  "done",
-] as const);
-type Ev = Enum<typeof Ev>;
-
-const Role = Enum(["manager", "transporter", "storage"] as const);
-type Role = Enum<typeof Role>;
-
-type TheType = MakeCType<{ ev: Ev; role: Role }>;
-
-const logisticWorkflowTag = Tags<WFBusinessOrMarker<TheType>>("workflowtag");
-const code = Code.make<TheType>();
-const { role, unique } = code.actor;
-
-const docking: WFWorkflow<TheType> = {
-  uniqueParams: ["A", "B"],
-  code: [
-    code.event(unique("A"), Ev.reqEnter),
-    ...code.compensate(
-      [
-        ...code.choice([
-          code.event(unique("B"), Ev.doEnter),
-          code.event(unique("B"), Ev.deny, { control: code.Control.return }),
-        ]),
-        code.event(unique("A"), Ev.inside),
-      ],
-      [code.event(unique("A"), Ev.withdrawn)]
-    ),
-    ...code.compensate(
-      [
-        code.event(unique("A"), Ev.reqLeave),
-        code.event(unique("B"), Ev.doLeave),
-        code.event(unique("A"), Ev.success, { control: code.Control.return }),
-      ],
-      [
-        code.event(unique("A"), Ev.withdraw),
-        code.event(unique("B"), Ev.doLeave),
-        code.event(unique("A"), Ev.withdrawn),
-      ]
-    ),
-  ],
-};
-
-const logistic: WFWorkflow<TheType> = {
-  uniqueParams: [],
-  code: [
-    code.event(role(Role.manager), Ev.request, {
-      bindings: [
-        code.bind("src", "from"),
-        code.bind("dst", "to"),
-        code.bind("m", "manager"),
-      ],
-    }),
-    ...code.retry([
-      ...code.timeout(
-        5 * 60 * 1000,
-        [
-          ...code.parallel({ min: 1 }, [
-            code.event(role(Role.transporter), Ev.bid, {
-              bindings: [code.bind("bidder", "bidder")],
-            }),
-          ] as const),
-        ] as const,
-        code.event(unique("m"), Ev.cancelled, {
-          control: Code.Control.return,
-        })
-      ),
-      ...code.timeout(
-        10 * 1000,
-        [
-          code.event(role(Role.transporter), Ev.assign, {
-            bindings: [code.bind("t", "robotID")],
-          }),
-          code.event(unique("t"), Ev.accept),
-        ] as const,
-        code.event(unique("m"), Ev.notAccepted, {
-          control: Code.Control.fail,
-        })
-      ),
-      ...code.timeout(
-        30 * 60 * 1000,
-        [
-          code.event(unique("t"), Ev.atSrc),
-          ...code.match(docking, { A: "t", B: "src" }, [
-            code.matchCase([Exact, Ev.success], [
-              code.event(unique("t"), Ev.loaded),
-            ] as const),
-            code.matchCase([Otherwise], [
-              code.event(unique("t"), Ev.notPickedUp, {
-                control: code.Control.fail,
-              }),
-            ] as const),
-          ]),
-          ...code.compensate(
-            [
-              code.event(unique("t"), Ev.atDst),
-              ...code.match(docking, { A: "t", B: "dst" }, [
-                code.matchCase(
-                  [Exact, Ev.success],
-                  [code.event(unique("t"), Ev.unloaded)]
-                ),
-                code.matchCase(
-                  [Otherwise],
-                  [
-                    code.event(unique("t"), Ev.notDelivered, {
-                      control: code.Control.fail,
-                    }),
-                  ]
-                ),
-              ]),
-            ],
-            [
-              code.event(unique("t"), Ev.reqStorage),
-              ...code.timeout(
-                10 * 1000,
-                [
-                  code.event(role(Role.storage), Ev.offerStorage, {
-                    bindings: [code.bind("s", "storage")],
-                  }),
-                ],
-                code.event(unique("t"), Ev.assistanceNeeded, {
-                  control: code.Control.return,
-                })
-              ),
-              code.event(unique("t"), Ev.atWarehouse),
-              ...code.match(docking, { A: "t", B: "src" }, [
-                code.matchCase(
-                  [Exact, Ev.success],
-                  [code.event(unique("t"), Ev.stashed)]
-                ),
-                code.matchCase(
-                  [Otherwise],
-                  [
-                    code.event(unique("t"), Ev.assistanceNeeded, {
-                      control: code.Control.return,
-                    }),
-                  ]
-                ),
-              ]),
-            ]
-          ),
-        ] as const,
-        code.event(unique("m"), Ev.logisticFailed, {
-          control: Code.Control.return,
-        })
-      ),
-    ] as const),
-    code.event(unique("m"), Ev.done),
-  ] as const,
-};
-
-type Scenario = ReturnType<typeof genScenario>;
-
-const genScenario = (
-  setupSystemParams?: Partial<SetupSystemParams<TheType>>
-) => {
-  const scenario = setup<TheType>(
-    logistic,
-    {
-      ...(setupSystemParams || {}),
-      tags: logisticWorkflowTag,
-    },
-    [
-      { id: "storage-src", role: Role.storage },
-      { id: "storage-dst", role: Role.storage },
-      { id: "manager", role: Role.manager },
-      { id: "t1", role: Role.transporter },
-      { id: "t2", role: Role.transporter },
-      { id: "t3", role: Role.transporter },
-    ]
-  );
-
-  const [src, dst, manager, t1, t2, t3] = scenario.agents;
-
-  return {
-    ...scenario,
-    agents: { src, dst, manager, t1, t2, t3 } as const,
-  };
-};
+import { Logistics } from "./test-utils/logistic-scenario.js";
+import { Choices } from "./test-utils/choices-scenario.js";
 
 describe("no-partitions", () => {
+  const { Ev } = Logistics;
+
   it("works and build history correctly", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
-
-    t1.machine.logger.sub(log);
 
     await findAndRunCommand(manager, Ev.request, {
       from: src.identity.id,
@@ -367,6 +149,7 @@ describe("no-partitions", () => {
 });
 
 describe("partitions and compensations", () => {
+  const { Ev } = Logistics;
   /**
    * Partitions src and t2 alone
    */
@@ -375,8 +158,8 @@ describe("partitions and compensations", () => {
       findAndRunCommand,
       network,
       agents: { dst, manager, src, t1, t2, t3 },
-    }: Scenario,
-    whoToPartitions: Scenario["agents"][keyof Scenario["agents"]][]
+    }: Logistics.Scenario,
+    whoToPartitions: Logistics.Scenario["agents"][keyof Logistics.Scenario["agents"]][]
   ) => {
     await findAndRunCommand(manager, Ev.request, {
       from: src.identity.id,
@@ -391,16 +174,20 @@ describe("partitions and compensations", () => {
     // both will have the same lamport timestamp because of the partition,
     // but t1 will win because of stream id sort
     await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
-    await findAndRunCommand(t1, Ev.assign, { robotID: t1.identity.id });
+    await findAndRunCommand(t1, Ev.assign, {
+      robotID: t1.identity.id,
+    });
     await findAndRunCommand(t1, Ev.accept);
 
     await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
-    await findAndRunCommand(t2, Ev.assign, { robotID: t2.identity.id });
+    await findAndRunCommand(t2, Ev.assign, {
+      robotID: t2.identity.id,
+    });
     await findAndRunCommand(t2, Ev.accept);
   };
 
   it("converge correctly after partition is closed", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const {
       findAndRunCommand,
       network,
@@ -425,7 +212,7 @@ describe("partitions and compensations", () => {
   });
 
   it("does compensation correctly", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const {
       findAndRunCommand,
       network,
@@ -478,8 +265,53 @@ describe("partitions and compensations", () => {
     expectAllToHaveSameHistory([t1, t2, src, manager, dst, t3]);
   });
 
+  it("does not duplicate WFMarker unnecessarily on machine restarts", async () => {
+    const scenario = Logistics.genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { dst, manager, src, t1, t2, t3 },
+    } = scenario;
+
+    // isolate t2 and src together
+    // t2 and src believes that they should be working together
+    await scenarioContestingBidOnPartition(scenario, [t2, src]);
+
+    await findAndRunCommand(t2, Ev.atSrc);
+    await findAndRunCommand(t2, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+
+    await network.partitions.clear();
+
+    expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    const beforeRestart = t2.node.api.slice();
+
+    await Promise.all(
+      [t2, src, t1, manager, dst, t3].map((x) => x.restartMachine())
+    );
+
+    expect(t2.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("compensating");
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(manager.machine.mcomb().t).toBe("normal");
+    expect(dst.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+
+    const afterRestart = t2.node.api.slice();
+
+    expect(beforeRestart).toEqual(afterRestart);
+  });
+
   it("does nested compensation from the inside first", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const {
       findAndRunCommand,
       network,
@@ -512,8 +344,6 @@ describe("partitions and compensations", () => {
 
     expectAllToHaveSameState([t1, t3, manager]);
     expectAllToHaveSameState([t2, src, dst]);
-
-    t2.machine.logger.sub(log);
 
     await network.partitions.clear();
 
@@ -560,7 +390,7 @@ describe("partitions and compensations", () => {
   });
 
   it("is consistent despite changing partitions", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const {
       findAndRunCommand,
       network,
@@ -593,8 +423,6 @@ describe("partitions and compensations", () => {
 
     expectAllToHaveSameState([t1, t3, manager]);
     expectAllToHaveSameState([t2, src, dst]);
-
-    t2.machine.logger.sub(log);
 
     // shuffle through partitions
     await network.partitions.group(
@@ -668,13 +496,13 @@ describe("partitions and compensations", () => {
           timestampAsDate: () => date,
         }),
         payload: entry.payload
-      }) as ActyxWFBusinessOrMarker<TheType>
+      }) as ActyxWFBusinessOrMarker<Logistics.CType>
     })
 
   it("remembers compensation", async () => {
     // history is loaded that triggers compensation in t2 and src (the above
     // scenario before Ev.withdrawn is called)
-    const scenario = genScenario({
+    const scenario = Logistics.genScenario({
       initialStoreData: comp_history,
     });
     const {
@@ -722,11 +550,64 @@ describe("partitions and compensations", () => {
 
     expectAllToHaveSameHistory([t1, t2, src, manager, dst, t3]);
   });
+
+  it("remembers nested compensation", async () => {
+    const scenario = Choices.genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { client, t1, t2, t3 },
+    } = scenario;
+    const { Ev: Evs } = Choices;
+
+    await findAndRunCommand(client, Evs.start);
+    await network.partitions.group(
+      [client.node],
+      [t1.node],
+      [t2.node],
+      [t3.node]
+    );
+
+    // everyone bids themselves to L2
+    await Promise.all(
+      [t1, t2, t3].map(async (t) => {
+        await findAndRunCommand(t, Evs.L1Bid, { bidder: t.identity.id });
+        await findAndRunCommand(t, Evs.L1Accept, { assignee: t.identity.id });
+        await findAndRunCommand(t, Evs.L2Bid, { bidder: t.identity.id });
+        await findAndRunCommand(t, Evs.L2Accept, { assignee: t.identity.id });
+      })
+    );
+
+    await Promise.all([t1, t2, t3].map((x) => x.restartMachine()));
+    // trigger compensation in t3
+    await network.partitions.group(
+      [client.node],
+      [t1.node],
+      [t2.node, t3.node]
+    );
+    await Promise.all([t1, t2, t3].map((x) => x.restartMachine()));
+
+    await network.partitions.clear();
+    await Promise.all([t1, t2, t3].map((x) => x.restartMachine()));
+
+    expect(t1.machine.mcomb().t === "normal");
+    expect(t2.machine.mcomb().t === "compensating");
+    expect(t3.machine.mcomb().t === "compensating");
+
+    await findAndRunCommand(t3, Evs.L2Compensate);
+    await findAndRunCommand(t2, Evs.L1Compensate);
+
+    expect(t1.machine.mcomb().t === "normal");
+    expect(t2.machine.mcomb().t === "normal");
+    expect(t3.machine.mcomb().t === "normal");
+  });
 });
 
 describe("timeout", () => {
+  const { Ev } = Logistics;
+
   it("failure consequence loops to retry", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
 
@@ -736,7 +617,9 @@ describe("timeout", () => {
       manager: manager.identity.id,
     });
     await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
-    await findAndRunCommand(t1, Ev.assign, { robotID: t1.identity.id });
+    await findAndRunCommand(t1, Ev.assign, {
+      robotID: t1.identity.id,
+    });
     await findAndRunCommand(manager, Ev.notAccepted, {});
 
     expect(manager.machine.state().state?.[1].payload.t).toBe(Ev.notAccepted);
@@ -748,7 +631,9 @@ describe("timeout", () => {
       expect(bidCommand).toBeTruthy();
     });
     await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
-    await findAndRunCommand(t1, Ev.assign, { robotID: t1.identity.id });
+    await findAndRunCommand(t1, Ev.assign, {
+      robotID: t1.identity.id,
+    });
     await findAndRunCommand(t1, Ev.accept);
 
     // the history also loops
@@ -762,7 +647,7 @@ describe("timeout", () => {
   });
 
   it("invocation clears the compensations and timeouts", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
 
@@ -825,8 +710,10 @@ describe("timeout", () => {
 });
 
 describe("retry-fail inside compensation", () => {
+  const { Ev } = Logistics;
+
   it("should clear active compensation", async () => {
-    const scenario = genScenario();
+    const scenario = Logistics.genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
     await findAndRunCommand(manager, Ev.request, {

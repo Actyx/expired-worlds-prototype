@@ -386,10 +386,11 @@ export namespace MachineCombinator {
                   toTimelineOf,
                   codeIndex,
                 };
-                // TODO: check if this directive needs to be published.
-                // TODO: fix tag
-                node.api.publish(params.tags.apply(directive));
-                compensationMap.register(directive);
+
+                if (!compensationMap.hasRegistered(directive)) {
+                  node.api.publish(params.tags.apply(directive));
+                  compensationMap.register(directive);
+                }
               }
             );
           }
@@ -470,6 +471,19 @@ export namespace CompensationMap {
     };
 
     return {
+      hasRegistered: (compensation: WFMarker): boolean => {
+        if (InternalTag.CompensationNeeded.is(compensation.ax)) {
+          const needed = compensation as WFMarkerCompensationNeeded;
+          const set = access(data.positive, compensation);
+          const entry = set.get(needed.toTimelineOf);
+          return entry !== undefined && entry?.codeIndex === needed.codeIndex;
+        } else if (InternalTag.CompensationDone.is(compensation.ax)) {
+          const done = compensation as WFMarkerCompensationDone;
+          const set = access(data.negative, compensation);
+          return set.has(done.toTimelineOf);
+        }
+        return false;
+      },
       register: (compensation: WFMarker) => {
         // TODO: runtime validation
         if (InternalTag.CompensationNeeded.is(compensation.ax)) {

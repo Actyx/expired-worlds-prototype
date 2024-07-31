@@ -35,30 +35,47 @@ export const setup = <CType extends CTypeProto>(
 
   const network = makenetwork();
 
-  const agents = params
-    .map((identity) => {
-      // initialize nodes and load all initial data
-      const node = makenode({ id: identity.id });
-      node.logger.sub(log);
-      if (setupParams?.initialStoreData) {
-        node.store.load(setupParams.initialStoreData);
-      }
-      return { identity, node };
-    })
-    .map((x) => {
-      // join network to node
-      network.join(x.node);
-      return x;
-    })
-    .map(({ identity, node }) => {
-      // run machine
-      const machine = run(
+  const identityNodePairs = params.map((identity) => {
+    // initialize nodes and load all initial data
+    const node = makenode({ id: identity.id });
+    node.logger.sub(log);
+    if (setupParams?.initialStoreData) {
+      node.store.load(setupParams.initialStoreData);
+    }
+    return { identity, node };
+  });
+
+  // join nodes
+  identityNodePairs.forEach((x) => network.join(x.node));
+
+  const agents = identityNodePairs.map(({ identity, node }) => {
+    // run machine
+    let machineInstance = run(
+      { self: identity, tags: setupParams.tags },
+      node,
+      code
+    );
+
+    const restartMachine = async () => {
+      machineInstance.kill();
+      machineInstance = run(
         { self: identity, tags: setupParams.tags },
         node,
         code
       );
-      return { identity, node, machine };
-    });
+      await awhile();
+    };
+
+    const machineProxy = new Proxy<typeof machineInstance>(
+      {} as any as typeof machineInstance,
+      {
+        get: (_, ...args) => Reflect.get(machineInstance, ...args),
+        set: (_, ...args) => Reflect.set(machineInstance, ...args),
+      }
+    );
+
+    return { identity, node, machine: machineProxy, restartMachine };
+  });
 
   const findAgent = (fn: (c: Agent<CType>) => boolean): Agent<CType> => {
     const agent = agents.find(fn);

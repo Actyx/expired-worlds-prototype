@@ -137,6 +137,7 @@ export namespace Node {
   export type Type<E> = Readonly<{
     id: Readonly<string>;
     api: {
+      slice: () => ActyxEvent<E>[];
       stores: () => {
         own: StreamStore.Type<E>;
         remote: Map<string, StreamStore.Type<E>>;
@@ -244,6 +245,19 @@ export namespace Node {
 
     const api: Type<E>["api"] = {
       offsetMap,
+      slice: () => {
+        const res: ActyxEvent<E>[] = [];
+        const stream = mergedOrdered([
+          data.own.stream(),
+          ...Array.from(data.remote.values()).map((store) => store.stream()),
+        ]);
+
+        while (true) {
+          const x = stream.next();
+          if (!x) return res;
+          res.push(x);
+        }
+      },
       stores: () => ({
         own: data.own,
         remote: new Map(data.remote),

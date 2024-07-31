@@ -434,7 +434,7 @@ export const WFMachine = <CType extends CTypeProto>(
       const parStack = generateParallelCriteria({ index }, code).atStack;
       parStack.instances.map((instance) => {
         const childIndex = index + code.firstEventIndex + instance.entry.length;
-        const childCode = workflow.at(index);
+        const childCode = workflow.at(childIndex);
         if (!childCode) return;
         extractValidNext(childIndex, result, childCode);
       });
@@ -544,26 +544,8 @@ export const WFMachine = <CType extends CTypeProto>(
 
     const atStack = ((): SParallel<CType> => {
       const atStack = data.stack.at(evalContext.index);
-      if (!atStack) {
-        const lastEvent = innerstate.state?.[1] || null;
-        // TODO: maybe support parallel at the beginning?
-        // but I don't think that makes sense
-        if (lastEvent === null) {
-          throw new Error(
-            "impossible right now. parallel should have been preceeded with a single event. this should have been prevented at the CCode building and validating"
-          );
-        }
-        const newAtStack: SParallel<CType> = {
-          t: "par",
-          instances: [],
-          lastEvent,
-          nextEvalIndex: evalContext.index + pairOffsetIndex + 1,
-        };
-        data.stack[evalContext.index] = newAtStack;
-        return newAtStack;
-      }
-      if (atStack.t !== "par") {
-        throw new Error("stack type not par");
+      if (atStack?.t !== "par") {
+        throw new Error(`stack type at ${evalContext.index} not par`);
       }
       return atStack;
     })();
@@ -678,6 +660,32 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "par") {
+      // initialize atStack
+      (() => {
+        const atStack = data.stack.at(evalContext.index);
+        if (!atStack) {
+          const lastEvent = innerstate.state?.[1] || null;
+          // TODO: maybe support parallel at the beginning?
+          // but I don't think that makes sense
+          if (lastEvent === null) {
+            throw new Error(
+              "impossible right now. parallel should have been preceeded with a single event. this should have been prevented at the CCode building and validating"
+            );
+          }
+          const newAtStack: SParallel<CType> = {
+            t: "par",
+            instances: [],
+            lastEvent,
+            nextEvalIndex: evalContext.index + code.pairOffsetIndex + 1,
+          };
+          data.stack[evalContext.index] = newAtStack;
+          return;
+        }
+        if (atStack?.t !== "par") {
+          throw new Error("stack type not par");
+        }
+      })();
+
       readInnerParallelProcessInstances(evalContext, code);
 
       // recursive autoEvaluate on "par" next
@@ -1127,10 +1135,10 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const state = (): WFMachineState<CType> => {
     const evalContext = { index: data.evalIndex };
-    const atStack = getSMatchAtIndex(evalContext.index);
 
-    if (atStack) {
-      const state = atStack.inner.state();
+    const matchAtStack = getSMatchAtIndex(evalContext.index);
+    if (matchAtStack) {
+      const state = matchAtStack.inner.state();
       if (state.state) {
         return state;
       }
