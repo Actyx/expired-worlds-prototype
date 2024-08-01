@@ -27,7 +27,7 @@ To facilitate the workflow language, Expired World Machines has a sub-VM that re
 The multiverse record makes it possible for the Expired World Machines to spin VMs up to a freely defined point in the multiverse,
 sometimes involving multiple VMs.
 
-For example: 
+For example:
 A compensation is calculated by spinning two machines by piping events from different points in time.
 The difference of "compensateable list" between the two points in time become the compensation needed by the actor.
 
@@ -38,6 +38,7 @@ The difference of "compensateable list" between the two points in time become th
 I just realized this.
 Predecessor tagging is created at publish time and is not regulated by Actyx's lamport timestamp. As a consequence, any code branches (e.g PARALLEL, TIMEOUT) can create a branch in the timeline too. For example:
 the code below with 1 M and 3 Ts
+
 ```
 request @ M
 PARALLEL {
@@ -48,28 +49,28 @@ PARALLEL {
 Can produce varying predecessor arrows
 
 ```
-     Request @ M1        Request @ M1 
-         │                   │        
-    ┌────┴─────┐             │        
-    ▼          ▼             ▼        
-Bid @ T1    Bid @ T3     Bid @ T1     
-    │                        │        
-    ▼                        ▼        
-Bid @ T2                 Bid @ T2     
-                             │        
-                             ▼        
-                         Bid @ T3     
+     Request @ M1        Request @ M1
+         │                   │
+    ┌────┴─────┐             │
+    ▼          ▼             ▼
+Bid @ T1    Bid @ T3     Bid @ T1
+    │                        │
+    ▼                        ▼
+Bid @ T2                 Bid @ T2
+                             │
+                             ▼
+                         Bid @ T3
 ```
 
 The entirety of the machine should be able to process not a linear log but a tree in case of parallels and regulate the predecessor arrows so that in the case of parallel, this should be constructed instead.
 
 ```
-         Request @ M1         
-               │              
-    ┌──────────┼─────────┐    
-    │          │         │    
-    ▼          ▼         ▼    
- Bid @ T1  Bid @ T2  Bid @ T3 
+         Request @ M1
+               │
+    ┌──────────┼─────────┐
+    │          │         │
+    ▼          ▼         ▼
+ Bid @ T1  Bid @ T2  Bid @ T3
 ```
 
 ## Event Marking the Closing of Parallel
@@ -85,3 +86,23 @@ Instead the closing event must follow the predecessor just like the other branch
 
 A parallel is interpreted as a rich state triggered by a particular event predecessor that allows the machine to peers into multiple realities it produces, but the event itself is still a part of the main branch which the multiple realities are perceived as to collapse into.
 
+## [2024-08-01] Divergence at the beginning?
+
+Every workflow instance needs an ID. This ID will also become the ID of the subscription as well.
+
+Assigning the ID of the first event's ID as the instance's ID makes things easy: e.g. we can generate a query code based on the workflow definition alone.
+
+The consequence is: there can be no divergence in the beginning, despite the multiverse tree's support for multiple roots.
+
+## Some Idea: Canon Override
+
+Since we now have the distinction between meta/marker events and business events, this idea of canon override might work.
+The core of this idea is that there might be a reason a swarm want to decide that a particular timeline might be the timeline it wants to follow despite of the native ordering rule of Actyx, the EventKey ordering.
+
+For example, a partition happens, creating two groups, A and B. B has progressed far and done a lot of compensateable tasks. But because Actyx's event ordering mechanism prioritize an event with a smaller stream key when the timestamp is the same, A might be picked over B, which causes B's initiated timeline to be expired; and as the consequence, B must run a lot of compensations.
+
+Canon override allows the swarm to pre-assign a "canon-dictator" before possible
+points of divergence (e.g. PARALLEL, TIMEOUT, RETRY-FAIL) and let this
+"canon-dictator" dictates a canon timeline when the business needs it.
+
+![mechanics of canon-override](ideas-assets\canon-override.png)
