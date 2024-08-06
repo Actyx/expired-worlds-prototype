@@ -10,7 +10,8 @@ export type MakeCType<CType extends CTypeProto> = CType;
  */
 export type WFBusinessOrMarker<CType extends CTypeProto> =
   | WFBusiness<CType>
-  | WFMarker;
+  | WFCanonMarker<CType>
+  | WFCompensationMarker;
 
 /**
  * Events emitted by the actors explaining the interactions and state of the workflow
@@ -42,7 +43,37 @@ export namespace NestedCodeIndexAddress {
  * Events emitted by the intermediate machine to take note of the meta-state of the actor.
  * e.g. in a multiverse, in which universe the actor is in
  */
-export type WFMarker = WFMarkerCompensationNeeded | WFMarkerCompensationDone;
+export type WFCompensationMarker =
+  | WFMarkerCompensationNeeded
+  | WFMarkerCompensationDone;
+
+export type WFCanonMarker<CType extends CTypeProto> =
+  | WFMarkerCanonReq<CType>
+  | WFMarkerCanonDecide<CType>;
+
+/**
+ * Canonization request is created by the emitter of the last event automatically.
+ */
+export type WFMarkerCanonReq<CType extends CTypeProto> = {
+  readonly ax: InternalTag.StringOf<typeof InternalTag.CanonReq>;
+  readonly issuer: string;
+  readonly name: CType["ev"];
+  // readonly codeIndex: NestedCodeIndexAddress.Type;
+  readonly timelineOf: string;
+};
+
+export type WFMarkerCanonDecide<CType extends CTypeProto> = {
+  readonly ax: InternalTag.StringOf<typeof InternalTag.CanonDecide>;
+  readonly issuer: string;
+  readonly name: CType["ev"];
+  // readonly codeIndex: NestedCodeIndexAddress.Type;
+  readonly timelineOf: string;
+  /**
+   * When `true`, the timeline pointed by `timelineOf` is canon, and vice versa.
+   */
+  readonly isCanon: boolean;
+};
+
 export type WFMarkerCompensationNeeded = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CompensationNeeded>;
   readonly actor: string;
@@ -61,6 +92,7 @@ export type WFMarkerCompensationNeeded = {
    */
   readonly codeIndex: NestedCodeIndexAddress.Type;
 };
+
 export type WFMarkerCompensationDone = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CompensationDone>;
   readonly actor: string;
@@ -77,7 +109,20 @@ export type WFMarkerCompensationDone = {
 export type ActyxWFBusiness<CType extends CTypeProto> = ActyxEvent<
   WFBusiness<CType>
 >;
-export type ActyxWFMarker = ActyxEvent<WFMarker>;
+export type ActyxWFCompensationMarker = ActyxEvent<WFCompensationMarker>;
+
+export type ActyxWFCanonReq<CType extends CTypeProto> = ActyxEvent<
+  WFMarkerCanonReq<CType>
+>;
+
+export type ActyxWFCanonDecide<CType extends CTypeProto> = ActyxEvent<
+  WFMarkerCanonDecide<CType>
+>;
+
+export type ActyxWFCanonMarker<CType extends CTypeProto> =
+  | ActyxWFCanonReq<CType>
+  | ActyxWFCanonDecide<CType>;
+
 export type ActyxWFBusinessOrMarker<CType extends CTypeProto> = ActyxEvent<
   WFBusinessOrMarker<CType>
 >;
@@ -115,19 +160,58 @@ export const isWFEvent = <CType extends CTypeProto>(
   x: WFBusinessOrMarker<CType>
 ): x is WFBusiness<CType> => "t" in x;
 
-export const isWFDirective = <CType extends CTypeProto>(
+export const isWFCompensationMarker = <CType extends CTypeProto>(
   x: WFBusinessOrMarker<CType>
-): x is WFMarker => "ax" in x;
+): x is WFCompensationMarker =>
+  "ax" in x &&
+  (InternalTag.CompensationNeeded.is(x.ax) ||
+    InternalTag.CompensationDone.is(x.ax));
 
-export const extractWFEvents = <CType extends CTypeProto>(
+export const isWFCanonDecideMarker = <CType extends CTypeProto>(
+  x: WFBusinessOrMarker<CType>
+): x is WFMarkerCanonDecide<CType> =>
+  "ax" in x && InternalTag.CanonDecide.is(x.ax);
+
+export const isWFCanonReqMarker = <CType extends CTypeProto>(
+  x: WFBusinessOrMarker<CType>
+): x is WFMarkerCanonReq<CType> => "ax" in x && InternalTag.CanonReq.is(x.ax);
+
+const genExtractWithPayloadCondition = <
+  CType extends CTypeProto,
+  T extends WFBusinessOrMarker<CType>
+>(
+  condition: (x: WFBusinessOrMarker<CType>) => x is T
+) => {
+  return (evs: ActyxWFBusinessOrMarker<CType>[]): ActyxEvent<T>[] =>
+    evs.filter((ev): ev is ActyxEvent<T> => condition(ev.payload));
+};
+
+export const extractWFBusinessEvents = <CType extends CTypeProto>(
   evs: ActyxWFBusinessOrMarker<CType>[]
 ): ActyxWFBusiness<CType>[] =>
   evs.filter((ev): ev is ActyxWFBusiness<CType> => isWFEvent(ev.payload));
 
-export const extractWFDirective = <CType extends CTypeProto>(
+export const extractWFCompensationMarker = <CType extends CTypeProto>(
   evs: ActyxWFBusinessOrMarker<CType>[]
-): ActyxWFMarker[] =>
-  evs.filter((ev): ev is ActyxWFMarker => isWFDirective(ev.payload));
+): ActyxWFCompensationMarker[] =>
+  evs.filter((ev): ev is ActyxWFCompensationMarker =>
+    isWFCompensationMarker(ev.payload)
+  );
+
+export const extractWFCanonMarker = <CType extends CTypeProto>(
+  evs: ActyxWFBusinessOrMarker<CType>[]
+): ActyxWFCanonMarker<CType>[] =>
+  evs.filter(
+    (ev): ev is ActyxWFCanonMarker<CType> =>
+      isWFCanonDecideMarker(ev.payload) || isWFCanonReqMarker(ev.payload)
+  );
+
+export const extractWFCanonDecideMarker = genExtractWithPayloadCondition(
+  isWFCanonDecideMarker
+);
+
+export const extractWFCanonReqMarker =
+  genExtractWithPayloadCondition(isWFCanonReqMarker);
 
 export namespace InternalTag {
   /**
@@ -174,4 +258,10 @@ export namespace InternalTag {
    * For marking that an actor doesn't need to do compensation anymore
    */
   export const CompensationDone = factory("ax:wf:compensation:done:");
+
+  /**
+   * For marking that an event is canon.
+   */
+  export const CanonDecide = factory("ax:wf:canon:decide:");
+  export const CanonReq = factory("ax:wf:canon:req:");
 }

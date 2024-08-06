@@ -1,4 +1,14 @@
-import { ActyxWFBusiness, CTypeProto, InternalTag } from "./consts.js";
+import {
+  ActyxWFBusiness,
+  ActyxWFCanonDecide,
+  ActyxWFCanonMarker,
+  ActyxWFCanonReq,
+  CTypeProto,
+  extractWFCanonDecideMarker,
+  extractWFCanonReqMarker,
+  InternalTag,
+  sortByEventKey,
+} from "./consts.js";
 
 type EventId = string;
 
@@ -71,6 +81,38 @@ export namespace MultiverseTree {
       isRoot: (ev) => predecessorSetOf(ev.meta.eventId).size === 0,
     };
 
+    return self;
+  };
+}
+
+export namespace CanonizeStore {
+  export type Type<CType extends CTypeProto> = {
+    register: (input: ActyxWFCanonMarker<CType>) => void;
+    getRequestsForName: (name: string) => ActyxWFCanonReq<CType>[];
+    getDecisionsForName: (name: string) => ActyxWFCanonDecide<CType>[];
+    /**
+     * Sorted from the most present
+     */
+    listDecisionsFromLatest: () => ActyxWFCanonDecide<CType>[];
+  };
+
+  // TODO optimize API design
+  export const make = <CType extends CTypeProto>(): Type<CType> => {
+    const data: ActyxWFCanonMarker<CType>[] = [];
+
+    const self: Type<CType> = {
+      register: (input) => {
+        if (!data.find((x) => x.meta.eventId === input.meta.eventId)) {
+          data.push(input);
+        }
+      },
+      listDecisionsFromLatest: () =>
+        sortByEventKey(extractWFCanonDecideMarker(data)).reverse(),
+      getRequestsForName: (name) =>
+        extractWFCanonReqMarker(data).filter((x) => x.payload.name === name),
+      getDecisionsForName: (name) =>
+        extractWFCanonDecideMarker(data).filter((x) => x.payload.name === name),
+    };
     return self;
   };
 }

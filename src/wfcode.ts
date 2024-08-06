@@ -52,6 +52,7 @@ import { Enum, WrapType } from "./utils.js";
  * CItem is each "line" of the byte code
  */
 export type CItem<CType extends CTypeProto> =
+  | CCanonize
   | CAnti
   | CEvent<CType>
   | CRetry
@@ -73,7 +74,7 @@ type CAnti =
   | CAntiMatchCase
   | CAntiChoice;
 
-export const Unique = WrapType.blueprint("Unique").build();
+export const Unique = WrapType.blueprint("Unique").refine<string>().build();
 export type Unique = WrapType.TypeOf<typeof Unique>;
 export const Role = WrapType.blueprint("Role");
 export type Role<Ctype extends CTypeProto> = WrapType.TypeOf<
@@ -84,6 +85,11 @@ export type Role<Ctype extends CTypeProto> = WrapType.TypeOf<
  * An actor is either a Unique or a Role.
  */
 export type Actor<CType extends CTypeProto> = Unique | Role<CType>;
+
+export type CCanonize = {
+  t: "canonize";
+  actor: Unique;
+};
 
 export type CEventBinding = { var: string; index: string };
 export type CEvent<CType extends CTypeProto> = {
@@ -380,11 +386,27 @@ export const validate = <CType extends CTypeProto>(
     .concat(validateBindings(workflow))
     .concat(validateCompensateNotFirstEvent(workflow))
     .concat(validateFirstItemIsEvent(workflow))
-    .concat(validateCompensationFirstEvent(workflow));
+    .concat(validateCompensationFirstEvent(workflow))
+    .concat(validateCanonize(workflow));
 
   if (errors.length > 0) {
     throw new Error(errors.map((x) => `- ${x.trim()}`).join("\n"));
   }
+};
+
+/**
+ * A canonize's actor must be a unique which has been bound before the last
+ * point (or any point maybe) that allows branching (timeout, event.fail /
+ * event.return, parallel)
+ *
+ * Canonize cannot be inside a loop too since each canonization must only happen
+ * once per workflow.
+ */
+export const validateCanonize = <CType extends CTypeProto>(
+  workflow: WFWorkflow<CType>
+) => {
+  // TODO: implement
+  return [];
 };
 
 /**

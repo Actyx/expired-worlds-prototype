@@ -8,7 +8,7 @@ import {
   Tags,
 } from "@actyx/sdk";
 import * as Reality from "./multiverse.js";
-import { WFMachine } from "./wfmachine.js";
+import { SwarmData, WFMachine } from "./wfmachine.js";
 export { Reality };
 import { Node } from "./ax-mock/index.js";
 import {
@@ -16,13 +16,14 @@ import {
   CTypeProto,
   InternalTag,
   WFBusinessOrMarker,
-  extractWFDirective,
-  extractWFEvents,
-  WFMarker,
+  extractWFCompensationMarker,
+  extractWFBusinessEvents,
+  WFCompensationMarker,
   WFMarkerCompensationNeeded,
   WFMarkerCompensationDone,
   ActyxWFBusiness,
   NestedCodeIndexAddress,
+  extractWFCanonMarker,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
@@ -47,9 +48,9 @@ type DataModes<CType extends CTypeProto> = {
   wfMachine: WFMachine<CType>;
 } & (
   | { t: "normal" }
-  | { t: "building-compensations" }
+  | { t: "catching-up" }
   | {
-      t: "compensating";
+      t: "off-canon";
       canonWFMachine: WFMachine<CType>;
       compensationInfo: WFMarkerCompensationNeeded;
     }
@@ -85,7 +86,7 @@ export const run = <CType extends CTypeProto>(
    */
   const commands = () => {
     const data = machineCombinator.internal();
-    if (data.t === "building-compensations") {
+    if (data.t === "catching-up") {
       return [];
     }
 
@@ -128,7 +129,7 @@ export const run = <CType extends CTypeProto>(
         },
       }));
 
-    if (data.t === "compensating") {
+    if (data.t === "off-canon") {
       return commands.filter((x) => x.info.reason.has("compensation"));
     }
 
@@ -195,17 +196,22 @@ export namespace MachineCombinator {
   ) => {
     const logger = makeLogger(`mcomb:${params.self.id}`);
     const multiverseTree = Reality.MultiverseTree.make<CType>();
+    const canonizeStore = Reality.CanonizeStore.make<CType>();
+    const swarmData: SwarmData<CType> = {
+      multiverseTree,
+      canonizeStore,
+    };
     const compensationMap = CompensationMap.make();
-    const wfMachine = WFMachine(workflow, multiverseTree);
+    const wfMachine = WFMachine(workflow, swarmData);
     wfMachine.logger.sub(logger.log);
 
     let data: DataModes<CType> = {
-      t: "building-compensations",
+      t: "catching-up",
       wfMachine,
     };
 
     const currentCompensation = () =>
-      data.t === "compensating" ? data.compensationInfo : null;
+      data.t === "off-canon" ? data.compensationInfo : null;
 
     /**
      * There can be discrepancies between the compensations noted in the
@@ -234,7 +240,7 @@ export namespace MachineCombinator {
       // Do a comparison between remembered compensations and the actually needed compensations
       const actualCompensations = calculateCompensations(
         workflow,
-        multiverseTree,
+        swarmData,
         fromlastEvent,
         toLastEvent,
         logger
@@ -274,7 +280,7 @@ export namespace MachineCombinator {
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
       // TODO: think about compensation events tag
-      const canonWFMachine = WFMachine(workflow, multiverseTree);
+      const canonWFMachine = WFMachine(workflow, swarmData);
       canonWFMachine.logger.sub(logger.log);
       canonWFMachine.resetAndAdvanceToMostCanon();
 
@@ -300,7 +306,7 @@ export namespace MachineCombinator {
             compensationComparison.matchingCompensation.lastMachineState;
           lastMachineState.logger.sub(logger.log);
           data = {
-            t: "compensating",
+            t: "off-canon",
             wfMachine: lastMachineState,
             canonWFMachine: canonWFMachine,
             compensationInfo: rememberedCompensation.directive,
@@ -341,20 +347,23 @@ export namespace MachineCombinator {
       last: () => data.wfMachine.latestStateEvent(),
       setToBuildingCompensation: () => {
         data = {
-          t: "building-compensations",
+          t: "catching-up",
           wfMachine: data.wfMachine,
         };
       },
       pipe: (e: EventsMsg<WFBusinessOrMarker<CType>>) => {
         // populate multiverse and compensation map
-        extractWFEvents(e.events).map(multiverseTree.register);
-        extractWFDirective(e.events).map((ev) => {
+        extractWFBusinessEvents(e.events).map(multiverseTree.register);
+        extractWFCompensationMarker(e.events).map((ev) => {
           compensationMap.register(ev.payload);
         });
 
+        const canonMarkers = extractWFCanonMarker(e.events);
+        canonMarkers.map(swarmData.canonizeStore.register);
+
         const currentData = data;
-        if (currentData.t === "building-compensations" && e.caughtUp) {
-          const canonWFMachine = WFMachine(workflow, multiverseTree);
+        if (currentData.t === "catching-up" && e.caughtUp) {
+          const canonWFMachine = WFMachine(workflow, swarmData);
           canonWFMachine.logger.sub(logger.log);
           canonWFMachine.advanceToMostCanon();
 
@@ -368,7 +377,7 @@ export namespace MachineCombinator {
             canonLastEvent &&
             calculateCompensations(
               workflow,
-              multiverseTree,
+              swarmData,
               lastEvent,
               canonLastEvent,
               logger
@@ -404,7 +413,7 @@ export namespace MachineCombinator {
           return;
         }
 
-        if (currentData.t === "compensating") {
+        if (currentData.t === "off-canon") {
           currentData.wfMachine.advanceToMostCanon();
           currentData.canonWFMachine.advanceToMostCanon();
 
@@ -453,7 +462,7 @@ export namespace CompensationMap {
 
     const access = <T>(
       entry: Map<Actor, Map<From, Map<To, T>>>,
-      { actor, fromTimelineOf: from }: WFMarker
+      { actor, fromTimelineOf: from }: WFCompensationMarker
     ) => {
       const fromMap: Exclude<
         ReturnType<(typeof entry)["get"]>,
@@ -471,7 +480,7 @@ export namespace CompensationMap {
     };
 
     return {
-      hasRegistered: (compensation: WFMarker): boolean => {
+      hasRegistered: (compensation: WFCompensationMarker): boolean => {
         if (InternalTag.CompensationNeeded.is(compensation.ax)) {
           const needed = compensation as WFMarkerCompensationNeeded;
           const set = access(data.positive, compensation);
@@ -484,7 +493,7 @@ export namespace CompensationMap {
         }
         return false;
       },
-      register: (compensation: WFMarker) => {
+      register: (compensation: WFCompensationMarker) => {
         // TODO: runtime validation
         if (InternalTag.CompensationNeeded.is(compensation.ax)) {
           const needed = compensation as WFMarkerCompensationNeeded;
@@ -533,20 +542,21 @@ export namespace CompensationMap {
  */
 const calculateCompensations = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>,
-  multiverse: Reality.MultiverseTree.Type<CType>,
+  swarmData: SwarmData<CType>,
   fromPoint: ActyxWFBusiness<CType>,
   toPoint: ActyxWFBusiness<CType>,
   logger: Logger
 ) => {
+  const { multiverseTree } = swarmData;
   // TODO: this is wrong. to do calculate compensations, one must also calculate
-  const fromChain = createLinearChain(multiverse, fromPoint);
-  const toChain = createLinearChain(multiverse, toPoint);
+  const fromChain = createLinearChain(multiverseTree, fromPoint);
+  const toChain = createLinearChain(multiverseTree, toPoint);
   const divergence = divergencePoint(fromChain, toChain);
 
   // fromChain is sub-array of toChain
   if (divergence === fromChain.length - 1) return null;
 
-  const simulation = WFMachine(workflow, multiverse);
+  const simulation = WFMachine(workflow, swarmData);
   simulation.logger.sub(logger.log);
 
   // -1 means not found, similar to .findIndex array returns

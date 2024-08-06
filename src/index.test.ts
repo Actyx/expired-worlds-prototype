@@ -239,8 +239,8 @@ describe("partitions and compensations", () => {
 
     await network.partitions.clear();
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -283,8 +283,8 @@ describe("partitions and compensations", () => {
 
     await network.partitions.clear();
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -297,8 +297,8 @@ describe("partitions and compensations", () => {
       [t2, src, t1, manager, dst, t3].map((x) => x.restartMachine())
     );
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -347,9 +347,9 @@ describe("partitions and compensations", () => {
 
     await network.partitions.clear();
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
-    expect(dst.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -357,9 +357,9 @@ describe("partitions and compensations", () => {
 
     await findAndRunCommand(t2, Ev.withdrawn);
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
-    expect(dst.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -367,7 +367,7 @@ describe("partitions and compensations", () => {
 
     // docking
     await findAndRunCommand(t2, Ev.reqStorage);
-    await findAndRunCommand(src, Ev.offerStorage);
+    await findAndRunCommand(src, Ev.offerStorage, { storage: src.identity.id });
     await findAndRunCommand(t2, Ev.atWarehouse);
 
     await findAndRunCommand(t2, Ev.reqEnter);
@@ -433,8 +433,8 @@ describe("partitions and compensations", () => {
     await network.partitions.group([t2.node]); // isolate t2
 
     // src and dst now realize they are in a compensation group
-    expect(src.machine.mcomb().t).toBe("compensating");
-    expect(dst.machine.mcomb().t).toBe("compensating");
+    expect(src.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("off-canon");
     // but t2 hasn't yet since it is still partitioned
     expect(t2.machine.mcomb().t).toBe("normal");
 
@@ -444,9 +444,9 @@ describe("partitions and compensations", () => {
 
     await network.partitions.clear();
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
-    expect(dst.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -454,9 +454,9 @@ describe("partitions and compensations", () => {
 
     await findAndRunCommand(t2, Ev.withdrawn);
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
-    expect(dst.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -464,7 +464,7 @@ describe("partitions and compensations", () => {
 
     // docking
     await findAndRunCommand(t2, Ev.reqStorage);
-    await findAndRunCommand(src, Ev.offerStorage);
+    await findAndRunCommand(src, Ev.offerStorage, { storage: src.identity.id });
     await findAndRunCommand(t2, Ev.atWarehouse);
 
     await findAndRunCommand(t2, Ev.reqEnter);
@@ -526,8 +526,8 @@ describe("partitions and compensations", () => {
       )
     );
 
-    expect(t2.machine.mcomb().t).toBe("compensating");
-    expect(src.machine.mcomb().t).toBe("compensating");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(src.machine.mcomb().t).toBe("off-canon");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -591,8 +591,8 @@ describe("partitions and compensations", () => {
     await Promise.all([t1, t2, t3].map((x) => x.restartMachine()));
 
     expect(t1.machine.mcomb().t === "normal");
-    expect(t2.machine.mcomb().t === "compensating");
-    expect(t3.machine.mcomb().t === "compensating");
+    expect(t2.machine.mcomb().t === "off-canon");
+    expect(t3.machine.mcomb().t === "off-canon");
 
     await findAndRunCommand(t3, Evs.L2Compensate);
     await findAndRunCommand(t2, Evs.L1Compensate);
