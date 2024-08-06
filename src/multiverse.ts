@@ -85,9 +85,10 @@ export namespace MultiverseTree {
   };
 }
 
-export namespace CanonizeStore {
+export namespace CanonizationStore {
   export type Type<CType extends CTypeProto> = {
     register: (input: ActyxWFCanonMarker<CType>) => void;
+    getOpenRequests: () => ActyxWFCanonReq<CType>[];
     getRequestsForName: (name: string) => ActyxWFCanonReq<CType>[];
     getDecisionsForName: (name: string) => ActyxWFCanonDecide<CType>[];
     /**
@@ -110,6 +111,14 @@ export namespace CanonizeStore {
         sortByEventKey(extractWFCanonDecideMarker(data)).reverse(),
       getRequestsForName: (name) =>
         extractWFCanonReqMarker(data).filter((x) => x.payload.name === name),
+      getOpenRequests: () => {
+        const resolvedNames = new Set(
+          extractWFCanonDecideMarker(data).map((x) => x.payload.name)
+        );
+        return extractWFCanonReqMarker(data).filter(
+          (req) => !resolvedNames.has(req.payload.name)
+        );
+      },
       getDecisionsForName: (name) =>
         extractWFCanonDecideMarker(data).filter((x) => x.payload.name === name),
     };

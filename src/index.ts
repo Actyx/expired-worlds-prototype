@@ -24,6 +24,7 @@ import {
   ActyxWFBusiness,
   NestedCodeIndexAddress,
   extractWFCanonMarker,
+  ActyxWFCanonReq,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
@@ -72,6 +73,7 @@ export const run = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
 ) => {
   const machineCombinator = MachineCombinator.make(params, node, workflow);
+  const { canonizationBarrier, multiverseTree } = machineCombinator;
 
   const axSub = perpetualSubscription(node, async (e) => {
     if (e.type === MsgType.timetravel) {
@@ -130,6 +132,15 @@ export const run = <CType extends CTypeProto>(
       }));
 
     if (data.t === "off-canon") {
+      const compensateableIsInvolvedInRequestedCanonization =
+        canonizationBarrier.active.involvedEventIds.has(
+          data.compensationInfo.fromTimelineOf
+        );
+
+      if (compensateableIsInvolvedInRequestedCanonization) {
+        return [];
+      }
+
       return commands.filter((x) => x.info.reason.has("compensation"));
     }
 
@@ -139,7 +150,7 @@ export const run = <CType extends CTypeProto>(
   return {
     commands,
     mcomb: () => machineCombinator.internal(),
-    multiverseTree: () => machineCombinator.multiverseTree,
+    multiverseTree: () => multiverseTree,
     wfmachine: () => machineCombinator.wfmachine(),
     state: () => machineCombinator.wfmachine().state(),
     logger: machineCombinator.logger,
@@ -196,15 +207,29 @@ export namespace MachineCombinator {
   ) => {
     const logger = makeLogger(`mcomb:${params.self.id}`);
     const multiverseTree = Reality.MultiverseTree.make<CType>();
-    const canonizeStore = Reality.CanonizeStore.make<CType>();
+    const canonizationStore = Reality.CanonizationStore.make<CType>();
     const swarmData: SwarmData<CType> = {
       multiverseTree,
-      canonizeStore,
+      canonizationStore: canonizationStore,
     };
     const compensationMap = CompensationMap.make();
     const wfMachine = WFMachine(workflow, swarmData);
     wfMachine.logger.sub(logger.log);
 
+    const canonizationBarrier: CanonizationBarrier<CType> = {
+      active: {
+        activeRequests: [],
+        involvedEventIds: new Set(),
+      },
+    };
+
+    const refreshCanonizationbarrier = () =>
+      (canonizationBarrier.active = generateCanonizationBarrier(
+        multiverseTree,
+        canonizationStore
+      ));
+
+    refreshCanonizationbarrier();
     let data: DataModes<CType> = {
       t: "catching-up",
       wfMachine,
@@ -305,6 +330,7 @@ export namespace MachineCombinator {
           const lastMachineState =
             compensationComparison.matchingCompensation.lastMachineState;
           lastMachineState.logger.sub(logger.log);
+
           data = {
             t: "off-canon",
             wfMachine: lastMachineState,
@@ -340,6 +366,7 @@ export namespace MachineCombinator {
     return {
       logger,
       multiverseTree,
+      canonizationBarrier,
       recalc,
       internal: () => data,
       wfmachine: () => data.wfMachine,
@@ -359,7 +386,10 @@ export namespace MachineCombinator {
         });
 
         const canonMarkers = extractWFCanonMarker(e.events);
-        canonMarkers.map(swarmData.canonizeStore.register);
+        canonMarkers.map(swarmData.canonizationStore.register);
+        if (canonMarkers.length > 0) {
+          refreshCanonizationbarrier();
+        }
 
         const currentData = data;
         if (currentData.t === "catching-up" && e.caughtUp) {
@@ -403,8 +433,8 @@ export namespace MachineCombinator {
               }
             );
           }
-          recalc();
 
+          recalc();
           return;
         }
 
@@ -536,6 +566,33 @@ export namespace CompensationMap {
   };
 }
 
+type CanonizationBarrier<CType extends CTypeProto> = {
+  active: {
+    readonly activeRequests: ActyxWFCanonReq<CType>[];
+    /**
+     * List of state's eventId machines SHOULD NOT jump out of due to active canonization request
+     */
+    readonly involvedEventIds: Set<string>;
+  };
+};
+
+// TODO: should be part of CanonizationStore eventually
+const generateCanonizationBarrier = <CType extends CTypeProto>(
+  multiverse: Reality.MultiverseTree.Type<CType>,
+  canonMap: Reality.CanonizationStore.Type<CType>
+): CanonizationBarrier<CType>["active"] => {
+  const activeRequests = canonMap.getOpenRequests();
+  const involvedEventIds = new Set(
+    activeRequests.flatMap((request) => {
+      const point = multiverse.getById(request.payload.timelineOf);
+      if (!point) return [];
+      return createLinearChain(multiverse, point).map((x) => x.meta.eventId);
+    })
+  );
+
+  return { activeRequests, involvedEventIds };
+};
+
 /**
  * Calculate the compensation needed when a machine jumps from a point in the
  * multiverse to the other.
@@ -547,8 +604,9 @@ const calculateCompensations = <CType extends CTypeProto>(
   toPoint: ActyxWFBusiness<CType>,
   logger: Logger
 ) => {
+  // TODO: Assuming `multiverse tree` is secure from malicious actors and is correctly implemented,
+  // faster calculation can be done via workflow code analysis.
   const { multiverseTree } = swarmData;
-  // TODO: this is wrong. to do calculate compensations, one must also calculate
   const fromChain = createLinearChain(multiverseTree, fromPoint);
   const toChain = createLinearChain(multiverseTree, toPoint);
   const divergence = divergencePoint(fromChain, toChain);
