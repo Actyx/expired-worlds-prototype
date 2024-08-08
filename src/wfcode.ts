@@ -189,6 +189,7 @@ export namespace Code {
     match: typeof match<CType>;
     parallel: typeof parallel<CType>;
     timeout: typeof timeout<CType>;
+    canonize: typeof canonize;
 
     Control: typeof Control;
   };
@@ -204,6 +205,8 @@ export namespace Code {
     parallel,
     retry,
     timeout,
+    canonize,
+
     Control,
   });
 
@@ -225,6 +228,11 @@ export namespace Code {
     name: CType["ev"],
     x?: Pick<CEvent<CType>, "bindings" | "control">
   ): CEvent<CType> => ({ t: "event", actor, name, ...(x || {}) });
+
+  const canonize = (actor: Unique): CCanonize => ({
+    t: "canonize",
+    actor,
+  });
 
   const retry = <CType extends CTypeProto>(
     workflow: CItem<CType>[]
@@ -401,12 +409,93 @@ export const validate = <CType extends CTypeProto>(
  *
  * Canonize cannot be inside a loop too since each canonization must only happen
  * once per workflow.
+ *
+ * Valid actor bindings and branching events are those outside of WITH-BLOCK
  */
 export const validateCanonize = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>
 ) => {
-  // TODO: implement
-  return [];
+  const errors = [] as string[];
+  const par = CParallelIndexer.make(workflow.code);
+  const timeouts = CTimeoutIndexer.make(workflow.code);
+  const retries = CRetryIndexer.make(workflow.code);
+  const compensations = CCompensationIndexer.make(workflow.code);
+  const indexedCodes = workflow.code.map((x, i) => [i, x] as const);
+  const canonizeCodes = indexedCodes.filter(
+    (pair): pair is [number, CCanonize] => pair[1]?.t === "canonize"
+  );
+
+  // loop check
+  canonizeCodes
+    .map((pair) => ({
+      index: pair[0],
+      matches: retries.getListMatching(pair[0]),
+    }))
+    .filter((item) => !compensations.isInsideWithBlock(item.index))
+    .filter((item) => item.matches.length > 0)
+    .forEach((item) =>
+      errors.push(
+        `canonize at ${
+          item.index
+        } is inside a retry block starting at ${item.matches
+          .map((match) => match.start)
+          .join(", ")}`
+      )
+    );
+
+  canonizeCodes.forEach((canonizePair) => {
+    const actorDesignation = canonizePair[1].actor.get();
+
+    const actorBinding = indexedCodes
+      .filter(([index]) => !compensations.isInsideWithBlock(index))
+      .reverse()
+      .find(
+        ([index, code]) =>
+          index < canonizePair[0] &&
+          code.t === "event" &&
+          code.bindings?.find((x) => x.var === actorDesignation)
+      );
+
+    if (!actorBinding) {
+      errors.push(
+        `canonizer binding not found for unique actor ${actorDesignation}`
+      );
+      return;
+    }
+
+    const [bindingIndex] = actorBinding;
+
+    par.parallelStarts
+      .filter(({ line }) => line < bindingIndex)
+      .forEach(({ line }) => {
+        errors.push(
+          `canonizer binding for ${actorDesignation} cannot be assigned after parallel at line ${line}`
+        );
+      });
+
+    timeouts.getListMatching(bindingIndex).forEach((match) => {
+      errors.push(
+        `canonizer binding for ${actorDesignation} cannot be assigned inside a timeout starting at ${match.start}`
+      );
+    });
+
+    indexedCodes
+      .filter(([index]) => !compensations.isInsideWithBlock(index))
+      .filter(([index]) => index < bindingIndex)
+      .forEach(([_index, code]) => {
+        if (
+          code.t === "event" &&
+          (code.control === Code.Control.fail ||
+            code.control === Code.Control.return)
+        ) {
+          errors.push(
+            `canonizer binding for ${actorDesignation} cannot be assigned after failing and returning event`
+          );
+        }
+      });
+  });
+
+  return errors;
 };
 
 /**
@@ -529,6 +618,7 @@ export namespace CParallelIndexer {
     );
 
     return {
+      parallelStarts: parStarts,
       isParallelStart: (line: number) => parNexts.has(line),
     };
   };
@@ -617,6 +707,7 @@ export namespace CRetryIndexer {
     );
 
     return {
+      list,
       getListMatching: (x: number) =>
         list.filter((entry) => x > entry.start && x < entry.end),
     };

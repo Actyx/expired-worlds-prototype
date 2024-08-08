@@ -24,7 +24,10 @@ import {
   ActyxWFBusiness,
   NestedCodeIndexAddress,
   extractWFCanonMarker,
-  ActyxWFCanonReq,
+  ActyxWFCanonAdvrt,
+  WFMarkerCanonAdvrt,
+  WFMarkerCanonDecide,
+  extractWFCanonDecideMarker,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
@@ -127,11 +130,19 @@ export const run = <CType extends CTypeProto>(
             );
           }
 
+          tags = tags.and(
+            Tag<WFBusinessOrMarker<CType>>(
+              InternalTag.ActorWriter.write(params.self.id)
+            )
+          );
+
           node.api.publish(tags.applyTyped({ t: x.name, payload }));
         },
       }));
 
     if (data.t === "off-canon") {
+      // TODO: examine whether the entire swarm needs to be paused until a
+      // canonization is decided
       const compensateableIsInvolvedInRequestedCanonization =
         canonizationBarrier.active.involvedEventIds.has(
           data.compensationInfo.fromTimelineOf
@@ -147,8 +158,25 @@ export const run = <CType extends CTypeProto>(
     return commands;
   };
 
+  const canonizations = () =>
+    machineCombinator.canonizationBarrier.active.activeAdvertisements
+      .filter((ad) => ad.payload.canonizer === params.self.id)
+      .map((ad) => ({
+        ad,
+        publish: () =>
+          node.api.publish(
+            params.tags.apply({
+              ax: InternalTag.CanonDecide.write(""),
+              name: ad.payload.name,
+              timelineOf: ad.payload.timelineOf,
+              canonizer: params.self.id,
+            } satisfies WFMarkerCanonDecide<CType>)
+          ),
+      }));
+
   return {
     commands,
+    canonizations,
     mcomb: () => machineCombinator.internal(),
     multiverseTree: () => multiverseTree,
     wfmachine: () => machineCombinator.wfmachine(),
@@ -205,111 +233,98 @@ export namespace MachineCombinator {
     node: Node.Type<WFBusinessOrMarker<CType>>,
     workflow: WFWorkflow<CType>
   ) => {
+    type DelayedPublish = (
+      ...args: Parameters<typeof node.api.publish>
+    ) => unknown;
+
     const logger = makeLogger(`mcomb:${params.self.id}`);
     const multiverseTree = Reality.MultiverseTree.make<CType>();
     const canonizationStore = Reality.CanonizationStore.make<CType>();
-    const swarmData: SwarmData<CType> = {
+    const swarmStore: SwarmData<CType> = {
       multiverseTree,
       canonizationStore: canonizationStore,
     };
     const compensationMap = CompensationMap.make();
-    const wfMachine = WFMachine(workflow, swarmData);
+    const wfMachine = WFMachine(workflow, swarmStore);
     wfMachine.logger.sub(logger.log);
 
     const canonizationBarrier: CanonizationBarrier<CType> = {
       active: {
-        activeRequests: [],
+        activeAdvertisements: [],
         involvedEventIds: new Set(),
       },
     };
 
-    const refreshCanonizationbarrier = () =>
-      (canonizationBarrier.active = generateCanonizationBarrier(
+    const refreshCanonizationbarrier = () => {
+      canonizationBarrier.active = generateCanonizationBarrier(
         multiverseTree,
         canonizationStore
-      ));
+      );
+    };
 
     refreshCanonizationbarrier();
-    let data: DataModes<CType> = {
-      t: "catching-up",
-      wfMachine,
-    };
+
+    const internal = new Proxy<{ data: DataModes<CType> }>(
+      {
+        data: {
+          t: "catching-up",
+          wfMachine,
+        },
+      },
+      {
+        /* proxy for debugging purpose */
+        set: (...args) => {
+          logger.log("internal.data changed to", JSON.stringify(args[2]));
+          return Reflect.set(...args);
+        },
+      }
+    );
 
     const currentCompensation = () =>
-      data.t === "off-canon" ? data.compensationInfo : null;
-
-    /**
-     * There can be discrepancies between the compensations noted in the
-     * CompensationMap and WFMachine because an actor can stop working at the moment
-     * between 1.) when the compensation is finished and 2.) when the
-     * "CompensationDone" marker is published
-     *
-     * Note: Does this really work to invalidate compensations?
-     */
-    const compareRememberedCompensation = (
-      rememberedCompensation: ReturnType<
-        (typeof compensationMap)["getByActor"]
-      >[any]
-    ) => {
-      const fromlastEvent = multiverseTree.getById(
-        rememberedCompensation.fromTimelineOf
-      );
-      const toLastEvent = multiverseTree.getById(
-        rememberedCompensation.toTimelineOf
-      );
-      // TODO: handle more gracefully
-      if (!fromlastEvent || !toLastEvent) {
-        throw new Error("missing to or from event noted in a compensation");
-      }
-
-      // Do a comparison between remembered compensations and the actually needed compensations
-      const actualCompensations = calculateCompensations(
-        workflow,
-        swarmData,
-        fromlastEvent,
-        toLastEvent,
-        logger
-      );
-
-      const matchingCompensation = (() => {
-        if (!actualCompensations) return null;
-        const matchingCompensation = actualCompensations.compensations.find(
-          (x) =>
-            x.fromTimelineOf === rememberedCompensation.fromTimelineOf &&
-            x.toTimelineOf === rememberedCompensation.toTimelineOf &&
-            NestedCodeIndexAddress.cmp(
-              x.codeIndex,
-              rememberedCompensation.directive.codeIndex
-            ) === Ord.Equal
-        );
-        if (!matchingCompensation) return null;
-
-        return {
-          compensation: matchingCompensation,
-          lastMachineState: actualCompensations.lastMachineState,
-        } as const;
-      })();
-
-      if (!matchingCompensation) return null;
-
-      return {
-        matchingCompensation,
-      };
-    };
+      internal.data.t === "off-canon" ? internal.data.compensationInfo : null;
 
     /**
      * Recalculate supposed actual DataModes for this MachineCombinator.
      */
     // TODO: should compensation happen in timeouts/failures/retries?
-    const recalc = () => {
+    const recalc = (delayedPublish: DelayedPublish) => {
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
       // TODO: think about compensation events tag
-      const canonWFMachine = WFMachine(workflow, swarmData);
-      canonWFMachine.logger.sub(logger.log);
-      canonWFMachine.resetAndAdvanceToMostCanon();
+      const wfMachine = internal.data.wfMachine;
+      wfMachine.advanceToMostCanon();
 
-      const rememberedCompensation = compensationMap
+      const canonWFMachine = WFMachine(workflow, swarmStore);
+      canonWFMachine.logger.sub(logger.log);
+      canonWFMachine.advanceToMostCanon();
+
+      const compensateables = calculateCompensateables(
+        workflow,
+        swarmStore,
+        wfMachine,
+        canonWFMachine,
+        logger
+      );
+
+      // compensateables are registered whenever a wfmachine is off-canon
+      // remember: this compensateables are only list of compensateables that applies to self, not other actor in the swarm.
+      compensateables.forEach(({ fromTimelineOf, toTimelineOf, codeIndex }) => {
+        const directive: WFMarkerCompensationNeeded = {
+          ax: InternalTag.CompensationNeeded.write(""),
+          actor: params.self.id,
+          fromTimelineOf,
+          toTimelineOf,
+          codeIndex,
+        };
+
+        if (!compensationMap.hasRegistered(directive)) {
+          compensationMap.register(directive);
+          delayedPublish(params.tags.apply(directive));
+        }
+      });
+
+      // Now work with remembered compensatebles. We naturally work with the highest codeIndex (the deepest nesting)
+      const allRememberedComps = compensationMap
         .getByActor(params.self.id)
         .sort((a, b) =>
           Ord.toNum(
@@ -318,154 +333,188 @@ export namespace MachineCombinator {
               a.directive.codeIndex
             )
           )
-        )
-        .at(0);
-
-      if (rememberedCompensation) {
-        const compensationComparison = compareRememberedCompensation(
-          rememberedCompensation
         );
 
-        if (compensationComparison) {
-          const lastMachineState =
-            compensationComparison.matchingCompensation.lastMachineState;
-          lastMachineState.logger.sub(logger.log);
+      // compensateable implies the compensation is not yet active; it can be marked as done when canonization happens in the actor's favor
+      // active compensation, however is more complicated. If it is already happening, it must be followed through by the actors until it is done.
+      // resolve dangling compensateables
+      const firstRememberedComps = allRememberedComps
+        .map((comp) => {
+          // remembered compensateable can be invalidated if:
+          // - it is back to canon and it is not active, or
+          // - the compensation is done
+          const compMachine = WFMachine(workflow, swarmStore); // can be optimized further by checking wfmachine's history
+          compMachine.logger.sub(logger.log);
+          compMachine.resetAndAdvanceToEventId(comp.fromTimelineOf);
+          compMachine.advanceToMostCanon();
 
-          data = {
-            t: "off-canon",
-            wfMachine: lastMachineState,
-            canonWFMachine: canonWFMachine,
-            compensationInfo: rememberedCompensation.directive,
-          };
-        } else {
-          // Indication that the compensation is actually done but unmarked:
-          // When WFMachine says that the compensation is done but the compensationMap remembers differently
-          // Mark the compensation as done
-          const directive: WFMarkerCompensationDone = {
-            ax: InternalTag.CompensationDone.write(""),
-            actor: params.self.id,
-            fromTimelineOf: rememberedCompensation.fromTimelineOf,
-            toTimelineOf: rememberedCompensation.toTimelineOf,
-          };
-          // TODO: fix tag
-          node.api.publish(params.tags.apply(directive));
+          // check if compensation is not active and compMachine is canon
+          const compMachineIsCanon =
+            compMachine.latestStateEvent()?.meta.eventId ===
+            canonWFMachine.latestStateEvent()?.meta.eventId;
 
-          data = {
-            t: "normal",
-            wfMachine: canonWFMachine,
+          if (compMachineIsCanon) {
+            const isActive =
+              compMachine
+                .activeCompensation()
+                .find(
+                  (activeComp) =>
+                    activeComp.fromTimelineOf === comp.toTimelineOf
+                ) !== undefined;
+
+            if (!isActive) {
+              const directive: WFMarkerCompensationDone = {
+                ax: InternalTag.CompensationDone.write(""),
+                actor: params.self.id,
+                fromTimelineOf: comp.fromTimelineOf,
+                toTimelineOf: comp.toTimelineOf,
+              };
+              if (!compensationMap.hasRegistered(directive)) {
+                compensationMap.register(directive);
+                delayedPublish(params.tags.apply(directive));
+              }
+
+              return null;
+            }
+          }
+
+          const isDone =
+            compMachine
+              .doneCompensation()
+              .find(
+                (x) =>
+                  NestedCodeIndexAddress.cmp(
+                    x.codeIndex,
+                    comp.directive.codeIndex
+                  ) === Ord.Equal && x.fromTimelineOf === comp.fromTimelineOf
+              ) !== undefined;
+
+          if (isDone) {
+            const directive: WFMarkerCompensationDone = {
+              ax: InternalTag.CompensationDone.write(""),
+              actor: params.self.id,
+              fromTimelineOf: comp.fromTimelineOf,
+              toTimelineOf: comp.toTimelineOf,
+            };
+            if (!compensationMap.hasRegistered(directive)) {
+              compensationMap.register(directive);
+              delayedPublish(params.tags.apply(directive));
+            }
+
+            return null;
+          }
+
+          return {
+            compensateable: comp,
+            compMachine: compMachine,
           };
-        }
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null)
+        .at(0);
+
+      if (firstRememberedComps) {
+        internal.data = {
+          t: "off-canon",
+          wfMachine: firstRememberedComps.compMachine,
+          canonWFMachine: canonWFMachine,
+          compensationInfo: firstRememberedComps.compensateable.directive,
+        };
       } else {
-        data = {
+        internal.data = {
           t: "normal",
           wfMachine: canonWFMachine,
         };
       }
     };
 
+    const emitPendingCanonizationAdvertisements = (
+      delayedPublish: DelayedPublish
+    ) => {
+      const pendingCanonizationAdvrt =
+        internal.data.wfMachine.pendingCanonizationAdvrt();
+      if (!pendingCanonizationAdvrt) return;
+
+      const lastStateIsOwn =
+        internal.data.wfMachine
+          .state()
+          .state?.[1].meta.tags.includes(
+            InternalTag.ActorWriter.write(params.self.id)
+          ) || false;
+
+      if (!lastStateIsOwn) return;
+
+      delayedPublish(
+        params.tags.apply({
+          ...pendingCanonizationAdvrt,
+          advertiser: params.self.id,
+          ax: InternalTag.CanonAdvrt.write(""),
+        } satisfies WFMarkerCanonAdvrt<CType>)
+      );
+    };
+
     return {
       logger,
       multiverseTree,
       canonizationBarrier,
+      canonizationStore,
       recalc,
-      internal: () => data,
-      wfmachine: () => data.wfMachine,
+      internal: () => internal.data,
+      wfmachine: () => internal.data.wfMachine,
       compensation: currentCompensation,
-      last: () => data.wfMachine.latestStateEvent(),
+      last: () => internal.data.wfMachine.latestStateEvent(),
       setToBuildingCompensation: () => {
-        data = {
+        internal.data = {
           t: "catching-up",
-          wfMachine: data.wfMachine,
+          wfMachine: internal.data.wfMachine,
         };
       },
       pipe: (e: EventsMsg<WFBusinessOrMarker<CType>>) => {
         // populate multiverse and compensation map
-        extractWFBusinessEvents(e.events).map(multiverseTree.register);
-        extractWFCompensationMarker(e.events).map((ev) => {
-          compensationMap.register(ev.payload);
-        });
+        const delayedPublishes: Parameters<typeof node.api.publish>[] = [];
+        const delayedPublish: DelayedPublish = (...x) =>
+          delayedPublishes.push(x);
 
+        // categorize events
+        const wfBusinessEvents = extractWFBusinessEvents(e.events);
+        const compsMarker = extractWFCompensationMarker(e.events);
         const canonMarkers = extractWFCanonMarker(e.events);
-        canonMarkers.map(swarmData.canonizationStore.register);
-        if (canonMarkers.length > 0) {
-          refreshCanonizationbarrier();
+        const canonDecisionMarkers = extractWFCanonDecideMarker(canonMarkers);
+
+        // apply to storage
+        wfBusinessEvents.forEach(multiverseTree.register);
+        compsMarker.map((ev) => compensationMap.register(ev.payload));
+        canonMarkers.forEach(swarmStore.canonizationStore.register);
+
+        if (canonMarkers.length > 0) refreshCanonizationbarrier();
+
+        // If a canon decision is triggered, mark as catching-up
+        const needRecalc =
+          canonDecisionMarkers.length > 0 || compsMarker.length > 0;
+
+        if (needRecalc) {
+          internal.data = {
+            t: "catching-up",
+            wfMachine: internal.data.wfMachine,
+          };
         }
 
-        const currentData = data;
-        if (currentData.t === "catching-up" && e.caughtUp) {
-          const canonWFMachine = WFMachine(workflow, swarmData);
-          canonWFMachine.logger.sub(logger.log);
-          canonWFMachine.advanceToMostCanon();
+        const data = internal.data;
+        if ((data.t === "catching-up" && e.caughtUp) || needRecalc) {
+          recalc(delayedPublish);
+        } else if (data.t === "normal") {
+          data.wfMachine.advanceToMostCanon();
+        } else if (data.t === "off-canon") {
+          data.wfMachine.advanceToMostCanon();
+          data.canonWFMachine.advanceToMostCanon();
 
-          // the state before time travel
-          const lastEvent = currentData.wfMachine.latestStateEvent();
-          // the state after time travel
-          const canonLastEvent = canonWFMachine.latestStateEvent();
-
-          const compensations =
-            lastEvent &&
-            canonLastEvent &&
-            calculateCompensations(
-              workflow,
-              swarmData,
-              lastEvent,
-              canonLastEvent,
-              logger
-            )?.compensations;
-
-          if (compensations) {
-            // register compensations to both compensation map and the persistence
-            // layer: ax
-            compensations.forEach(
-              ({ fromTimelineOf, toTimelineOf, codeIndex }) => {
-                const directive: WFMarkerCompensationNeeded = {
-                  ax: InternalTag.CompensationNeeded.write(""),
-                  actor: params.self.id,
-                  fromTimelineOf,
-                  toTimelineOf,
-                  codeIndex,
-                };
-
-                if (!compensationMap.hasRegistered(directive)) {
-                  node.api.publish(params.tags.apply(directive));
-                  compensationMap.register(directive);
-                }
-              }
-            );
-          }
-
-          recalc();
-          return;
-        }
-
-        if (currentData.t === "normal") {
-          currentData.wfMachine.advanceToMostCanon();
-          return;
-        }
-
-        if (currentData.t === "off-canon") {
-          currentData.wfMachine.advanceToMostCanon();
-          currentData.canonWFMachine.advanceToMostCanon();
-
-          // check if compensation still applies
-          // TODO: optimize compensation query
-          const activeCompensationCode = currentData.wfMachine
-            .activeCompensation()
-            .find(
-              (x) =>
-                x.fromTimelineOf ===
-                  currentData.compensationInfo.fromTimelineOf &&
-                NestedCodeIndexAddress.cmp(
-                  x.codeIndex,
-                  currentData.compensationInfo.codeIndex
-                ) === Ord.Equal
-            );
-
-          // compensation is done
-          if (!activeCompensationCode) {
-            recalc();
+          if (data.wfMachine.doneCompensation().length > 0) {
+            recalc(delayedPublish);
           }
         }
+
+        emitPendingCanonizationAdvertisements(delayedPublish);
+
+        delayedPublishes.forEach((x) => node.api.publish(...x));
       },
     };
   };
@@ -515,7 +564,11 @@ export namespace CompensationMap {
           const needed = compensation as WFMarkerCompensationNeeded;
           const set = access(data.positive, compensation);
           const entry = set.get(needed.toTimelineOf);
-          return entry !== undefined && entry?.codeIndex === needed.codeIndex;
+          return (
+            entry !== undefined &&
+            NestedCodeIndexAddress.cmp(entry.codeIndex, needed.codeIndex) ===
+              Ord.Equal
+          );
         } else if (InternalTag.CompensationDone.is(compensation.ax)) {
           const done = compensation as WFMarkerCompensationDone;
           const set = access(data.negative, compensation);
@@ -568,9 +621,9 @@ export namespace CompensationMap {
 
 type CanonizationBarrier<CType extends CTypeProto> = {
   active: {
-    readonly activeRequests: ActyxWFCanonReq<CType>[];
+    readonly activeAdvertisements: ActyxWFCanonAdvrt<CType>[];
     /**
-     * List of state's eventId machines SHOULD NOT jump out of due to active canonization request
+     * List of state's eventId machines SHOULD NOT jump out of due to active canonization ad
      */
     readonly involvedEventIds: Set<string>;
   };
@@ -581,56 +634,58 @@ const generateCanonizationBarrier = <CType extends CTypeProto>(
   multiverse: Reality.MultiverseTree.Type<CType>,
   canonMap: Reality.CanonizationStore.Type<CType>
 ): CanonizationBarrier<CType>["active"] => {
-  const activeRequests = canonMap.getOpenRequests();
+  const activeAdvertisements = canonMap.getOpenAdvertisements();
   const involvedEventIds = new Set(
-    activeRequests.flatMap((request) => {
-      const point = multiverse.getById(request.payload.timelineOf);
+    activeAdvertisements.flatMap((ad) => {
+      const point = multiverse.getById(ad.payload.timelineOf);
       if (!point) return [];
       return createLinearChain(multiverse, point).map((x) => x.meta.eventId);
     })
   );
 
-  return { activeRequests, involvedEventIds };
+  return { activeAdvertisements, involvedEventIds };
 };
 
 /**
  * Calculate the compensation needed when a machine jumps from a point in the
  * multiverse to the other.
  */
-const calculateCompensations = <CType extends CTypeProto>(
+const calculateCompensateables = <CType extends CTypeProto>(
   workflow: WFWorkflow<CType>,
   swarmData: SwarmData<CType>,
-  fromPoint: ActyxWFBusiness<CType>,
-  toPoint: ActyxWFBusiness<CType>,
+  fromWFMachine: WFMachine<CType>,
+  toWFMachine: WFMachine<CType>,
   logger: Logger
 ) => {
   // TODO: Assuming `multiverse tree` is secure from malicious actors and is correctly implemented,
   // faster calculation can be done via workflow code analysis.
   const { multiverseTree } = swarmData;
-  const fromChain = createLinearChain(multiverseTree, fromPoint);
-  const toChain = createLinearChain(multiverseTree, toPoint);
+
+  const fromPoint = fromWFMachine.latestStateEvent();
+  const toPoint = toWFMachine.latestStateEvent();
+
+  // compensateable to an empty chain is impossible
+  if (!toPoint) return [];
+
+  const fromChain =
+    (fromPoint && createLinearChain(multiverseTree, fromPoint)) || [];
+  const toChain = (toPoint && createLinearChain(multiverseTree, toPoint)) || [];
   const divergence = divergencePoint(fromChain, toChain);
 
   // fromChain is sub-array of toChain
-  if (divergence === fromChain.length - 1) return null;
+  if (divergence === fromChain.length - 1) return [];
 
-  const simulation = WFMachine(workflow, swarmData);
-  simulation.logger.sub(logger.log);
+  const divergenceWFmachine = WFMachine(workflow, swarmData);
+  divergenceWFmachine.logger.sub(logger.log);
 
   // -1 means not found, similar to .findIndex array returns
   if (divergence > -1) {
     const atDivergence = fromChain[divergence];
-    simulation.resetAndAdvanceToEventId(atDivergence.meta.eventId);
+    divergenceWFmachine.resetAndAdvanceToEventId(atDivergence.meta.eventId);
   }
   // Comps before divergence should not be accounted for
-  const compsBeforeDivergence = simulation.availableCompensateable();
-
-  simulation.resetAndAdvanceToEventId(fromPoint.meta.eventId);
-  // advancing most canon might resolve some compensations.
-  // `advanceToMostCanon` is the key function call that will eventually trigger CompensationDone
-  // it accounts for the possible with-block completions from the current `fromPoint`.
-  simulation.advanceToMostCanon();
-  const allActiveCompensations = simulation.availableCompensateable();
+  const compsBeforeDivergence = divergenceWFmachine.availableCompensateable();
+  const allActiveCompensations = fromWFMachine.availableCompensateable();
 
   // subtract "before-divergence" from "all" and we get compensations that we need
   // TODO: might want to check for more than `codeIndex` because this might not be completely the right definition.
@@ -647,17 +702,12 @@ const calculateCompensations = <CType extends CTypeProto>(
     return !existsBeforeDivergence;
   });
 
-  if (activeCompensationsBetweenFromAndTwo.length === 0) return null;
-
-  return {
-    compensations: activeCompensationsBetweenFromAndTwo.map((x) => ({
-      /**
-       * The "from" attribute is identified by the first event within the compensation block, not from the "from point".
-       */
-      fromTimelineOf: x.fromTimelineOf,
-      toTimelineOf: toPoint.meta.eventId,
-      codeIndex: x.codeIndex,
-    })),
-    lastMachineState: simulation,
-  };
+  return activeCompensationsBetweenFromAndTwo.map((x) => ({
+    /**
+     * The "from" attribute is identified by the first event within the compensation block, not from the "from point".
+     */
+    fromTimelineOf: x.fromTimelineOf,
+    toTimelineOf: toPoint.meta.eventId,
+    codeIndex: x.codeIndex,
+  }));
 };

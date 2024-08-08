@@ -9,6 +9,7 @@ import {
 import { awhile, log } from "./test-utils/misc.js";
 import { Logistics } from "./test-utils/logistic-scenario.js";
 import { Choices } from "./test-utils/choices-scenario.js";
+import { CanonSwitch } from "./test-utils/canon-switch-scenario.js";
 
 describe("no-partitions", () => {
   const { Ev } = Logistics;
@@ -590,16 +591,16 @@ describe("partitions and compensations", () => {
     await network.partitions.clear();
     await Promise.all([t1, t2, t3].map((x) => x.restartMachine()));
 
-    expect(t1.machine.mcomb().t === "normal");
-    expect(t2.machine.mcomb().t === "off-canon");
-    expect(t3.machine.mcomb().t === "off-canon");
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(t3.machine.mcomb().t).toBe("off-canon");
 
     await findAndRunCommand(t3, Evs.L2Compensate);
     await findAndRunCommand(t2, Evs.L1Compensate);
 
-    expect(t1.machine.mcomb().t === "normal");
-    expect(t2.machine.mcomb().t === "normal");
-    expect(t3.machine.mcomb().t === "normal");
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
   });
 });
 
@@ -769,5 +770,69 @@ describe("retry-fail inside compensation", () => {
       Ev.deny,
       Ev.notPickedUp,
     ]);
+  });
+});
+
+describe("canonization", () => {
+  it("works", async () => {
+    const scenario = CanonSwitch.genScenario();
+    const {
+      findAndRunCanonization,
+      findAndRunCommand,
+      network,
+      agents: { canonizer, t1, t2, t3 },
+    } = scenario;
+    const { Ev: Evs } = CanonSwitch;
+
+    await findAndRunCommand(canonizer, Evs.start, {
+      canonizer: canonizer.node.id,
+    });
+    await network.partitions.group(
+      [canonizer.node],
+      [t1.node],
+      [t2.node],
+      [t3.node]
+    );
+
+    // everyone bids themselves to L2
+    await Promise.all(
+      [t1, t2, t3].map(async (t) => {
+        await findAndRunCommand(t, Evs.L1Bid, { bidder: t.identity.id });
+        await findAndRunCommand(t, Evs.L1Accept, { assignee: t.identity.id });
+      })
+    );
+
+    await findAndRunCommand(t2, Evs.L1Start);
+
+    // trigger compensation in t3
+    await network.partitions.clear();
+
+    // t1 is canon now
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(t3.machine.mcomb().t).toBe("off-canon");
+
+    const t2Comps = t2.machine
+      .commands()
+      .filter((x) => x.info.reason.has("compensation"));
+    const t3Comps = t3.machine
+      .commands()
+      .filter((x) => x.info.reason.has("compensation"));
+
+    expect(t2Comps.length).toBe(0);
+    expect(t3Comps.length).not.toBe(0);
+
+    // canonizer canonize t2
+    await findAndRunCanonization(
+      canonizer,
+      (x) => x.payload.advertiser === t2.identity.id
+    );
+
+    // now t2 is canon, t1 and t3 is off-canon
+    expect(t1.machine.mcomb().t).toBe("off-canon");
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("off-canon");
+
+    expect(t2.machine.state().state?.[1].payload.t).toBe(Evs.L1Start);
   });
 });

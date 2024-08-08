@@ -167,6 +167,7 @@ export const makeLogger = (
       subs.add(fn);
       return () => subs.delete(fn);
     },
+    unsub: (fn: Sub) => subs.delete(fn),
     log: (...args: Args) => {
       subs.forEach((sub) => sub(id, ...args));
     },

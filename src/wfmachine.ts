@@ -33,15 +33,17 @@
 import {
   ActyxWFBusiness,
   CTypeProto,
+  InternalTag,
   NestedCodeIndexAddress,
   sortByEventKey,
-  WFMarkerCanonReq,
+  WFMarkerCanonAdvrt,
 } from "./consts.js";
 import { createLinearChain } from "./event-utils.js";
 import { CanonizationStore, MultiverseTree } from "./multiverse.js";
 import { Logger, makeLogger, Ord } from "./utils.js";
 import {
   Actor,
+  CAntiCompensate,
   CAntiParallel,
   CCanonize,
   CChoice,
@@ -74,6 +76,7 @@ import {
 type StackItem<CType extends CTypeProto> =
   | SCanonize<CType>
   | SCompensate<CType>
+  | SAntiCompensate
   | SMatch<CType>
   | SEvent<CType>
   | SRetry<CType>
@@ -88,6 +91,11 @@ type SCanonize<CType extends CTypeProto> = Pick<CCanonize, "t"> & {
 type SCompensate<CType extends CTypeProto> = Pick<CCompensate, "t"> & {
   lastEvent: ActyxWFBusiness<CType>;
 };
+
+/**
+ * a marker to say that a compensation is done
+ */
+type SAntiCompensate = Pick<CAntiCompensate, "t">;
 
 type SMatch<CType extends CTypeProto> = Pick<CMatch<CType>, "t"> & {
   inner: WFMachine<CType>;
@@ -166,6 +174,11 @@ type UnnamedNext<CType extends CTypeProto> = {
   reason: ReasonSet;
 };
 
+type PendingCanonizationAdvert<CType extends CTypeProto> = Omit<
+  WFMarkerCanonAdvrt<CType>,
+  "ax" | "advertiser"
+>;
+
 export type WFMachine<CType extends CTypeProto> = {
   tick: (input: ActyxWFBusiness<CType> | null) => boolean;
   state: () => WFMachineState<CType>;
@@ -187,8 +200,12 @@ export type WFMachine<CType extends CTypeProto> = {
     firstCompensation: CEvent<CType>;
     fromTimelineOf: string;
   }[];
+  doneCompensation: () => {
+    codeIndex: NestedCodeIndexAddress.Type;
+    fromTimelineOf: string;
+  }[];
   isWaitingForCanonization: () => boolean;
-  pendingCanonizationRequest: () => Omit<WFMarkerCanonReq<CType>, "ax"> | null;
+  pendingCanonizationAdvrt: () => PendingCanonizationAdvert<CType> | null;
   availableNexts: () => Next<CType>[];
   advanceToMostCanon: () => void;
   resetAndAdvanceToMostCanon: () => void;
@@ -340,6 +357,37 @@ export const WFMachine = <CType extends CTypeProto>(
         return b.antiIndex - a.antiIndex;
       });
 
+  const selfDoneCompensation = () =>
+    data.stack
+      .map((x, i) => [i, x, workflow.at(i)] as const)
+      .filter(
+        (pair): pair is [number, SAntiCompensate, CAntiCompensate] =>
+          pair[1]?.t === "anti-compensate" && pair[2]?.t === "anti-compensate"
+      )
+      .map(([antiIndex, _, cAntiCompensate]) => {
+        const compensateIndex = antiIndex + cAntiCompensate.baseIndexOffset;
+        const ccompensate = workflow.at(compensateIndex);
+        if (ccompensate?.t !== "compensate") {
+          throw new Error(
+            `compensate query fatal error: ccompensate not found at index ${compensateIndex}`
+          );
+        }
+
+        const sCompensate = data.stack.at(compensateIndex);
+        if (sCompensate?.t !== "compensate") {
+          throw new Error(
+            `compensate at ${compensateIndex} not populated when activated at index`
+          );
+        }
+
+        const triggeringEvent = sCompensate.lastEvent;
+
+        return {
+          codeIndex: wfMachineCodeIndexPrefix.concat([compensateIndex]),
+          fromTimelineOf: triggeringEvent.meta.eventId,
+        };
+      });
+
   const selfActiveCompensation = (evalIndex = data.evalIndex) => {
     const res = ccompensateIndexer
       .getWithListMatching(evalIndex)
@@ -348,23 +396,24 @@ export const WFMachine = <CType extends CTypeProto>(
         if (withStart?.t !== "compensate-with") {
           return null;
         }
-        const index = entry.start + withStart.baseIndexOffset;
-        const ccompensate = workflow.at(index);
+        const compensateIndex = entry.start + withStart.baseIndexOffset;
+        const ccompensate = workflow.at(compensateIndex);
         if (ccompensate?.t !== "compensate") {
           throw new Error(
-            `compensate query fatal error: ccompensate not found at index ${index}`
+            `compensate query fatal error: ccompensate not found at index ${compensateIndex}`
           );
         }
 
-        const sCompensate = data.stack.at(index);
+        const sCompensate = data.stack.at(compensateIndex);
         if (sCompensate?.t !== "compensate") {
           throw new Error(
-            `compensate at ${index} not populated when activated at index`
+            `compensate at ${compensateIndex} not populated when activated at index`
           );
         }
 
         const triggeringEvent = sCompensate.lastEvent;
-        const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
+        const firstCompensationIndex =
+          compensateIndex + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
 
         if (firstCompensation?.t !== "event") {
@@ -374,7 +423,7 @@ export const WFMachine = <CType extends CTypeProto>(
         }
 
         return {
-          codeIndex: wfMachineCodeIndexPrefix.concat([index]),
+          codeIndex: wfMachineCodeIndexPrefix.concat([compensateIndex]),
           firstCompensation,
           firstCompensationIndex,
           fromTimelineOf: triggeringEvent.meta.eventId,
@@ -597,7 +646,6 @@ export const WFMachine = <CType extends CTypeProto>(
         code.bindings?.forEach((x) => {
           const index = x.index;
           const actorId = stackItem.event.payload.payload[index];
-          logger.log(actorId);
           if (typeof actorId !== "string") {
             throw new Error("actorname is not string");
           }
@@ -815,8 +863,10 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (code.t === "anti-compensate") {
-      evalContext.index += 1;
-      return true;
+      if (data.stack.at(evalContext.index) === undefined) {
+        data.stack[evalContext.index] = { t: "anti-compensate" };
+      }
+      return false;
     }
 
     if (code.t === "anti-choice") {
@@ -1242,8 +1292,6 @@ export const WFMachine = <CType extends CTypeProto>(
       const lastProcessedEventIndex = chain.findIndex(
         (x) => x.meta.eventId === latestEvent.meta.eventId
       );
-      // means that this machine is already off the path
-      if (lastProcessedEventIndex === -1) return null;
 
       return chain.slice(lastProcessedEventIndex + 1);
     }
@@ -1269,7 +1317,9 @@ export const WFMachine = <CType extends CTypeProto>(
         const historyWhereInvolved = getContinuationChainByEventId(
           decision.payload.timelineOf
         );
-        if (historyWhereInvolved) return historyWhereInvolved;
+        if (historyWhereInvolved) {
+          return historyWhereInvolved;
+        }
       }
 
       return null;
@@ -1326,6 +1376,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     if (!continuationChain || continuationChain.length === 0) {
       tick(null);
+      return;
     } else {
       while (continuationChain.length > 0) {
         const first = continuationChain.shift();
@@ -1343,31 +1394,31 @@ export const WFMachine = <CType extends CTypeProto>(
     advanceToEventId(eventId);
   };
 
-  const selfPendingCanonizationRequest = (): Omit<
-    WFMarkerCanonReq<CType>,
-    "ax"
-  > | null => {
-    const code = workflow.at(data.evalIndex);
-    const atStack = data.stack.at(data.evalIndex);
+  const selfPendingCanonizationAdvrt =
+    (): PendingCanonizationAdvert<CType> | null => {
+      const code = workflow.at(data.evalIndex);
+      const atStack = data.stack.at(data.evalIndex);
 
-    if (code?.t === "canonize" && atStack?.t === "canonize") {
-      const existingRequests = swarmStore.canonizationStore
-        .getRequestsForName(atStack.lastEvent.payload.t)
-        .find((req) => req.meta.eventId === atStack.lastEvent.meta.eventId);
+      if (code?.t === "canonize" && atStack?.t === "canonize") {
+        const {
+          meta: { eventId: timelineOf },
+          payload: { t: stateName },
+        } = atStack.lastEvent;
 
-      if (!existingRequests) {
-        const uniqueActorDesignation = code.actor.get();
-        const actorId = innerstate.context[uniqueActorDesignation];
-        return {
-          issuer: actorId,
-          name: atStack.lastEvent.payload.t,
-          timelineOf: atStack.lastEvent.meta.eventId,
-        };
+        const existingAdvrt = swarmStore.canonizationStore
+          .getAdvertisementsForName(stateName)
+          .find((req) => req.payload.timelineOf === timelineOf);
+
+        if (!existingAdvrt) {
+          const uniqueActorDesignation = code.actor.get();
+          const canonizer = innerstate.context[uniqueActorDesignation];
+
+          return { canonizer, name: stateName, timelineOf };
+        }
       }
-    }
 
-    return null;
-  };
+      return null;
+    };
 
   const isWaitingForCanonization = () => {
     const code = workflow.at(data.evalIndex);
@@ -1452,10 +1503,24 @@ export const WFMachine = <CType extends CTypeProto>(
 
       return res;
     },
+    doneCompensation: () => {
+      const res = selfDoneCompensation();
+      const match = getSMatchAtIndex(data.evalIndex);
+      if (match) {
+        const inner = match.inner.doneCompensation();
+        res.push(...inner);
+      }
+
+      res.sort((a, b) => {
+        return Ord.toNum(NestedCodeIndexAddress.cmp(a.codeIndex, b.codeIndex));
+      });
+
+      return res;
+    },
     isWaitingForCanonization,
-    pendingCanonizationRequest: () =>
-      selfPendingCanonizationRequest() ||
-      getSMatchAtIndex(data.evalIndex)?.inner.pendingCanonizationRequest() ||
+    pendingCanonizationAdvrt: () =>
+      selfPendingCanonizationAdvrt() ||
+      getSMatchAtIndex(data.evalIndex)?.inner.pendingCanonizationAdvrt() ||
       null,
     advanceToMostCanon,
     resetAndAdvanceToMostCanon: () => {

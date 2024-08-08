@@ -16,6 +16,18 @@ type NodeId = string;
 type PartitionId = string;
 type MiniOffsetMap = Record<string, number>;
 
+const genEID = (() => {
+  const gen = (function* () {
+    let i = BigInt("0");
+    while (true) {
+      yield `eid:${i}`;
+      i++;
+    }
+  })();
+
+  return () => gen.next().value as string;
+})();
+
 export const Inner: unique symbol = Symbol("Inner");
 export type Inner = typeof Inner;
 
@@ -349,7 +361,7 @@ export namespace Node {
           meta: {
             offset: data.own.offset(),
             appId: "",
-            eventId: uuid.v4(),
+            eventId: genEID(),
             isLocalEvent: true,
             lamport: lamport[Inner],
             stream: params.id,

@@ -30,7 +30,7 @@ export namespace NestedCodeIndexAddress {
     let i = 0;
     while (i < max) {
       const itemA = a.at(i) || 0;
-      const itemB = a.at(i) || 0;
+      const itemB = b.at(i) || 0;
       if (itemA < itemB) return Ord.Lesser;
       if (itemA > itemB) return Ord.Greater;
       i++;
@@ -48,30 +48,36 @@ export type WFCompensationMarker =
   | WFMarkerCompensationDone;
 
 export type WFCanonMarker<CType extends CTypeProto> =
-  | WFMarkerCanonReq<CType>
+  | WFMarkerCanonAdvrt<CType>
   | WFMarkerCanonDecide<CType>;
 
 /**
- * Canonization request is created by the emitter of the last event automatically.
+ * Canonization advertisement is created by the emitter of the last event automatically.
  */
-export type WFMarkerCanonReq<CType extends CTypeProto> = {
-  readonly ax: InternalTag.StringOf<typeof InternalTag.CanonReq>;
-  readonly issuer: string;
+export type WFMarkerCanonAdvrt<CType extends CTypeProto> = {
+  readonly ax: InternalTag.StringOf<typeof InternalTag.CanonAdvrt>;
   readonly name: CType["ev"];
+  /**
+   * id of the advertiser
+   */
+  readonly advertiser: string;
+  /**
+   * id of the canonizer
+   */
+  readonly canonizer: string;
   // readonly codeIndex: NestedCodeIndexAddress.Type;
   readonly timelineOf: string;
 };
 
 export type WFMarkerCanonDecide<CType extends CTypeProto> = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CanonDecide>;
-  readonly issuer: string;
   readonly name: CType["ev"];
+  /**
+   * id of the canonizer
+   */
+  readonly canonizer: string;
   // readonly codeIndex: NestedCodeIndexAddress.Type;
   readonly timelineOf: string;
-  /**
-   * When `true`, the timeline pointed by `timelineOf` is canon, and vice versa.
-   */
-  readonly isCanon: boolean;
 };
 
 export type WFMarkerCompensationNeeded = {
@@ -111,8 +117,8 @@ export type ActyxWFBusiness<CType extends CTypeProto> = ActyxEvent<
 >;
 export type ActyxWFCompensationMarker = ActyxEvent<WFCompensationMarker>;
 
-export type ActyxWFCanonReq<CType extends CTypeProto> = ActyxEvent<
-  WFMarkerCanonReq<CType>
+export type ActyxWFCanonAdvrt<CType extends CTypeProto> = ActyxEvent<
+  WFMarkerCanonAdvrt<CType>
 >;
 
 export type ActyxWFCanonDecide<CType extends CTypeProto> = ActyxEvent<
@@ -120,7 +126,7 @@ export type ActyxWFCanonDecide<CType extends CTypeProto> = ActyxEvent<
 >;
 
 export type ActyxWFCanonMarker<CType extends CTypeProto> =
-  | ActyxWFCanonReq<CType>
+  | ActyxWFCanonAdvrt<CType>
   | ActyxWFCanonDecide<CType>;
 
 export type ActyxWFBusinessOrMarker<CType extends CTypeProto> = ActyxEvent<
@@ -172,9 +178,10 @@ export const isWFCanonDecideMarker = <CType extends CTypeProto>(
 ): x is WFMarkerCanonDecide<CType> =>
   "ax" in x && InternalTag.CanonDecide.is(x.ax);
 
-export const isWFCanonReqMarker = <CType extends CTypeProto>(
+export const isWFCanonAdvrtMarker = <CType extends CTypeProto>(
   x: WFBusinessOrMarker<CType>
-): x is WFMarkerCanonReq<CType> => "ax" in x && InternalTag.CanonReq.is(x.ax);
+): x is WFMarkerCanonAdvrt<CType> =>
+  "ax" in x && InternalTag.CanonAdvrt.is(x.ax);
 
 const genExtractWithPayloadCondition = <
   CType extends CTypeProto,
@@ -203,15 +210,15 @@ export const extractWFCanonMarker = <CType extends CTypeProto>(
 ): ActyxWFCanonMarker<CType>[] =>
   evs.filter(
     (ev): ev is ActyxWFCanonMarker<CType> =>
-      isWFCanonDecideMarker(ev.payload) || isWFCanonReqMarker(ev.payload)
+      isWFCanonDecideMarker(ev.payload) || isWFCanonAdvrtMarker(ev.payload)
   );
 
 export const extractWFCanonDecideMarker = genExtractWithPayloadCondition(
   isWFCanonDecideMarker
 );
 
-export const extractWFCanonReqMarker =
-  genExtractWithPayloadCondition(isWFCanonReqMarker);
+export const extractWFCanonAdvrtMarker =
+  genExtractWithPayloadCondition(isWFCanonAdvrtMarker);
 
 export namespace InternalTag {
   /**
@@ -243,6 +250,11 @@ export namespace InternalTag {
   };
 
   /**
+   * Marks the writer of the event
+   */
+  export const ActorWriter = factory("ax:wf:by:");
+
+  /**
    * For marking events that are part of compensation
    */
   export const CompensationEvent = factory("ax:wf:compensation:event:");
@@ -263,5 +275,5 @@ export namespace InternalTag {
    * For marking that an event is canon.
    */
   export const CanonDecide = factory("ax:wf:canon:decide:");
-  export const CanonReq = factory("ax:wf:canon:req:");
+  export const CanonAdvrt = factory("ax:wf:canon:req:");
 }

@@ -2,12 +2,12 @@ import {
   ActyxWFBusiness,
   ActyxWFCanonDecide,
   ActyxWFCanonMarker,
-  ActyxWFCanonReq,
+  ActyxWFCanonAdvrt,
   CTypeProto,
-  extractWFCanonDecideMarker,
-  extractWFCanonReqMarker,
   InternalTag,
   sortByEventKey,
+  isWFCanonAdvrtMarker,
+  isWFCanonDecideMarker,
 } from "./consts.js";
 
 type EventId = string;
@@ -88,8 +88,8 @@ export namespace MultiverseTree {
 export namespace CanonizationStore {
   export type Type<CType extends CTypeProto> = {
     register: (input: ActyxWFCanonMarker<CType>) => void;
-    getOpenRequests: () => ActyxWFCanonReq<CType>[];
-    getRequestsForName: (name: string) => ActyxWFCanonReq<CType>[];
+    getOpenAdvertisements: () => ActyxWFCanonAdvrt<CType>[];
+    getAdvertisementsForName: (name: string) => ActyxWFCanonAdvrt<CType>[];
     getDecisionsForName: (name: string) => ActyxWFCanonDecide<CType>[];
     /**
      * Sorted from the most present
@@ -99,28 +99,52 @@ export namespace CanonizationStore {
 
   // TODO optimize API design
   export const make = <CType extends CTypeProto>(): Type<CType> => {
-    const data: ActyxWFCanonMarker<CType>[] = [];
+    type Name = string;
+    type EventId = string;
+    type Advrt = ActyxWFCanonAdvrt<CType>;
+    type Decision = ActyxWFCanonDecide<CType>;
+
+    const advertisements = new Map<Name, Map<EventId, Advrt>>();
+    const decisions = new Map<Name, Map<EventId, Decision>>();
+    let decisionsFromLatest = [] as Decision[];
 
     const self: Type<CType> = {
       register: (input) => {
-        if (!data.find((x) => x.meta.eventId === input.meta.eventId)) {
-          data.push(input);
+        const {
+          meta: { eventId },
+          payload: { name },
+        } = input;
+
+        if (isWFCanonAdvrtMarker(input.payload)) {
+          const map = advertisements.get(name) || new Map();
+          if (!advertisements.has(name)) advertisements.set(name, map);
+          map.set(eventId, input);
+        } else if (isWFCanonDecideMarker(input.payload)) {
+          const map = decisions.get(name) || new Map();
+          if (!decisions.has(name)) decisions.set(name, map);
+          map.set(eventId, input);
+
+          decisionsFromLatest = sortByEventKey([
+            ...decisionsFromLatest,
+            input as Decision,
+          ]).reverse();
         }
       },
-      listDecisionsFromLatest: () =>
-        sortByEventKey(extractWFCanonDecideMarker(data)).reverse(),
-      getRequestsForName: (name) =>
-        extractWFCanonReqMarker(data).filter((x) => x.payload.name === name),
-      getOpenRequests: () => {
-        const resolvedNames = new Set(
-          extractWFCanonDecideMarker(data).map((x) => x.payload.name)
-        );
-        return extractWFCanonReqMarker(data).filter(
-          (req) => !resolvedNames.has(req.payload.name)
-        );
+      listDecisionsFromLatest: () => decisionsFromLatest,
+      getAdvertisementsForName: (name) => {
+        const ads = advertisements.get(name);
+        if (!ads) return [];
+        return sortByEventKey(Array.from(ads.values())).reverse();
       },
-      getDecisionsForName: (name) =>
-        extractWFCanonDecideMarker(data).filter((x) => x.payload.name === name),
+      getDecisionsForName: (name) => {
+        const dec = decisions.get(name);
+        if (!dec) return [];
+        return sortByEventKey(Array.from(dec.values())).reverse();
+      },
+      getOpenAdvertisements: () =>
+        Array.from(advertisements.entries())
+          .filter(([name]) => !decisions.has(name))
+          .flatMap(([_, ads]) => Array.from(ads.values())),
     };
     return self;
   };

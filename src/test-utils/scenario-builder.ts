@@ -1,5 +1,10 @@
 import { ActyxEvent, Tags } from "@actyx/sdk";
-import { CTypeProto, WFBusinessOrMarker } from "../consts.js";
+import {
+  ActyxWFCanonAdvrt,
+  CTypeProto,
+  WFBusinessOrMarker,
+  WFMarkerCanonAdvrt,
+} from "../consts.js";
 import { WFWorkflow } from "../wfcode.js";
 import { Network, Node } from "../ax-mock/index.js";
 import { awhile, log } from "./misc.js";
@@ -103,11 +108,27 @@ export const setup = <CType extends CTypeProto>(
     await awhile();
   };
 
+  const findAndRunCanonization = async (
+    agent: Agent<CType>,
+    findAd: (ad: ActyxWFCanonAdvrt<CType>) => boolean
+  ) => {
+    await awhile();
+    const canonization = agent.machine
+      .canonizations()
+      .find((x) => findAd(x.ad));
+    if (!canonization) {
+      throw new Error(`canonization not found in ${agent.identity.id}`);
+    }
+    canonization?.publish();
+    await awhile();
+  };
+
   return {
     agents,
     findAgent,
     findCommand,
     findAndRunCommand,
+    findAndRunCanonization,
     network,
   };
 };
