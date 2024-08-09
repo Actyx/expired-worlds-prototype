@@ -274,7 +274,6 @@ export namespace MachineCombinator {
       {
         /* proxy for debugging purpose */
         set: (...args) => {
-          logger.log("internal.data changed to", JSON.stringify(args[2]));
           return Reflect.set(...args);
         },
       }
@@ -338,7 +337,7 @@ export namespace MachineCombinator {
       // compensateable implies the compensation is not yet active; it can be marked as done when canonization happens in the actor's favor
       // active compensation, however is more complicated. If it is already happening, it must be followed through by the actors until it is done.
       // resolve dangling compensateables
-      const firstRememberedComps = allRememberedComps
+      const remainingRememberedComps = allRememberedComps
         .map((comp) => {
           // remembered compensateable can be invalidated if:
           // - it is back to canon and it is not active, or
@@ -409,8 +408,9 @@ export namespace MachineCombinator {
             compMachine: compMachine,
           };
         })
-        .filter((x): x is NonNullable<typeof x> => x !== null)
-        .at(0);
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      const firstRememberedComps = remainingRememberedComps.at(0);
 
       if (firstRememberedComps) {
         internal.data = {
@@ -491,23 +491,22 @@ export namespace MachineCombinator {
         const needRecalc =
           canonDecisionMarkers.length > 0 || compsMarker.length > 0;
 
-        if (needRecalc) {
-          internal.data = {
-            t: "catching-up",
-            wfMachine: internal.data.wfMachine,
-          };
-        }
-
         const data = internal.data;
-        if ((data.t === "catching-up" && e.caughtUp) || needRecalc) {
+
+        if (data.t === "catching-up" && e.caughtUp) {
           recalc(delayedPublish);
         } else if (data.t === "normal") {
           data.wfMachine.advanceToMostCanon();
+          if (needRecalc) {
+            recalc(delayedPublish);
+          }
         } else if (data.t === "off-canon") {
           data.wfMachine.advanceToMostCanon();
           data.canonWFMachine.advanceToMostCanon();
 
-          if (data.wfMachine.doneCompensation().length > 0) {
+          data.wfMachine.state();
+
+          if (data.wfMachine.doneCompensation().length > 0 || needRecalc) {
             recalc(delayedPublish);
           }
         }
