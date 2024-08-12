@@ -10,7 +10,7 @@ import {
 import * as Reality from "./multiverse.js";
 import { SwarmData, WFMachine } from "./wfmachine.js";
 export { Reality };
-import { Node } from "./ax-mock/index.js";
+import { Node, XEventKey } from "./ax-mock/index.js";
 import {
   divergencePoint,
   CTypeProto,
@@ -21,13 +21,13 @@ import {
   WFCompensationMarker,
   WFMarkerCompensationNeeded,
   WFMarkerCompensationDone,
-  ActyxWFBusiness,
   NestedCodeIndexAddress,
   extractWFCanonMarker,
   ActyxWFCanonAdvrt,
   WFMarkerCanonAdvrt,
   WFMarkerCanonDecide,
   extractWFCanonDecideMarker,
+  sortByEventKey,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
@@ -158,25 +158,8 @@ export const run = <CType extends CTypeProto>(
     return commands;
   };
 
-  const canonizations = () =>
-    machineCombinator.canonizationBarrier.active.activeAdvertisements
-      .filter((ad) => ad.payload.canonizer === params.self.id)
-      .map((ad) => ({
-        ad,
-        publish: () =>
-          node.api.publish(
-            params.tags.apply({
-              ax: InternalTag.CanonDecide.write(""),
-              name: ad.payload.name,
-              timelineOf: ad.payload.timelineOf,
-              canonizer: params.self.id,
-            } satisfies WFMarkerCanonDecide<CType>)
-          ),
-      }));
-
   return {
     commands,
-    canonizations,
     mcomb: () => machineCombinator.internal(),
     multiverseTree: () => multiverseTree,
     wfmachine: () => machineCombinator.wfmachine(),
@@ -240,6 +223,7 @@ export namespace MachineCombinator {
     const logger = makeLogger(`mcomb:${params.self.id}`);
     const multiverseTree = Reality.MultiverseTree.make<CType>();
     const canonizationStore = Reality.CanonizationStore.make<CType>();
+    canonizationStore.logger.sub(logger.log);
     const swarmStore: SwarmData<CType> = {
       multiverseTree,
       canonizationStore: canonizationStore,
@@ -273,9 +257,6 @@ export namespace MachineCombinator {
       },
       {
         /* proxy for debugging purpose */
-        set: (...args) => {
-          return Reflect.set(...args);
-        },
       }
     );
 
@@ -452,6 +433,63 @@ export namespace MachineCombinator {
       );
     };
 
+    // TODO: how to automate this? which one to take? strategy?
+    const canonizeWhenPossible = (delayedPublish: DelayedPublish) => {
+      const canonizables =
+        canonizationBarrier.active.activeAdvertisements.filter(
+          (ad) => ad.payload.canonizer === params.self.id
+        );
+
+      if (canonizables.length === 0) return;
+
+      const groupedByName = new Map<string, typeof canonizables>();
+      canonizables.forEach((canonizable) => {
+        const group = groupedByName.get(canonizable.payload.name) || [];
+        groupedByName.set(canonizable.payload.name, group);
+        group.push(canonizable);
+      });
+
+      Array.from(groupedByName.entries()).forEach(([name, advrts]) => {
+        // TODO: introduce multiple strategies.
+
+        // The default: check the timelines for the business event pointed by
+        // the advertisements. Choose one based on the sort key of the business event.
+        const advrtFromBusiness = advrts
+          .map((advrt) => {
+            const businessEvent = multiverseTree.getById(
+              advrt.payload.timelineOf
+            );
+            if (!businessEvent) return;
+            return {
+              advrt,
+              businessEvent,
+              eventKey: XEventKey.fromMeta(businessEvent.meta),
+            };
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null)
+          .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)))
+          .map((x) => x.advrt)
+          .at(0);
+
+        // in case the business event is not found (syntactically possible,
+        // logically not);
+        const advrtForBackup = sortByEventKey(advrts).at(0);
+
+        const chosenAdvrt = advrtFromBusiness || advrtForBackup;
+
+        if (!chosenAdvrt) return;
+
+        const canonization: WFMarkerCanonDecide<CType> = {
+          ax: InternalTag.CanonDecide.write(""),
+          name: chosenAdvrt.payload.name,
+          timelineOf: chosenAdvrt.payload.timelineOf,
+          canonizer: params.self.id,
+        };
+
+        delayedPublish(params.tags.apply(canonization));
+      });
+    };
+
     return {
       logger,
       multiverseTree,
@@ -485,7 +523,10 @@ export namespace MachineCombinator {
         compsMarker.map((ev) => compensationMap.register(ev.payload));
         canonMarkers.forEach(swarmStore.canonizationStore.register);
 
-        if (canonMarkers.length > 0) refreshCanonizationbarrier();
+        if (canonMarkers.length > 0) {
+          refreshCanonizationbarrier();
+          canonizeWhenPossible(delayedPublish);
+        }
 
         // If a canon decision is triggered, mark as catching-up
         const needRecalc =
@@ -497,14 +538,13 @@ export namespace MachineCombinator {
           recalc(delayedPublish);
         } else if (data.t === "normal") {
           data.wfMachine.advanceToMostCanon();
-          if (needRecalc) {
+
+          if (data.wfMachine.doneCompensation().length > 0 || needRecalc) {
             recalc(delayedPublish);
           }
         } else if (data.t === "off-canon") {
           data.wfMachine.advanceToMostCanon();
           data.canonWFMachine.advanceToMostCanon();
-
-          data.wfMachine.state();
 
           if (data.wfMachine.doneCompensation().length > 0 || needRecalc) {
             recalc(delayedPublish);

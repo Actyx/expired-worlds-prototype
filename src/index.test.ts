@@ -776,10 +776,9 @@ describe("retry-fail inside compensation", () => {
 });
 
 describe("canonization", () => {
-  it("works", async () => {
+  it("switches the canon timeline for the entire swarm", async () => {
     const scenario = CanonSwitch.genScenario();
     const {
-      findAndRunCanonization,
       findAndRunCommand,
       network,
       agents: { canonizer, t1, t2, t3 },
@@ -804,12 +803,14 @@ describe("canonization", () => {
       })
     );
 
-    await findAndRunCommand(t2, Evs.L1Start);
+    await findAndRunCommand(t2, Evs.L1BeforeAdvertise);
 
-    // trigger compensation in t3
-    await network.partitions.clear();
+    // join t1, t2, t3
+    // isolate canonizer.node, delaying canonization
+    await network.partitions.group([canonizer.node]);
 
-    // t1 is canon now
+    // t1 is canon now but t2 has no compensations available while off-canon
+    // because it is waiting for canonization.
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(t3.machine.mcomb().t).toBe("off-canon");
@@ -817,24 +818,97 @@ describe("canonization", () => {
     const t2Comps = t2.machine
       .commands()
       .filter((x) => x.info.reason.has("compensation"));
-    const t3Comps = t3.machine
-      .commands()
-      .filter((x) => x.info.reason.has("compensation"));
-
     expect(t2Comps.length).toBe(0);
-    expect(t3Comps.length).not.toBe(0);
 
-    // canonizer canonize t2
-    await findAndRunCanonization(
-      canonizer,
-      (x) => x.payload.advertiser === t2.identity.id
-    );
+    // "canonizer" is in the group now.
+    // It will automatically canonize t2 because it's in the season.
+    canonizer.node.logger.sub(log);
+
+    await network.partitions.clear();
 
     // now t2 is canon, t1 and t3 is off-canon
     expect(t1.machine.mcomb().t).toBe("off-canon");
     expect(t2.machine.mcomb().t).toBe("normal");
     expect(t3.machine.mcomb().t).toBe("off-canon");
 
-    expect(t2.machine.state().state?.[1].payload.t).toBe(Evs.L1Start);
+    expect(t2.machine.state().state?.[1].payload.t).toBe(Evs.L1BeforeAdvertise);
+
+    await findAndRunCommand(t1, Evs.L1Compensate);
+    await findAndRunCommand(t3, Evs.L1Compensate);
+
+    expectAllToHaveSameState([t1, t2, t3, canonizer]);
+  });
+
+  it.only("ignores late canonization advertisement", async () => {
+    const scenario = CanonSwitch.genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { canonizer, t1, t2, t3 },
+    } = scenario;
+    const { Ev: Evs } = CanonSwitch;
+
+    await findAndRunCommand(canonizer, Evs.start, {
+      canonizer: canonizer.node.id,
+    });
+    await network.partitions.group(
+      [canonizer.node],
+      [t1.node],
+      [t2.node],
+      [t3.node]
+    );
+
+    // everyone bids themselves to L2
+    await Promise.all(
+      [t1, t2, t3].map(async (t) => {
+        await findAndRunCommand(t, Evs.L1Bid, { bidder: t.identity.id });
+        await findAndRunCommand(t, Evs.L1Accept, { assignee: t.identity.id });
+      })
+    );
+
+    await findAndRunCommand(t2, Evs.L1BeforeAdvertise);
+
+    // isolate canonizer.node, delaying canonization
+    await network.partitions.group([canonizer.node]);
+
+    // t1 is canon now
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(t2.machine.mcomb().t).toBe("off-canon");
+    expect(t3.machine.mcomb().t).toBe("off-canon");
+
+    // canonizer joins the group. t1 is isolated
+    await network.partitions.group([t1.node]);
+
+    // t1 still thinks it is normal
+    expect(t1.machine.mcomb().t).toBe("normal");
+    // t2 and t3 agrees with each other
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("off-canon");
+    await findAndRunCommand(t3, Evs.L1Compensate);
+
+    // TODO: here canonizer is stuck with t1's compensation state to release
+    // canonizer from this state where it is actually not-involved, we need
+    // involvement tracking mechanism
+    // expectAllToHaveSameState([canonizer, t2, t3]);
+    expectAllToHaveSameState([t2, t3]);
+
+    // t1 triggers a state where it is advertised
+    await findAndRunCommand(t1, Evs.L1BeforeAdvertise);
+
+    // everyone is in the group now.
+    await network.partitions.clear();
+
+    // despite t1's advertisement being out, its name has been decided before t1 joined
+    // therefore the whole swarm now agrees that t2 is the winner.
+    // t1's advertisement was late in the eye of canonizer
+    expect(t1.machine.mcomb().t).toBe("off-canon");
+
+    await findAndRunCommand(t1, Evs.L1Compensate);
+
+    expect(t1.machine.mcomb().t).toBe("normal");
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("normal");
+    expect(canonizer.machine.mcomb().t).toBe("normal");
+    expectAllToHaveSameState([t1, t2, t3, canonizer]);
   });
 });

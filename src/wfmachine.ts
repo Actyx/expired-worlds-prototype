@@ -1293,6 +1293,8 @@ export const WFMachine = <CType extends CTypeProto>(
         (x) => x.meta.eventId === latestEvent.meta.eventId
       );
 
+      if (lastProcessedEventIndex === -1) return null;
+
       return chain.slice(lastProcessedEventIndex + 1);
     }
   };
@@ -1307,9 +1309,6 @@ export const WFMachine = <CType extends CTypeProto>(
 
     // force-choose timeline from canonization store
     const continuationChain = (() => {
-      const latest = getLatestStateEvent();
-      if (!latest) return null;
-
       const decisions = swarmStore.canonizationStore.listDecisionsFromLatest();
       if (decisions.length === 0) return null;
 
@@ -1317,6 +1316,7 @@ export const WFMachine = <CType extends CTypeProto>(
         const historyWhereInvolved = getContinuationChainByEventId(
           decision.payload.timelineOf
         );
+
         if (historyWhereInvolved) {
           return historyWhereInvolved;
         }

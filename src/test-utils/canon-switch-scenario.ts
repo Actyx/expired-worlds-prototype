@@ -8,7 +8,7 @@ const EvNames = Enum([
   "start",
   "L1Bid",
   "L1Accept",
-  "L1Start",
+  "L1BeforeAdvertise",
   "L1Canonize",
   "L1Finalize",
   "L1Compensate",
@@ -40,7 +40,7 @@ const logistic: WFWorkflow<TheType> = {
     }),
     ...code.compensate(
       [
-        code.event(unique("l1"), EvNames.L1Start),
+        code.event(unique("l1"), EvNames.L1BeforeAdvertise),
         code.canonize(unique("canonizer")),
         code.event(unique("l1"), EvNames.L1Finalize),
       ],

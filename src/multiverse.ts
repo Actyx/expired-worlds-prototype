@@ -9,6 +9,7 @@ import {
   isWFCanonAdvrtMarker,
   isWFCanonDecideMarker,
 } from "./consts.js";
+import { Logger, makeLogger } from "./utils.js";
 
 type EventId = string;
 
@@ -87,6 +88,7 @@ export namespace MultiverseTree {
 
 export namespace CanonizationStore {
   export type Type<CType extends CTypeProto> = {
+    logger: Logger;
     register: (input: ActyxWFCanonMarker<CType>) => void;
     getOpenAdvertisements: () => ActyxWFCanonAdvrt<CType>[];
     getAdvertisementsForName: (name: string) => ActyxWFCanonAdvrt<CType>[];
@@ -104,11 +106,13 @@ export namespace CanonizationStore {
     type Advrt = ActyxWFCanonAdvrt<CType>;
     type Decision = ActyxWFCanonDecide<CType>;
 
+    const logger = makeLogger("CanonizationStore");
     const advertisements = new Map<Name, Map<EventId, Advrt>>();
     const decisions = new Map<Name, Map<EventId, Decision>>();
     let decisionsFromLatest = [] as Decision[];
 
     const self: Type<CType> = {
+      logger,
       register: (input) => {
         const {
           meta: { eventId },
