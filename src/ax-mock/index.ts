@@ -11,6 +11,7 @@ import { Obs } from "systemic-ts-utils";
 import * as uuid from "uuid";
 import { Logger, makeLogger, Ord } from "../utils.js";
 import { sortByEventKey } from "../consts.js";
+import { log } from "../test-utils/misc.js";
 
 type NodeId = string;
 type PartitionId = string;
@@ -20,7 +21,7 @@ const genEID = (() => {
   const gen = (function* () {
     let i = BigInt("0");
     while (true) {
-      yield `eid:${i}`;
+      yield `id:${i}`;
       i++;
     }
   })();
@@ -94,41 +95,93 @@ export namespace StreamStore {
   export type Param = { lamport: XLamport.Type };
 
   export type Type<E> = Readonly<{
+    sym: () => symbol;
     offset: () => number;
     set: (e: ActyxEvent<E>) => void;
     stream: () => Stream.Type<E>;
+    at: ActyxEvent<E>[]["at"];
     slice: ActyxEvent<E>[]["slice"];
   }>;
 
-  export const make = <E>(): StreamStore.Type<E> => {
+  export const make = <E>(name: string): StreamStore.Type<E> => {
     const data = {
       data: [] as ActyxEvent<E>[],
     };
 
+    const symbol = Symbol(name);
+
     return {
+      sym: () => symbol,
+      at: (index) => data.data.at(index),
       offset: () => data.data.length,
       set: (e) => {
         data.data[e.meta.offset] = e;
       },
-      stream: () => {
-        let index = 0;
-        return {
-          index: () => index,
-          next: () => {
-            const item = data.data.at(index) || null;
-            index = Math.min(index + 1, data.data.length);
-            return item;
-          },
-          peek: () => data.data.at(index) || null,
-        };
-      },
+      stream: () => Stream.fromArray(data.data),
       slice: (...args) => data.data.slice(...args),
     };
   };
 
   export namespace Stream {
+    export const fromArray = <E>(array: ActyxEvent<E>[]): Type<E> => {
+      let index = 0;
+
+      return {
+        next: () => {
+          const item = array.at(index) || null;
+          index = Math.min(index + 1, array.length);
+          return item;
+        },
+        peek: () => array.at(index) || null,
+      };
+    };
+
+    export const mergedOrderedStores = <E>(
+      getStores: () => StreamStore.Type<E>[]
+    ): Type<E> => {
+      /**
+       * last nexted offset from a store
+       */
+      const offsetMap = new Map<symbol, number>();
+
+      const peekPair = () =>
+        getStores()
+          .map((store) => {
+            const storeSym = store.sym();
+            const offset = (() => {
+              const lastOffset = offsetMap.get(storeSym);
+              if (lastOffset === undefined) return 0;
+              return lastOffset + 1;
+            })();
+            const peeked = store.at(offset);
+            if (!peeked) return null;
+            const eventKey = XEventKey.fromMeta(peeked.meta);
+            return { storeSym, offset, peeked, eventKey } as const;
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null)
+          .sort((a, b) => Ord.toNum(Ord.cmp(a.eventKey, b.eventKey)))
+          .at(0);
+
+      const peek = () => {
+        const pair = peekPair();
+        return pair?.peeked || null;
+      };
+
+      const next = () => {
+        const pair = peekPair();
+        if (!pair) return null;
+        const { offset, peeked, storeSym } = pair;
+        offsetMap.set(storeSym, offset);
+        return peeked;
+      };
+
+      return {
+        peek,
+        next,
+      };
+    };
+
     export type Type<E> = {
-      index: () => number;
       next: () => ActyxEvent<E> | null;
       peek: () => ActyxEvent<E> | null;
     };
@@ -185,7 +238,7 @@ export namespace Node {
   export const make = <E>(params: Param): Type<E> => {
     const logger = makeLogger(`axmock:${params.id}`);
     const data = {
-      own: StreamStore.make<E>(),
+      own: StreamStore.make<E>(params.id),
       remote: new Map() as Map<string, StreamStore.Type<E>>,
       nextLamport: XLamport.make(0),
       inToSubPipe: Obs.Obs.make<ActyxEvent<E>>(),
@@ -207,61 +260,18 @@ export namespace Node {
     };
 
     const getOrCreateStream = (streamId: string): StreamStore.Type<E> => {
-      const item = data.remote.get(streamId) || StreamStore.make();
+      const item = data.remote.get(streamId) || StreamStore.make(streamId);
       data.remote.set(streamId, item);
       return item;
-    };
-
-    const mergedOrdered = (inputStreams: StreamStore.Stream.Type<E>[]) => {
-      const streams = new Set(inputStreams);
-
-      const findNext = () => {
-        const markedEmpty = new Set<StreamStore.Stream.Type<E>>();
-        let pairOrNull = null as
-          | null
-          | [StreamStore.Stream.Type<E>, ActyxEvent<E>];
-
-        streams.forEach((stream) => {
-          const item = stream.peek();
-          if (item === null) {
-            markedEmpty.add(stream);
-            return;
-          }
-
-          if (!pairOrNull) {
-            pairOrNull = [stream, item];
-          } else {
-            const [_, oldItem] = pairOrNull;
-            if (
-              Ord.cmp(
-                XEventKey.fromMeta(item.meta),
-                XEventKey.fromMeta(oldItem.meta)
-              ) === Ord.Lesser
-            ) {
-              pairOrNull = [stream, item];
-            }
-          }
-        }, null);
-        markedEmpty.forEach((stream) => streams.delete(stream));
-        if (!pairOrNull) return null;
-
-        const [stream, item] = pairOrNull;
-        stream.next();
-        return item;
-      };
-
-      return {
-        next: findNext,
-      };
     };
 
     const api: Type<E>["api"] = {
       offsetMap,
       slice: () => {
         const res: ActyxEvent<E>[] = [];
-        const stream = mergedOrdered([
-          data.own.stream(),
-          ...Array.from(data.remote.values()).map((store) => store.stream()),
+        const stream = StreamStore.Stream.mergedOrderedStores(() => [
+          data.own,
+          ...Array.from(data.remote.values()),
         ]);
 
         while (true) {
@@ -297,39 +307,32 @@ export namespace Node {
             setupStream();
           };
 
-          const stream = mergedOrdered([
-            data.own.stream(),
-            ...Array.from(data.remote.values()).map((store) => store.stream()),
+          const stream = StreamStore.Stream.mergedOrderedStores(() => [
+            data.own,
+            ...Array.from(data.remote.values()),
           ]);
-          let bounded = [] as ActyxEvent<E>[];
 
-          while (alive) {
-            const next = stream.next();
-            if (!next) break;
-            bounded.push(next);
-          }
+          const streamOut = () => {
+            let buffered = [] as ActyxEvent<E>[];
+
+            while (alive) {
+              const next = stream.next();
+              if (!next) break;
+              buffered.push(next);
+            }
+
+            wrappedHandler({
+              type: MsgType.events,
+              caughtUp: true,
+              events: buffered,
+            });
+          };
+
           if (!alive) return;
-          wrappedHandler({
-            type: MsgType.events,
-            caughtUp: true,
-            events: bounded,
-          });
 
           unsubs.push(
-            coord.out.sub((x) =>
-              wrappedHandler({
-                type: MsgType.events,
-                caughtUp: true,
-                events: [x],
-              })
-            ),
-            data.inToSubPipe.sub((x) =>
-              wrappedHandler({
-                type: MsgType.events,
-                caughtUp: true,
-                events: [x],
-              })
-            ),
+            coord.out.sub(streamOut),
+            data.inToSubPipe.sub(streamOut),
             data.timeTravelAlert.sub(() => {
               stopAndCleanup();
               const afterAsk = () => {
@@ -343,6 +346,8 @@ export namespace Node {
               });
             })
           );
+
+          streamOut();
         };
 
         setImmediate(setupStream);
