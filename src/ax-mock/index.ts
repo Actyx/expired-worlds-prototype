@@ -216,12 +216,13 @@ export namespace Node {
        * But it's there for spec genuineness
        */
       publish: (e: TaggedEvent) => Promise<void>;
+      publishMany: (e: TaggedEvent[]) => Promise<void>;
       offsetMap: () => MiniOffsetMap;
     };
     coord: {
       startSync: () => unknown;
-      in: (e: ActyxEvent<E>) => unknown;
-      out: Obs.Obs<ActyxEvent<E>>;
+      in: (e: ActyxEvent<E>[]) => unknown;
+      out: Obs.Obs<{ from: string; events: ActyxEvent<E>[] }>;
 
       ask: Obs.Obs<Ask>;
       recAsk: (ask: Ask) => void;
@@ -245,7 +246,7 @@ export namespace Node {
       own: StreamStore.make<E>(params.id),
       remote: new Map() as Map<string, StreamStore.Type<E>>,
       nextLamport: XLamport.make(0),
-      inToSubPipe: Obs.Obs.make<ActyxEvent<E>>(),
+      in: Obs.Obs.make<void>(),
       timeTravelAlert: Obs.Obs.make<void>(),
       afterSync: Obs.Obs.make<void>(),
     };
@@ -336,7 +337,7 @@ export namespace Node {
 
           unsubs.push(
             coord.out.sub(streamOut),
-            data.inToSubPipe.sub(streamOut),
+            data.in.sub(streamOut),
             data.timeTravelAlert.sub(() => {
               stopAndCleanup();
               const afterAsk = () => {
@@ -362,42 +363,54 @@ export namespace Node {
           onCompleteOrErr?.();
         };
       },
-      publish: async (tagged: TaggedEvent) => {
-        const lamport = data.nextLamport;
-        const date = new Date();
+      publish: (tagged: TaggedEvent) => api.publishMany([tagged]),
+      publishMany: async (evs) => {
+        const from = params.id;
 
-        const e: ActyxEvent<E> = {
-          meta: {
-            offset: data.own.offset(),
-            appId: "",
-            eventId: genEID(),
-            isLocalEvent: true,
-            lamport: lamport[Inner],
-            stream: params.id,
-            tags: tagged.tags,
-            timestampAsDate: () => date,
-            timestampMicros: date.getTime() * 1000,
-          },
-          payload: tagged.event as E,
-        };
-        data.own.set(e);
-        data.nextLamport = data.nextLamport.incr();
+        const events = evs.map((tagged) => {
+          const date = new Date();
+          const lamport = data.nextLamport;
+          const e: ActyxEvent<E> = {
+            meta: {
+              offset: data.own.offset(),
+              appId: "",
+              eventId: genEID(),
+              isLocalEvent: true,
+              lamport: lamport[Inner],
+              stream: from,
+              tags: tagged.tags,
+              timestampAsDate: () => date,
+              timestampMicros: date.getTime() * 1000,
+            },
+            payload: tagged.event as E,
+          };
+          data.own.set(e);
+          data.nextLamport = data.nextLamport.incr();
+          return e;
+        });
 
-        coord.out.emit(e);
+        if (evs.length > 0) {
+          coord.out.emit({ from, events });
+        }
       },
     };
 
     const coord: Type<E>["coord"] = {
       out: Obs.Obs.make(),
-      in: (e) => {
-        const { stream } = e.meta;
-        if (stream === params.id) return;
-        data.nextLamport = XLamport.max(
-          data.nextLamport,
-          XLamport.make(e.meta.lamport).incr()
-        );
-        getOrCreateStream(stream).set(e);
-        data.inToSubPipe.emit(e);
+      in: (evs) => {
+        evs.forEach((e) => {
+          const { stream } = e.meta;
+          if (stream === params.id) return;
+          data.nextLamport = XLamport.max(
+            data.nextLamport,
+            XLamport.make(e.meta.lamport).incr()
+          );
+          getOrCreateStream(stream).set(e);
+        });
+
+        if (evs.length > 0) {
+          data.in.emit();
+        }
       },
       startSync: () => {
         coord.ask.emit({
@@ -537,7 +550,7 @@ export namespace Network {
       join: (node) => {
         data.nodes.set(node.id, node);
         node.coord.out.sub((e) =>
-          getNeighbors(e.meta.stream).map((node) => node.coord.in(e))
+          getNeighbors(e.from).map((node) => node.coord.in(e.events))
         );
         node.coord.ask.sub((ask) =>
           getNeighbors(ask.from).forEach((node) => node.coord.recAsk(ask))

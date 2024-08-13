@@ -5,6 +5,7 @@ import {
   MsgType,
   OnCompleteOrErr,
   Tag,
+  TaggedEvent,
   TaggedTypedEvent,
   Tags,
 } from "@actyx/sdk";
@@ -80,10 +81,13 @@ export const run = <CType extends CTypeProto>(
   const { canonizationBarrier, multiverseTree } = machineCombinator;
 
   const batchedPublishes = () => {
-    const batch: Parameters<typeof node.api.publish>[] = [];
-    const collect: CollectEvents<CType> = (...x) => batch.push(x);
+    const batch: TaggedEvent[] = [];
+    const collect: CollectEvents<CType> = (x) => batch.push(x);
     const publish = () => {
-      const res = Promise.all(batch.map((x) => node.api.publish(...x)));
+      const res =
+        batch.length > 0
+          ? node.api.publishMany(batch.slice())
+          : Promise.resolve();
       batch.length = 0;
       return res;
     };
@@ -95,7 +99,12 @@ export const run = <CType extends CTypeProto>(
     if (e.type === MsgType.timetravel) {
       machineCombinator.setToCatchingUp();
     } else if (e.type === MsgType.events) {
+      // Publishing should happen after MachineCombinator has finished all its
+      // internal transformations.
       const batch = batchedPublishes();
+      // `pipe` function when run will internally issue publishes for
+      // compensation and canonization tracking. These publish issuances will be
+      // batched and executed after `pipe` is finished.
       machineCombinator.pipe(e, batch.collect);
       // TODO: think more about the potentially async stuff here on the real
       // implementation
