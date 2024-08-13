@@ -5,6 +5,7 @@ import {
   MsgType,
   OnCompleteOrErr,
   Tag,
+  TaggedTypedEvent,
   Tags,
 } from "@actyx/sdk";
 import * as Reality from "./multiverse.js";
@@ -75,14 +76,30 @@ export const run = <CType extends CTypeProto>(
   node: Node.Type<WFBusinessOrMarker<CType>>,
   workflow: WFWorkflow<CType>
 ) => {
-  const machineCombinator = MachineCombinator.make(params, node, workflow);
+  const machineCombinator = MachineCombinator.make(params, workflow);
   const { canonizationBarrier, multiverseTree } = machineCombinator;
+
+  const batchedPublishes = () => {
+    const batch: Parameters<typeof node.api.publish>[] = [];
+    const collect: CollectEvents<CType> = (...x) => batch.push(x);
+    const publish = () => {
+      const res = Promise.all(batch.map((x) => node.api.publish(...x)));
+      batch.length = 0;
+      return res;
+    };
+
+    return { collect, publish };
+  };
 
   const axSub = perpetualSubscription(node, async (e) => {
     if (e.type === MsgType.timetravel) {
-      machineCombinator.setToBuildingCompensation();
+      machineCombinator.setToCatchingUp();
     } else if (e.type === MsgType.events) {
-      machineCombinator.pipe(e);
+      const batch = batchedPublishes();
+      machineCombinator.pipe(e, batch.collect);
+      // TODO: think more about the potentially async stuff here on the real
+      // implementation
+      batch.publish();
     }
   });
 
@@ -91,9 +108,11 @@ export const run = <CType extends CTypeProto>(
    */
   const commands = () => {
     const data = machineCombinator.internal();
-    if (data.t === "catching-up") {
-      return [];
-    }
+
+    // We don't do anything while catching up. TODO: There might be a lot of
+    // "catching-up" if a lot of partition join happens, should think about this
+    // for at large-scale swarm.
+    if (data.t === "catching-up") return [];
 
     const commands = data.wfMachine
       .availableNexts()
@@ -104,8 +123,8 @@ export const run = <CType extends CTypeProto>(
           return x.actor.get() === params.self.role;
         }
       })
-      .map((x) => ({
-        info: x,
+      .map((info) => ({
+        info,
         publish: (payloadPatch: Record<string, unknown> = {}) => {
           const payload = { ...payloadPatch };
           let tags = params.tags;
@@ -136,13 +155,13 @@ export const run = <CType extends CTypeProto>(
             )
           );
 
-          node.api.publish(tags.applyTyped({ t: x.name, payload }));
+          node.api.publish(tags.applyTyped({ t: info.name, payload }));
         },
       }));
 
     if (data.t === "off-canon") {
       // TODO: examine whether the entire swarm needs to be paused until a
-      // canonization is decided
+      // canonization is decided, or just partially
       const compensateableIsInvolvedInRequestedCanonization =
         canonizationBarrier.active.involvedEventIds.has(
           data.compensationInfo.fromTimelineOf
@@ -204,6 +223,10 @@ const perpetualSubscription = <E>(
   };
 };
 
+type CollectEvents<CType extends CTypeProto> = (
+  e: TaggedTypedEvent<WFBusinessOrMarker<CType>>
+) => unknown;
+
 export namespace MachineCombinator {
   /**
    * Creates a MachineCombinator.
@@ -213,13 +236,8 @@ export namespace MachineCombinator {
    */
   export const make = <CType extends CTypeProto>(
     params: Params<CType>,
-    node: Node.Type<WFBusinessOrMarker<CType>>,
     workflow: WFWorkflow<CType>
   ) => {
-    type DelayedPublish = (
-      ...args: Parameters<typeof node.api.publish>
-    ) => unknown;
-
     const logger = makeLogger(`mcomb:${params.self.id}`);
     const multiverseTree = Reality.MultiverseTree.make<CType>();
     const canonizationStore = Reality.CanonizationStore.make<CType>();
@@ -267,7 +285,7 @@ export namespace MachineCombinator {
      * Recalculate supposed actual DataModes for this MachineCombinator.
      */
     // TODO: should compensation happen in timeouts/failures/retries?
-    const recalc = (delayedPublish: DelayedPublish) => {
+    const recalc = (publish: CollectEvents<CType>) => {
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
       // TODO: think about compensation events tag
@@ -299,7 +317,7 @@ export namespace MachineCombinator {
 
         if (!compensationMap.hasRegistered(directive)) {
           compensationMap.register(directive);
-          delayedPublish(params.tags.apply(directive));
+          publish(params.tags.applyTyped(directive));
         }
       });
 
@@ -351,7 +369,7 @@ export namespace MachineCombinator {
               };
               if (!compensationMap.hasRegistered(directive)) {
                 compensationMap.register(directive);
-                delayedPublish(params.tags.apply(directive));
+                publish(params.tags.applyTyped(directive));
               }
 
               return null;
@@ -378,7 +396,7 @@ export namespace MachineCombinator {
             };
             if (!compensationMap.hasRegistered(directive)) {
               compensationMap.register(directive);
-              delayedPublish(params.tags.apply(directive));
+              publish(params.tags.applyTyped(directive));
             }
 
             return null;
@@ -409,7 +427,7 @@ export namespace MachineCombinator {
     };
 
     const emitPendingCanonizationAdvertisements = (
-      delayedPublish: DelayedPublish
+      publish: CollectEvents<CType>
     ) => {
       const pendingCanonizationAdvrt =
         internal.data.wfMachine.pendingCanonizationAdvrt();
@@ -424,8 +442,8 @@ export namespace MachineCombinator {
 
       if (!lastStateIsOwn) return;
 
-      delayedPublish(
-        params.tags.apply({
+      publish(
+        params.tags.applyTyped({
           ...pendingCanonizationAdvrt,
           advertiser: params.self.id,
           ax: InternalTag.CanonAdvrt.write(""),
@@ -434,7 +452,7 @@ export namespace MachineCombinator {
     };
 
     // TODO: how to automate this? which one to take? strategy?
-    const canonizeWhenPossible = (delayedPublish: DelayedPublish) => {
+    const canonizeWhenPossible = (publish: CollectEvents<CType>) => {
       const canonizables =
         canonizationBarrier.active.activeAdvertisements.filter(
           (ad) => ad.payload.canonizer === params.self.id
@@ -486,7 +504,7 @@ export namespace MachineCombinator {
           canonizer: params.self.id,
         };
 
-        delayedPublish(params.tags.apply(canonization));
+        publish(params.tags.applyTyped(canonization));
       });
     };
 
@@ -500,18 +518,16 @@ export namespace MachineCombinator {
       wfmachine: () => internal.data.wfMachine,
       compensation: currentCompensation,
       last: () => internal.data.wfMachine.latestStateEvent(),
-      setToBuildingCompensation: () => {
+      setToCatchingUp: () => {
         internal.data = {
           t: "catching-up",
           wfMachine: internal.data.wfMachine,
         };
       },
-      pipe: (e: EventsMsg<WFBusinessOrMarker<CType>>) => {
-        // populate multiverse and compensation map
-        const delayedPublishes: Parameters<typeof node.api.publish>[] = [];
-        const delayedPublish: DelayedPublish = (...x) =>
-          delayedPublishes.push(x);
-
+      pipe: (
+        e: EventsMsg<WFBusinessOrMarker<CType>>,
+        publish: CollectEvents<CType>
+      ) => {
         // categorize events
         const wfBusinessEvents = extractWFBusinessEvents(e.events);
         const compsMarker = extractWFCompensationMarker(e.events);
@@ -525,7 +541,7 @@ export namespace MachineCombinator {
 
         if (canonMarkers.length > 0) {
           refreshCanonizationbarrier();
-          canonizeWhenPossible(delayedPublish);
+          canonizeWhenPossible(publish);
         }
 
         // If a canon decision is triggered, mark as catching-up
@@ -535,25 +551,23 @@ export namespace MachineCombinator {
         const data = internal.data;
 
         if (data.t === "catching-up" && e.caughtUp) {
-          recalc(delayedPublish);
+          recalc(publish);
         } else if (data.t === "normal") {
           data.wfMachine.advanceToMostCanon();
 
           if (data.wfMachine.doneCompensation().length > 0 || needRecalc) {
-            recalc(delayedPublish);
+            recalc(publish);
           }
         } else if (data.t === "off-canon") {
           data.wfMachine.advanceToMostCanon();
           data.canonWFMachine.advanceToMostCanon();
 
           if (data.wfMachine.doneCompensation().length > 0 || needRecalc) {
-            recalc(delayedPublish);
+            recalc(publish);
           }
         }
 
-        emitPendingCanonizationAdvertisements(delayedPublish);
-
-        delayedPublishes.forEach((x) => node.api.publish(...x));
+        emitPendingCanonizationAdvertisements(publish);
       },
     };
   };

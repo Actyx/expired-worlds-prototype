@@ -839,7 +839,7 @@ describe("canonization", () => {
     expectAllToHaveSameState([t1, t2, t3, canonizer]);
   });
 
-  it.only("ignores late canonization advertisement", async () => {
+  it("ignores late canonization advertisement", async () => {
     const scenario = CanonSwitch.genScenario();
     const {
       findAndRunCommand,

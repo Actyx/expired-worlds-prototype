@@ -211,7 +211,11 @@ export namespace Node {
         callback: (data: EventsOrTimetravel<E>) => Promise<void> | void,
         onCompleteOrErr?: OnCompleteOrErr
       ) => CancelSubscription;
-      publish: (e: TaggedEvent) => void;
+      /**
+       * Implementation-wise, it doesn't create anything async (e.g. timers)
+       * But it's there for spec genuineness
+       */
+      publish: (e: TaggedEvent) => Promise<void>;
       offsetMap: () => MiniOffsetMap;
     };
     coord: {
@@ -358,7 +362,7 @@ export namespace Node {
           onCompleteOrErr?.();
         };
       },
-      publish: (tagged: TaggedEvent) => {
+      publish: async (tagged: TaggedEvent) => {
         const lamport = data.nextLamport;
         const date = new Date();
 
