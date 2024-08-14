@@ -9,7 +9,7 @@ import {
   isWFCanonAdvrtMarker,
   isWFCanonDecideMarker,
 } from "./consts.js";
-import { Logger, makeLogger } from "./utils.js";
+import { Logger, makeLogger, MultihashMap } from "./utils.js";
 
 type EventId = string;
 
@@ -91,8 +91,14 @@ export namespace CanonizationStore {
     logger: Logger;
     register: (input: ActyxWFCanonMarker<CType>) => void;
     getOpenAdvertisements: () => ActyxWFCanonAdvrt<CType>[];
-    getAdvertisementsForName: (name: string) => ActyxWFCanonAdvrt<CType>[];
-    getDecisionsForName: (name: string) => ActyxWFCanonDecide<CType>[];
+    getAdvertisementsForAddress: (
+      name: CType["ev"],
+      depth: number
+    ) => ActyxWFCanonAdvrt<CType>[];
+    getDecisionsForAddress: (
+      name: CType["ev"],
+      depth: number
+    ) => ActyxWFCanonDecide<CType>[];
     /**
      * Sorted from the most present
      */
@@ -105,50 +111,82 @@ export namespace CanonizationStore {
     type EventId = string;
     type Advrt = ActyxWFCanonAdvrt<CType>;
     type Decision = ActyxWFCanonDecide<CType>;
+    type Depth = number;
 
     const logger = makeLogger("CanonizationStore");
-    const advertisements = new Map<Name, Map<EventId, Advrt>>();
-    const decisions = new Map<Name, Map<EventId, Decision>>();
+    const advertisements = MultihashMap.depth(2).make<
+      [Name, Depth],
+      Map<EventId, Advrt>
+    >();
+
+    const decisions = MultihashMap.depth(2).make<
+      [Name, Depth],
+      Map<EventId, Decision>
+    >();
     let decisionsFromLatest = [] as Decision[];
+
+    const access = <M extends MultihashMap.Type<any, any, any>>(
+      map: M,
+      key: MultihashMap.KeyOf<M>,
+      def: () => MultihashMap.ValueOf<M>
+    ): MultihashMap.ValueOf<M> => {
+      const val: MultihashMap.ValueOf<M> = map.get(key) || def();
+      if (!map.has(key)) map.set(key, val);
+      return val;
+    };
 
     const self: Type<CType> = {
       logger,
       register: (input) => {
         const {
           meta: { eventId },
-          payload: { name },
+          payload: { name, depth },
         } = input;
 
         if (isWFCanonAdvrtMarker(input.payload)) {
-          const map = advertisements.get(name) || new Map();
-          if (!advertisements.has(name)) advertisements.set(name, map);
-          map.set(eventId, input);
+          const advrt = input as ActyxWFCanonAdvrt<CType>;
+          const eventmap = access(
+            advertisements,
+            [name, depth],
+            () => new Map()
+          );
+          eventmap.set(eventId, advrt);
         } else if (isWFCanonDecideMarker(input.payload)) {
-          const map = decisions.get(name) || new Map();
-          if (!decisions.has(name)) decisions.set(name, map);
-          map.set(eventId, input);
+          const decision = input as ActyxWFCanonDecide<CType>;
+          const eventmap = access(decisions, [name, depth], () => new Map());
+          eventmap.set(eventId, decision);
 
           decisionsFromLatest = sortByEventKey([
             ...decisionsFromLatest,
-            input as Decision,
+            decision,
           ]).reverse();
         }
       },
       listDecisionsFromLatest: () => decisionsFromLatest,
-      getAdvertisementsForName: (name) => {
-        const ads = advertisements.get(name);
+      getAdvertisementsForAddress: (name, depth) => {
+        const ads = advertisements.get([name, depth]);
         if (!ads) return [];
         return sortByEventKey(Array.from(ads.values())).reverse();
       },
-      getDecisionsForName: (name) => {
-        const dec = decisions.get(name);
+      getDecisionsForAddress: (name, depth) => {
+        const dec = decisions.get([name, depth]);
         if (!dec) return [];
         return sortByEventKey(Array.from(dec.values())).reverse();
       },
-      getOpenAdvertisements: () =>
-        Array.from(advertisements.entries())
-          .filter(([name]) => !decisions.has(name))
-          .flatMap(([_, ads]) => Array.from(ads.values())),
+      getOpenAdvertisements: () => {
+        const allAdNumMap = Array.from(advertisements.values()).flatMap((x) =>
+          Array.from(x.values())
+        );
+
+        const res = allAdNumMap.filter((x) => {
+          const eventmap = decisions.get([x.payload.name, x.payload.depth]);
+          if (!eventmap) return true;
+          if (eventmap.size === 0) return true;
+          return false;
+        });
+
+        return res;
+      },
     };
     return self;
   };

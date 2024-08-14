@@ -173,3 +173,96 @@ export const makeLogger = (
     },
   };
 };
+
+export namespace MultihashMap {
+  type ValidKeyMemberType =
+    | string
+    | boolean
+    | number
+    | undefined
+    | null
+    | symbol;
+  export type KeyParam = ValidKeyMemberType[] | readonly ValidKeyMemberType[];
+  export type KeyOf<T extends Type<any, any, any>> = T extends Type<
+    infer K,
+    any,
+    any
+  >
+    ? K
+    : never;
+
+  export type ValueOf<T extends Type<any, any, any>> = T extends Type<
+    any,
+    infer V,
+    any
+  >
+    ? V
+    : never;
+
+  export type Type<
+    Key extends KeyParam & { length: Depth },
+    Value,
+    Depth extends number = Key["length"]
+  > = {
+    [Symbol.iterator]: Map<Key, Value>[typeof Symbol.iterator];
+    get: (k: Key) => Value | undefined;
+    has: (k: Key) => boolean;
+    set: (k: Key, value: Value) => void;
+    values: Map<Key, Value>["values"];
+    keys: Map<Key, Value>["keys"];
+    entries: Map<Key, Value>["entries"];
+    clear: Map<Key, Value>["clear"];
+    forEach: Map<Key, Value>["forEach"];
+  };
+
+  export const depth = <Depth extends number>(depth: Depth) => ({
+    make: <Key extends KeyParam & { length: Depth }, Value>(): Type<
+      Key,
+      Value,
+      Depth
+    > => {
+      if (depth < 1) {
+        throw new Error("cannot create multihash map with depth < 1");
+      }
+
+      const storedKeys: Key[] = [];
+      const storeKey = (key: Key) => {
+        const newKey = [...key] as Key;
+        storedKeys.push(newKey);
+        return newKey;
+      };
+      const findOrMakeKey = (inputKey: Key, remember = false): Key => {
+        if (inputKey.length !== depth) return inputKey;
+        const key = storedKeys.find(
+          (key) => key.findIndex((member, i) => inputKey[i] !== member) === -1
+        );
+
+        if (key !== undefined) return key;
+        if (!remember) return inputKey;
+        return storeKey(inputKey);
+      };
+
+      const map = new Map<Key, Value>();
+
+      const self: Type<Key, Value, Depth> = {
+        /** Returns an iterable of entries in the map. */
+        [Symbol.iterator]: () => map[Symbol.iterator](),
+        get: (inputKey) => map.get(findOrMakeKey(inputKey)),
+        set: (inputKey, value) => {
+          map.set(findOrMakeKey(inputKey, true), value);
+        },
+        has: (inputKey) => map.has(findOrMakeKey(inputKey)),
+        entries: () => map.entries(),
+        values: () => map.values(),
+        keys: () => map.keys(),
+        clear: () => {
+          storedKeys.length = 0;
+          map.clear();
+        },
+        forEach: (...args) => map.forEach(...args),
+      };
+
+      return self;
+    },
+  });
+}

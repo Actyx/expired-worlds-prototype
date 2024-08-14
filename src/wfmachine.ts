@@ -748,9 +748,11 @@ export const WFMachine = <CType extends CTypeProto>(
       // check for existing forTimeline
       const name = atStack.lastEvent.payload.t;
       const timelineOf = atStack.lastEvent.meta.eventId;
+      // TODO: this depth finding mechanism can be better coded inside the multiverse
+      const depth = createLinearChain(multiverse, atStack.lastEvent).length;
 
       const matchingCanonizeEvent = swarmStore.canonizationStore
-        .getDecisionsForName(name)
+        .getDecisionsForAddress(name, depth)
         .find((x) => x.payload.timelineOf === timelineOf);
 
       // resume
@@ -1405,15 +1407,18 @@ export const WFMachine = <CType extends CTypeProto>(
           payload: { t: stateName },
         } = atStack.lastEvent;
 
+        // TODO: this depth finding mechanism can be better coded inside the multiverse
+        const depth = createLinearChain(multiverse, atStack.lastEvent).length;
+
         const existingAdvrt = swarmStore.canonizationStore
-          .getAdvertisementsForName(stateName)
+          .getAdvertisementsForAddress(stateName, depth)
           .find((req) => req.payload.timelineOf === timelineOf);
 
         if (!existingAdvrt) {
           const uniqueActorDesignation = code.actor.get();
           const canonizer = innerstate.context[uniqueActorDesignation];
 
-          return { canonizer, name: stateName, timelineOf };
+          return { canonizer, name: stateName, depth, timelineOf };
         }
       }
 
@@ -1422,14 +1427,15 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const isWaitingForCanonization = () => {
     const code = workflow.at(data.evalIndex);
+    if (code?.t !== "canonize") return false;
     const atStack = data.stack.at(data.evalIndex);
+    if (atStack?.t !== "canonize") return false;
+    const name = atStack.lastEvent.payload.t;
+    const depth = createLinearChain(multiverse, atStack.lastEvent).length;
 
     return (
-      code?.t === "canonize" &&
-      atStack?.t === "canonize" &&
-      swarmStore.canonizationStore.getDecisionsForName(
-        atStack.lastEvent.payload.t
-      ).length === 0
+      swarmStore.canonizationStore.getDecisionsForAddress(name, depth)
+        .length === 0
     );
   };
 

@@ -418,30 +418,11 @@ export const validateCanonize = <CType extends CTypeProto>(
   const errors = [] as string[];
   const par = CParallelIndexer.make(workflow.code);
   const timeouts = CTimeoutIndexer.make(workflow.code);
-  const retries = CRetryIndexer.make(workflow.code);
   const compensations = CCompensationIndexer.make(workflow.code);
   const indexedCodes = workflow.code.map((x, i) => [i, x] as const);
   const canonizeCodes = indexedCodes.filter(
     (pair): pair is [number, CCanonize] => pair[1]?.t === "canonize"
   );
-
-  // loop check
-  canonizeCodes
-    .map((pair) => ({
-      index: pair[0],
-      matches: retries.getListMatching(pair[0]),
-    }))
-    .filter((item) => !compensations.isInsideWithBlock(item.index))
-    .filter((item) => item.matches.length > 0)
-    .forEach((item) =>
-      errors.push(
-        `canonize at ${
-          item.index
-        } is inside a retry block starting at ${item.matches
-          .map((match) => match.start)
-          .join(", ")}`
-      )
-    );
 
   canonizeCodes.forEach((canonizePair) => {
     const actorDesignation = canonizePair[1].actor.get();

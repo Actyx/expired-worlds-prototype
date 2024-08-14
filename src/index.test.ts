@@ -1,5 +1,9 @@
 import { describe, expect, it } from "@jest/globals";
-import { ActyxWFBusinessOrMarker } from "./consts.js";
+import {
+  ActyxWFBusinessOrMarker,
+  extractWFCanonDecideMarker,
+  InternalTag,
+} from "./consts.js";
 import { One, Parallel } from "./wfmachine.js";
 import {
   expectAllToHaveSameHistory,
@@ -781,15 +785,16 @@ describe("canonization", () => {
     const {
       findAndRunCommand,
       network,
-      agents: { canonizer, t1, t2, t3 },
+      agents: { authoritative1, authoritative2, t1, t2, t3 },
     } = scenario;
     const { Ev: Evs } = CanonSwitch;
 
-    await findAndRunCommand(canonizer, Evs.start, {
-      canonizer: canonizer.node.id,
+    await findAndRunCommand(authoritative1, Evs.start, {
+      canonizer1: authoritative1.node.id,
+      canonizer2: authoritative2.node.id,
     });
     await network.partitions.group(
-      [canonizer.node],
+      [authoritative1.node, authoritative2.node],
       [t1.node],
       [t2.node],
       [t3.node]
@@ -803,11 +808,11 @@ describe("canonization", () => {
       })
     );
 
-    await findAndRunCommand(t2, Evs.L1BeforeAdvertise);
+    await findAndRunCommand(t2, Evs.L1FirstAdvertise);
 
     // join t1, t2, t3
     // isolate canonizer.node, delaying canonization
-    await network.partitions.group([canonizer.node]);
+    await network.partitions.group([authoritative1.node, authoritative2.node]);
 
     // t1 is canon now but t2 has no compensations available while off-canon
     // because it is waiting for canonization.
@@ -822,8 +827,6 @@ describe("canonization", () => {
 
     // "canonizer" is in the group now.
     // It will automatically canonize t2 because it's in the season.
-    canonizer.node.logger.sub(log);
-
     await network.partitions.clear();
 
     // now t2 is canon, t1 and t3 is off-canon
@@ -831,12 +834,12 @@ describe("canonization", () => {
     expect(t2.machine.mcomb().t).toBe("normal");
     expect(t3.machine.mcomb().t).toBe("off-canon");
 
-    expect(t2.machine.state().state?.[1].payload.t).toBe(Evs.L1BeforeAdvertise);
+    expect(t2.machine.state().state?.[1].payload.t).toBe(Evs.L1FirstAdvertise);
 
     await findAndRunCommand(t1, Evs.L1Compensate);
     await findAndRunCommand(t3, Evs.L1Compensate);
 
-    expectAllToHaveSameState([t1, t2, t3, canonizer]);
+    expectAllToHaveSameState([t1, t2, t3, authoritative1, authoritative2]);
   });
 
   it("ignores late canonization advertisement", async () => {
@@ -844,15 +847,16 @@ describe("canonization", () => {
     const {
       findAndRunCommand,
       network,
-      agents: { canonizer, t1, t2, t3 },
+      agents: { authoritative1, authoritative2, t1, t2, t3 },
     } = scenario;
     const { Ev: Evs } = CanonSwitch;
 
-    await findAndRunCommand(canonizer, Evs.start, {
-      canonizer: canonizer.node.id,
+    await findAndRunCommand(authoritative1, Evs.start, {
+      canonizer1: authoritative1.node.id,
+      canonizer2: authoritative2.node.id,
     });
     await network.partitions.group(
-      [canonizer.node],
+      [authoritative1.node, authoritative2.node],
       [t1.node],
       [t2.node],
       [t3.node]
@@ -866,10 +870,10 @@ describe("canonization", () => {
       })
     );
 
-    await findAndRunCommand(t2, Evs.L1BeforeAdvertise);
+    await findAndRunCommand(t2, Evs.L1FirstAdvertise);
 
     // isolate canonizer.node, delaying canonization
-    await network.partitions.group([canonizer.node]);
+    await network.partitions.group([authoritative1.node, authoritative2.node]);
 
     // t1 is canon now
     expect(t1.machine.mcomb().t).toBe("normal");
@@ -893,7 +897,7 @@ describe("canonization", () => {
     expectAllToHaveSameState([t2, t3]);
 
     // t1 triggers a state where it is advertised
-    await findAndRunCommand(t1, Evs.L1BeforeAdvertise);
+    await findAndRunCommand(t1, Evs.L1FirstAdvertise);
 
     // everyone is in the group now.
     await network.partitions.clear();
@@ -908,7 +912,78 @@ describe("canonization", () => {
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(t2.machine.mcomb().t).toBe("normal");
     expect(t3.machine.mcomb().t).toBe("normal");
-    expect(canonizer.machine.mcomb().t).toBe("normal");
-    expectAllToHaveSameState([t1, t2, t3, canonizer]);
+    expect(authoritative1.machine.mcomb().t).toBe("normal");
+    expect(authoritative2.machine.mcomb().t).toBe("normal");
+    expectAllToHaveSameState([t1, t2, t3, authoritative1, authoritative2]);
+  });
+
+  it("works well with loop", async () => {
+    const scenario = CanonSwitch.genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { authoritative1, authoritative2, t1, t2, t3 },
+    } = scenario;
+    const { Ev: Evs } = CanonSwitch;
+
+    await findAndRunCommand(authoritative1, Evs.start, {
+      canonizer1: authoritative1.node.id,
+      canonizer2: authoritative2.node.id,
+    });
+    await network.partitions.group(
+      [authoritative1.node, authoritative2.node],
+      [t1.node],
+      [t2.node],
+      [t3.node]
+    );
+
+    // everyone bids themselves to L2
+    await Promise.all(
+      [t1, t2, t3].map(async (t) => {
+        await findAndRunCommand(t, Evs.L1Bid, { bidder: t.identity.id });
+        await findAndRunCommand(t, Evs.L1Accept, { assignee: t.identity.id });
+      })
+    );
+    // clear canonize for t2
+    await network.partitions.group([
+      authoritative1.node,
+      authoritative2.node,
+      t2.node,
+    ]);
+
+    await network.partitions.group([authoritative1.node, t2.node]);
+    await findAndRunCommand(t2, Evs.L1FirstAdvertise);
+    await findAndRunCommand(t2, Evs.L1TriggerLoop); // loop here once
+    await findAndRunCommand(t2, Evs.L1FirstAdvertise);
+    await findAndRunCommand(t2, Evs.L1SecondAdvertise);
+
+    await network.partitions.clear();
+
+    expect(t1.machine.mcomb().t).toBe("off-canon");
+    // t2 and t3 agrees with each other
+    expect(t2.machine.mcomb().t).toBe("normal");
+    expect(t3.machine.mcomb().t).toBe("off-canon");
+
+    // there should be 2 decisions for t2's `Evs.L1FirstAdvertise` on both iteration of the loop
+    const decisions = extractWFCanonDecideMarker(t2.node.api.slice()).filter(
+      (x) => {
+        const nameMatches = x.payload.name === Evs.L1FirstAdvertise;
+        const actorIsT2 =
+          (
+            t2.machine.multiverseTree().getById(x.payload.timelineOf)?.meta
+              .tags || []
+          )
+            .map((x) => InternalTag.ActorWriter.read(x))
+            .findIndex((x) => x === t2.identity.id) !== -1;
+
+        return nameMatches && actorIsT2;
+      }
+    );
+    expect(decisions.length).toBe(2);
+
+    const uniqueDepth = new Set<number>();
+    decisions.forEach((dec) => uniqueDepth.add(dec.payload.depth));
+
+    expect(uniqueDepth.size).toBe(2);
   });
 });

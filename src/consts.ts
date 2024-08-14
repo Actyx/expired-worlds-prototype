@@ -58,6 +58,12 @@ export type WFMarkerCanonAdvrt<CType extends CTypeProto> = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CanonAdvrt>;
   readonly name: CType["ev"];
   /**
+   * Chain depth is how deep an event is from the root. `depth` works with
+   * `name` to identify a canonization chance, enabling canonization inside a
+   * loop.
+   */
+  readonly depth: number;
+  /**
    * id of the advertiser
    */
   readonly advertiser: string;
@@ -72,6 +78,12 @@ export type WFMarkerCanonAdvrt<CType extends CTypeProto> = {
 export type WFMarkerCanonDecide<CType extends CTypeProto> = {
   readonly ax: InternalTag.StringOf<typeof InternalTag.CanonDecide>;
   readonly name: CType["ev"];
+  /**
+   * Chain depth is how deep an event is from the root. `depth` works with
+   * `name` to identify a canonization chance, enabling canonization inside a
+   * loop.
+   */
+  readonly depth: number;
   /**
    * id of the canonizer
    */

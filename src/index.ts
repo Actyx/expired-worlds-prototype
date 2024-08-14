@@ -30,10 +30,12 @@ import {
   WFMarkerCanonDecide,
   extractWFCanonDecideMarker,
   sortByEventKey,
+  ActyxWFBusiness,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
-import { Logger, makeLogger, Ord } from "./utils.js";
+import { Logger, makeLogger, MultihashMap, Ord } from "./utils.js";
+import { historyOf } from "./test-utils/scenario-builder.js";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -464,29 +466,40 @@ export namespace MachineCombinator {
     const canonizeWhenPossible = (publish: CollectEvents<CType>) => {
       const canonizables =
         canonizationBarrier.active.activeAdvertisements.filter(
-          (ad) => ad.payload.canonizer === params.self.id
+          (ad) => ad.advrt.payload.canonizer === params.self.id
         );
 
       if (canonizables.length === 0) return;
 
-      const groupedByName = new Map<string, typeof canonizables>();
+      const groupedByNameAndDepth = MultihashMap.depth(2).make<
+        [CType["ev"], number],
+        typeof canonizables
+      >();
+
       canonizables.forEach((canonizable) => {
-        const group = groupedByName.get(canonizable.payload.name) || [];
-        groupedByName.set(canonizable.payload.name, group);
-        group.push(canonizable);
+        const nameDepthKey: MultihashMap.KeyOf<typeof groupedByNameAndDepth> = [
+          canonizable.advrt.payload.name,
+          canonizable.advrt.payload.depth,
+        ];
+        // populate groupedBynameAndDepth
+        const nameDepthGroup = groupedByNameAndDepth.get(nameDepthKey) || [];
+        if (!groupedByNameAndDepth.has(nameDepthKey))
+          groupedByNameAndDepth.set(nameDepthKey, nameDepthGroup);
+        nameDepthGroup.push(canonizable);
       });
 
-      Array.from(groupedByName.entries()).forEach(([name, advrts]) => {
+      Array.from(groupedByNameAndDepth.values()).forEach((advrts) => {
         // TODO: introduce multiple strategies.
 
         // The default: check the timelines for the business event pointed by
         // the advertisements. Choose one based on the sort key of the business event.
         const advrtFromBusiness = advrts
-          .map((advrt) => {
+          .map(({ advrt, history }) => {
             const businessEvent = multiverseTree.getById(
               advrt.payload.timelineOf
             );
             if (!businessEvent) return;
+
             return {
               advrt,
               businessEvent,
@@ -500,7 +513,7 @@ export namespace MachineCombinator {
 
         // in case the business event is not found (syntactically possible,
         // logically not);
-        const advrtForBackup = sortByEventKey(advrts).at(0);
+        const advrtForBackup = sortByEventKey(advrts.map((x) => x.advrt)).at(0);
 
         const chosenAdvrt = advrtFromBusiness || advrtForBackup;
 
@@ -509,6 +522,7 @@ export namespace MachineCombinator {
         const canonization: WFMarkerCanonDecide<CType> = {
           ax: InternalTag.CanonDecide.write(""),
           name: chosenAdvrt.payload.name,
+          depth: chosenAdvrt.payload.depth,
           timelineOf: chosenAdvrt.payload.timelineOf,
           canonizer: params.self.id,
         };
@@ -683,7 +697,10 @@ export namespace CompensationMap {
 
 type CanonizationBarrier<CType extends CTypeProto> = {
   active: {
-    readonly activeAdvertisements: ActyxWFCanonAdvrt<CType>[];
+    readonly activeAdvertisements: {
+      advrt: ActyxWFCanonAdvrt<CType>;
+      history: string[];
+    }[];
     /**
      * List of state's eventId machines SHOULD NOT jump out of due to active canonization ad
      */
@@ -696,13 +713,20 @@ const generateCanonizationBarrier = <CType extends CTypeProto>(
   multiverse: Reality.MultiverseTree.Type<CType>,
   canonMap: Reality.CanonizationStore.Type<CType>
 ): CanonizationBarrier<CType>["active"] => {
-  const activeAdvertisements = canonMap.getOpenAdvertisements();
-  const involvedEventIds = new Set(
-    activeAdvertisements.flatMap((ad) => {
-      const point = multiverse.getById(ad.payload.timelineOf);
+  const activeAdvertisements = canonMap.getOpenAdvertisements().map((advrt) => {
+    const history = (() => {
+      const point = multiverse.getById(advrt.payload.timelineOf);
       if (!point) return [];
       return createLinearChain(multiverse, point).map((x) => x.meta.eventId);
-    })
+    })();
+
+    return {
+      advrt,
+      history,
+    };
+  });
+  const involvedEventIds = new Set(
+    activeAdvertisements.flatMap((x) => x.history)
   );
 
   return { activeAdvertisements, involvedEventIds };
