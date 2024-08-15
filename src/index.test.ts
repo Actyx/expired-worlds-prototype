@@ -10,7 +10,7 @@ import {
   expectAllToHaveSameState,
   historyOf,
 } from "./test-utils/scenario-builder.js";
-import { awhile, log } from "./test-utils/misc.js";
+import { awhile } from "./test-utils/misc.js";
 import { Logistics } from "./test-utils/logistic-scenario.js";
 import { Choices } from "./test-utils/choices-scenario.js";
 import { CanonSwitch } from "./test-utils/canon-switch-scenario.js";
@@ -212,7 +212,7 @@ describe("partitions and compensations", () => {
     expectAllToHaveSameState([src, t2]);
 
     // after partition, expect same state for all machines
-    await network.partitions.clear();
+    await network.partitions.connectAll();
     await awhile();
   });
 
@@ -242,7 +242,7 @@ describe("partitions and compensations", () => {
     expectAllToHaveSameState([t1, manager, dst]);
     expectAllToHaveSameState([t2, src]);
 
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
@@ -286,7 +286,7 @@ describe("partitions and compensations", () => {
     await findAndRunCommand(t2, Ev.reqEnter);
     await findAndRunCommand(src, Ev.doEnter);
 
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
@@ -350,7 +350,7 @@ describe("partitions and compensations", () => {
     expectAllToHaveSameState([t1, t3, manager]);
     expectAllToHaveSameState([t2, src, dst]);
 
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
@@ -447,7 +447,7 @@ describe("partitions and compensations", () => {
     expect(manager.machine.mcomb().t).toBe("normal");
     expect(t3.machine.mcomb().t).toBe("normal");
 
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
@@ -592,7 +592,7 @@ describe("partitions and compensations", () => {
     );
     await Promise.all([t1, t2, t3].map((x) => x.restartMachine()));
 
-    await network.partitions.clear();
+    await network.partitions.connectAll();
     await Promise.all([t1, t2, t3].map((x) => x.restartMachine()));
 
     expect(t1.machine.mcomb().t).toBe("normal");
@@ -789,9 +789,9 @@ describe("canonization", () => {
     } = scenario;
     const { Ev: Evs } = CanonSwitch;
 
-    await findAndRunCommand(authoritative1, Evs.start, {
-      canonizer1: authoritative1.node.id,
-      canonizer2: authoritative2.node.id,
+    await findAndRunCommand(authoritative1, Evs.start);
+    await findAndRunCommand(authoritative1, Evs.assign, {
+      canonizer: authoritative1.node.id,
     });
     await network.partitions.group(
       [authoritative1.node, authoritative2.node],
@@ -827,7 +827,7 @@ describe("canonization", () => {
 
     // "canonizer" is in the group now.
     // It will automatically canonize t2 because it's in the season.
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     // now t2 is canon, t1 and t3 is off-canon
     expect(t1.machine.mcomb().t).toBe("off-canon");
@@ -851,9 +851,9 @@ describe("canonization", () => {
     } = scenario;
     const { Ev: Evs } = CanonSwitch;
 
-    await findAndRunCommand(authoritative1, Evs.start, {
-      canonizer1: authoritative1.node.id,
-      canonizer2: authoritative2.node.id,
+    await findAndRunCommand(authoritative1, Evs.start);
+    await findAndRunCommand(authoritative1, Evs.assign, {
+      canonizer: authoritative1.node.id,
     });
     await network.partitions.group(
       [authoritative1.node, authoritative2.node],
@@ -900,7 +900,7 @@ describe("canonization", () => {
     await findAndRunCommand(t1, Evs.L1FirstAdvertise);
 
     // everyone is in the group now.
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     // despite t1's advertisement being out, its name has been decided before t1 joined
     // therefore the whole swarm now agrees that t2 is the winner.
@@ -926,9 +926,9 @@ describe("canonization", () => {
     } = scenario;
     const { Ev: Evs } = CanonSwitch;
 
-    await findAndRunCommand(authoritative1, Evs.start, {
-      canonizer1: authoritative1.node.id,
-      canonizer2: authoritative2.node.id,
+    await findAndRunCommand(authoritative1, Evs.start);
+    await findAndRunCommand(authoritative1, Evs.assign, {
+      canonizer: authoritative1.node.id,
     });
     await network.partitions.group(
       [authoritative1.node, authoritative2.node],
@@ -957,7 +957,7 @@ describe("canonization", () => {
     await findAndRunCommand(t2, Evs.L1FirstAdvertise);
     await findAndRunCommand(t2, Evs.L1SecondAdvertise);
 
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     expect(t1.machine.mcomb().t).toBe("off-canon");
     // t2 and t3 agrees with each other
@@ -985,5 +985,135 @@ describe("canonization", () => {
     decisions.forEach((dec) => uniqueDepth.add(dec.payload.depth));
 
     expect(uniqueDepth.size).toBe(2);
+  });
+
+  describe("competition", () => {
+    it("chooses the greater decision in 2-way competition", async () => {
+      const scenario = CanonSwitch.genScenario();
+      const {
+        findAndRunCommand,
+        network,
+        agents: { authoritative1, authoritative2, t1, t2, t3 },
+      } = scenario;
+      const { Ev: Evs } = CanonSwitch;
+
+      await findAndRunCommand(authoritative1, Evs.start);
+
+      // partition into 2 groups and make each of them have canonizers
+      await network.partitions.group(
+        [authoritative1.node, t1.node],
+        [authoritative2.node, t2.node]
+      );
+
+      // each partition canonize their branch
+      await Promise.all(
+        [[authoritative1, t1] as const, [authoritative2, t2] as const].map(
+          async ([canonizer, t]) => {
+            await findAndRunCommand(canonizer, Evs.assign, {
+              canonizer: canonizer.node.id,
+            });
+            await findAndRunCommand(t, Evs.L1Bid, { bidder: t.identity.id });
+            await findAndRunCommand(t, Evs.L1Accept, {
+              assignee: t.identity.id,
+            });
+            await findAndRunCommand(t, Evs.L1FirstAdvertise);
+          }
+        )
+      );
+
+      expect(t1.machine.wfmachine().latestStateEvent()?.payload.t).toBe(
+        Evs.L1FirstAdvertise
+      );
+      expect(t2.machine.wfmachine().latestStateEvent()?.payload.t).toBe(
+        Evs.L1FirstAdvertise
+      );
+
+      // clear the partition
+      await network.partitions.connectAll();
+
+      // Greater wins: authoritative2 wins because its "streamId" is "authoritative2", greater than "authoritative1"
+      expect(t1.machine.mcomb().t).toBe("off-canon");
+      expect(t2.machine.mcomb().t).toBe("normal");
+    });
+
+    // NOTE: does canonization competition breaks compensation? I don't think
+    // so. A compensation can only be broken if somehow the compensation's
+    // branch is revalidated again, which is not possible even with canonization
+    // competition.
+
+    it("chooses the greater decision in 3-way competition", async () => {
+      const scenario = CanonSwitch.genScenario();
+      const {
+        findAndRunCommand,
+        network,
+        agents: { authoritative1, authoritative2, authoritative3, t1, t2, t3 },
+      } = scenario;
+      const { Ev: Evs } = CanonSwitch;
+
+      await findAndRunCommand(authoritative1, Evs.start);
+
+      const groups = [
+        [authoritative1, t1] as const,
+        [authoritative2, t2] as const,
+        [authoritative3, t3] as const,
+      ];
+
+      // partition into 3 groups and make each of them have canonizers
+      await network.partitions.group(
+        ...groups.map((group) => {
+          return group.map((agent) => {
+            return agent.node;
+          });
+        })
+      );
+
+      // each partition canonize their branch
+      await Promise.all(
+        groups.map(async ([canonizer, t]) => {
+          await findAndRunCommand(canonizer, Evs.assign, {
+            canonizer: canonizer.node.id,
+          });
+          await findAndRunCommand(t, Evs.L1Bid, { bidder: t.identity.id });
+          await findAndRunCommand(t, Evs.L1Accept, { assignee: t.identity.id });
+          await findAndRunCommand(t, Evs.L1FirstAdvertise);
+        })
+      );
+
+      // supposedly: authoritative3 > authoritative2 > authoritative1
+
+      // join group 1 and group 3
+      await network.partitions.group(
+        [authoritative1.node, t1.node, authoritative2.node, t2.node],
+        [authoritative3.node, t3.node]
+      );
+
+      expect(t1.machine.mcomb().t).toBe("off-canon");
+      expect(t2.machine.mcomb().t).toBe("normal");
+
+      // t1 should be compensating now
+      expect(t1.machine.compensation()).not.toBe(null);
+
+      // connect all now
+      await network.partitions.connectAll();
+
+      expect(t1.machine.compensation()).not.toBe(null);
+      expect(t2.machine.compensation()).not.toBe(null);
+
+      await findAndRunCommand(t1, Evs.L1Compensate);
+      await findAndRunCommand(t2, Evs.L1Compensate);
+
+      expect(t1.machine.mcomb().t).toBe("normal");
+      expect(t2.machine.mcomb().t).toBe("normal");
+      expect(t3.machine.mcomb().t).toBe("normal");
+
+      expectAllToHaveSameState([
+        t1,
+        t2,
+        t3,
+        authoritative1,
+        authoritative2,
+        authoritative3,
+      ]);
+    });
   });
 });

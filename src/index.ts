@@ -30,7 +30,6 @@ import {
   WFMarkerCanonDecide,
   extractWFCanonDecideMarker,
   sortByEventKey,
-  ActyxWFBusiness,
 } from "./consts.js";
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
@@ -190,6 +189,7 @@ export const run = <CType extends CTypeProto>(
 
   return {
     commands,
+    compensation: machineCombinator.compensation,
     mcomb: () => machineCombinator.internal(),
     multiverseTree: () => multiverseTree,
     wfmachine: () => machineCombinator.wfmachine(),

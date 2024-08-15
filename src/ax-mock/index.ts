@@ -11,7 +11,6 @@ import { Obs } from "systemic-ts-utils";
 import * as uuid from "uuid";
 import { Logger, makeLogger, Ord } from "../utils.js";
 import { sortByEventKey } from "../consts.js";
-import { log } from "../test-utils/misc.js";
 
 type NodeId = string;
 type PartitionId = string;
@@ -494,7 +493,7 @@ export namespace Network {
     partitions: {
       group: (...groups: Node.Type<E>[][]) => Promise<void>;
       make: (nodes: Node.Type<E>[]) => void;
-      clear: () => Promise<void>;
+      connectAll: () => Promise<void>;
     };
   }>;
 
@@ -639,7 +638,7 @@ export namespace Network {
           );
           data.partitions.reverse.set(partitionId, { nodes: [...nodeIds] });
         },
-        clear: () => {
+        connectAll: () => {
           data.partitions.forward = new Map();
           data.partitions.reverse = new Map();
 

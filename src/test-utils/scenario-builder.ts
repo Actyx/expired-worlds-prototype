@@ -1,13 +1,8 @@
 import { ActyxEvent, Tags } from "@actyx/sdk";
-import {
-  ActyxWFCanonAdvrt,
-  CTypeProto,
-  WFBusinessOrMarker,
-  WFMarkerCanonAdvrt,
-} from "../consts.js";
+import { CTypeProto, WFBusinessOrMarker } from "../consts.js";
 import { WFWorkflow } from "../wfcode.js";
 import { Network, Node } from "../ax-mock/index.js";
-import { awhile, log } from "./misc.js";
+import { awhile } from "./misc.js";
 import { Machine, run } from "../index.js";
 import { expect } from "@jest/globals";
 import { createLinearChain } from "../event-utils.js";

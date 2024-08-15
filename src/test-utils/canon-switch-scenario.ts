@@ -6,6 +6,7 @@ import { Code, WFWorkflow } from "../wfcode.js";
 
 const EvNames = Enum([
   "start",
+  "assign",
   "L1Bid",
   "L1Accept",
   "L1FirstAdvertise",
@@ -28,11 +29,9 @@ const { role, unique } = code.actor;
 const logistic: WFWorkflow<TheType> = {
   uniqueParams: [],
   code: [
-    code.event(role(Role.canonizer), EvNames.start, {
-      bindings: [
-        code.bind("canonizer1", "canonizer1"),
-        code.bind("canonizer2", "canonizer2"),
-      ],
+    code.event(role(Role.canonizer), EvNames.start),
+    code.event(role(Role.canonizer), EvNames.assign, {
+      bindings: [code.bind("canonizer", "canonizer")],
     }),
     ...code.parallel({ min: 1 }, [
       code.event(role(Role.worker), EvNames.L1Bid, {
@@ -46,14 +45,13 @@ const logistic: WFWorkflow<TheType> = {
       [
         ...code.retry([
           code.event(unique("l1"), EvNames.L1FirstAdvertise),
-          code.canonize(unique("canonizer1")),
+          code.canonize(unique("canonizer")),
           ...code.choice([
             code.event(unique("l1"), EvNames.L1SecondAdvertise),
             code.event(unique("l1"), EvNames.L1TriggerLoop, {
               control: code.Control.fail,
             }),
           ]),
-          code.canonize(unique("canonizer2")),
         ]),
         code.event(unique("l1"), EvNames.L1Finalize),
       ],
@@ -76,17 +74,26 @@ const genScenarioImpl = (
     [
       { id: "authoritative1", role: Role.canonizer },
       { id: "authoritative2", role: Role.canonizer },
+      { id: "authoritative3", role: Role.canonizer },
       { id: "t1", role: Role.worker },
       { id: "t2", role: Role.worker },
       { id: "t3", role: Role.worker },
     ]
   );
 
-  const [authoritative1, authoritative2, t1, t2, t3] = scenario.agents;
+  const [authoritative1, authoritative2, authoritative3, t1, t2, t3] =
+    scenario.agents;
 
   return {
     ...scenario,
-    agents: { authoritative1, authoritative2, t1, t2, t3 } as const,
+    agents: {
+      authoritative1,
+      authoritative2,
+      authoritative3,
+      t1,
+      t2,
+      t3,
+    } as const,
   };
 };
 

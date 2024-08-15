@@ -88,7 +88,7 @@ describe("ax-mock", () => {
     expectSameData([nodeA, nodeB]);
     expectSameData([nodeC, nodeD]);
 
-    await network.partitions.clear();
+    await network.partitions.connectAll();
 
     expect(nodeA.api.offsetMap()).toEqual(nodeB.api.offsetMap());
     expect(nodeA.api.offsetMap()).toEqual(nodeC.api.offsetMap());
@@ -184,7 +184,7 @@ describe("ax-mock", () => {
       expect(observedEvents.at(2)?.payload).toEqual("a2");
       expect(observedEvents.at(3)?.payload).toEqual("a3");
 
-      await network.partitions.clear();
+      await network.partitions.connectAll();
       await sleep(3);
 
       expect(observedEvents.map((x) => x.payload)).toEqual([
