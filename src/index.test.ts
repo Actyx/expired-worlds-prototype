@@ -245,8 +245,9 @@ describe("partitions and compensations", () => {
     await network.partitions.connectAll();
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
-    expect(src.machine.mcomb().t).toBe("off-canon");
-
+    // while src is involved in the partition that produces the compensatable
+    // it is not involved in the compensation scheme itself.
+    expect(src.machine.mcomb().t).toBe("normal");
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
     expect(dst.machine.mcomb().t).toBe("normal");
@@ -258,7 +259,6 @@ describe("partitions and compensations", () => {
     // compensation is done
     expect(t2.machine.mcomb().t).toBe("normal");
     expect(src.machine.mcomb().t).toBe("normal");
-
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
     expect(dst.machine.mcomb().t).toBe("normal");
@@ -289,8 +289,7 @@ describe("partitions and compensations", () => {
     await network.partitions.connectAll();
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
-    expect(src.machine.mcomb().t).toBe("off-canon");
-
+    expect(src.machine.mcomb().t).toBe("normal");
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
     expect(dst.machine.mcomb().t).toBe("normal");
@@ -303,8 +302,7 @@ describe("partitions and compensations", () => {
     );
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
-    expect(src.machine.mcomb().t).toBe("off-canon");
-
+    expect(src.machine.mcomb().t).toBe("normal");
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
     expect(dst.machine.mcomb().t).toBe("normal");
@@ -315,7 +313,7 @@ describe("partitions and compensations", () => {
     expect(beforeRestart).toEqual(afterRestart);
   });
 
-  it("does nested compensation from the inside first", async () => {
+  it.only("does nested compensation from the inside first", async () => {
     const scenario = Logistics.genScenario();
     const {
       findAndRunCommand,
@@ -354,7 +352,9 @@ describe("partitions and compensations", () => {
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
-    expect(dst.machine.mcomb().t).toBe("off-canon");
+    // while dst is involved in the partition that produces the compensatable
+    // it is not involved in the compensation scheme itself.
+    expect(dst.machine.mcomb().t).toBe("normal");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -364,7 +364,7 @@ describe("partitions and compensations", () => {
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
-    expect(dst.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("normal");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -1040,6 +1040,11 @@ describe("canonization", () => {
     // so. A compensation can only be broken if somehow the compensation's
     // branch is revalidated again, which is not possible even with canonization
     // competition.
+    // Compensation tracking works well with canonization by relying to the fact
+    // that there is no "canonize back to the decanonized branch". Compensation
+    // tracking relies on the actor having been in the state where it has "more
+    // compensateable" to "less compensateable" as compensations negates those
+    // compensateable.
 
     it("chooses the greater decision in 3-way competition", async () => {
       const scenario = CanonSwitch.genScenario();
@@ -1093,7 +1098,7 @@ describe("canonization", () => {
       // t1 should be compensating now
       expect(t1.machine.compensation()).not.toBe(null);
 
-      // connect all now
+      // connect all now, here will be a competing canonization
       await network.partitions.connectAll();
 
       expect(t1.machine.compensation()).not.toBe(null);

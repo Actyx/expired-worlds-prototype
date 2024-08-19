@@ -194,11 +194,13 @@ export type WFMachine<CType extends CTypeProto> = {
     codeIndex: NestedCodeIndexAddress.Type;
     firstCompensation: CEvent<CType>;
     fromTimelineOf: string;
+    involvedActors: string[];
   }[];
   activeCompensation: () => {
     codeIndex: NestedCodeIndexAddress.Type;
     firstCompensation: CEvent<CType>;
     fromTimelineOf: string;
+    involvedActors: string[];
   }[];
   doneCompensation: () => {
     codeIndex: NestedCodeIndexAddress.Type;
@@ -388,6 +390,11 @@ export const WFMachine = <CType extends CTypeProto>(
         };
       });
 
+  const involvedActorsOfCompensateAt = (index: number) =>
+    (ccompensateIndexer.involvementMap.get(index) || [])
+      .map((binding) => innerstate.context[binding] || undefined)
+      .filter((x): x is string => !!x);
+
   const selfActiveCompensation = (evalIndex = data.evalIndex) => {
     const res = ccompensateIndexer
       .getWithListMatching(evalIndex)
@@ -427,6 +434,7 @@ export const WFMachine = <CType extends CTypeProto>(
           firstCompensation,
           firstCompensationIndex,
           fromTimelineOf: triggeringEvent.meta.eventId,
+          involvedActors: involvedActorsOfCompensateAt(compensateIndex),
         };
       })
       .filter((x): x is Exclude<typeof x, null> => x !== null);
@@ -471,6 +479,7 @@ export const WFMachine = <CType extends CTypeProto>(
           firstCompensation,
           firstCompensationIndex,
           fromTimelineOf: triggeringEvent.meta.eventId,
+          involvedActors: involvedActorsOfCompensateAt(index),
         };
       })
       .filter((x): x is Exclude<typeof x, null> => x !== null);
@@ -1469,10 +1478,11 @@ export const WFMachine = <CType extends CTypeProto>(
     availableNexts,
     availableCompensateable: () => {
       const res = selfAvailableCompensateable().map(
-        ({ codeIndex, firstCompensation, fromTimelineOf }) => ({
+        ({ codeIndex, firstCompensation, fromTimelineOf, involvedActors }) => ({
           codeIndex,
           firstCompensation,
           fromTimelineOf,
+          involvedActors,
         })
       );
 
@@ -1490,10 +1500,11 @@ export const WFMachine = <CType extends CTypeProto>(
     },
     activeCompensation: () => {
       const res = selfActiveCompensation().map(
-        ({ codeIndex, firstCompensation, fromTimelineOf }) => ({
+        ({ codeIndex, firstCompensation, fromTimelineOf, involvedActors }) => ({
           codeIndex,
           firstCompensation,
           fromTimelineOf,
+          involvedActors,
         })
       );
 

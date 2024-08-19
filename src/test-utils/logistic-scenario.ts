@@ -155,7 +155,7 @@ const logistic: WFWorkflow<TheType> = {
               ...code.timeout(
                 10 * 1000,
                 [
-                  code.event(role(Role.storage), Evs.offerStorage, {
+                  code.event(unique("src"), Evs.offerStorage, {
                     bindings: [code.bind("s", "storage")],
                   }),
                 ],

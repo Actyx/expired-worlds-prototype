@@ -34,7 +34,6 @@ import {
 import { WFWorkflow } from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
 import { Logger, makeLogger, MultihashMap, Ord } from "./utils.js";
-import { historyOf } from "./test-utils/scenario-builder.js";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -308,6 +307,7 @@ export namespace MachineCombinator {
       canonWFMachine.advanceToMostCanon();
 
       const compensateables = calculateCompensateables(
+        params.self,
         workflow,
         swarmStore,
         wfMachine,
@@ -737,6 +737,10 @@ const generateCanonizationBarrier = <CType extends CTypeProto>(
  * multiverse to the other.
  */
 const calculateCompensateables = <CType extends CTypeProto>(
+  self: {
+    role: CType["role"];
+    id: string;
+  },
   workflow: WFWorkflow<CType>,
   swarmData: SwarmData<CType>,
   fromWFMachine: WFMachine<CType>,
@@ -770,8 +774,12 @@ const calculateCompensateables = <CType extends CTypeProto>(
     divergenceWFmachine.resetAndAdvanceToEventId(atDivergence.meta.eventId);
   }
   // Comps before divergence should not be accounted for
-  const compsBeforeDivergence = divergenceWFmachine.availableCompensateable();
-  const allActiveCompensations = fromWFMachine.availableCompensateable();
+  const compsBeforeDivergence = divergenceWFmachine
+    .availableCompensateable()
+    .filter((comp) => comp.involvedActors.includes(self.id));
+  const allActiveCompensations = fromWFMachine
+    .availableCompensateable()
+    .filter((comp) => comp.involvedActors.includes(self.id));
 
   // subtract "before-divergence" from "all" and we get compensations that we need
   // TODO: might want to check for more than `codeIndex` because this might not be completely the right definition.

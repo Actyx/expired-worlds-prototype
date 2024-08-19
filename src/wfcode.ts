@@ -45,7 +45,7 @@
  * right below the CEvent.
  */
 
-import { CTypeProto } from "./consts.js";
+import { CTypeProto, NestedCodeIndexAddress } from "./consts.js";
 import { Enum, WrapType } from "./utils.js";
 
 /**
@@ -395,6 +395,7 @@ export const validate = <CType extends CTypeProto>(
     .concat(validateCompensateNotFirstEvent(workflow))
     .concat(validateFirstItemIsEvent(workflow))
     .concat(validateCompensationFirstEvent(workflow))
+    .concat(validateCompensationWithNotContainingRoleBasedActor(workflow))
     .concat(validateCanonize(workflow));
 
   if (errors.length > 0) {
@@ -567,6 +568,52 @@ export const validateCompensationFirstEvent = <CType extends CTypeProto>(
   return errors;
 };
 
+export const validateCompensationWithNotContainingRoleBasedActor = <
+  CType extends CTypeProto
+>(
+  workflow: WFWorkflow<CType>
+) => {
+  const errors = [] as string[];
+
+  const inspectCode = (
+    level: NestedCodeIndexAddress.Type,
+    codelines: (readonly [number, CItem<CType>])[]
+  ) => {
+    codelines
+      .filter((line): line is [number, CEvent<CType>] => line[1].t === "event")
+      .forEach(([index, code]) => {
+        if (code.actor.t === "Role") {
+          errors.push(
+            `Event inside a compensation's with block cannot have a role actor. Error at index ${[
+              ...level,
+              index,
+            ].join(".")}, code: ${JSON.stringify(code)}`
+          );
+        }
+      });
+
+    codelines
+      .filter((line): line is [number, CMatch<CType>] => line[1].t === "match")
+      .forEach(([index, code]) =>
+        inspectCode(
+          [...level, index],
+          code.subworkflow.code.map((x, i) => [i, x] as const)
+        )
+      );
+  };
+
+  CCompensationIndexer.make(workflow.code).withList.forEach((pair) =>
+    inspectCode(
+      [],
+      workflow.code
+        .map((x, i) => [i, x] as const)
+        .slice(pair.start + 1, pair.end)
+    )
+  );
+
+  return errors;
+};
+
 /**
  * Index WFWorkflow for Parallel codes for faster queries with better-defined
  * APIs. This is useful for queries done inside WFMachine.
@@ -644,14 +691,47 @@ export namespace CCompensationIndexer {
       (line) => line.t === "compensate",
       (line) => line.t === "compensate-end"
     );
+
     const withList = extractor(workflow).extractPairs(
       (line) => line.t === "compensate-with",
       (line) => line.t === "anti-compensate"
     );
 
+    const involvementMap = new Map(
+      mainList
+        .map((pair) => [pair.start, workflow.at(pair.start)] as const)
+        .filter(
+          (line): line is [number, CCompensate] => line[1]?.t === "compensate"
+        )
+        .map(([compIndex, comp]) => {
+          const { antiIndexOffset, withIndexOffset } = comp;
+
+          const withIndex = compIndex + withIndexOffset;
+          const antiIndex = compIndex + antiIndexOffset;
+          const involvedBindings = workflow
+            .slice(withIndex + 1, antiIndex)
+            .filter(
+              (x): x is CEvent<CType> | CMatch<CType> =>
+                x.t === "event" || x.t === "match"
+            )
+            .flatMap((x) => {
+              if (x.t === "event" && x.actor.t === "Unique") {
+                return x.actor.get();
+              }
+              if (x.t === "match") {
+                return Object.values(x.args);
+              }
+              return [];
+            });
+
+          return [compIndex, involvedBindings] as const;
+        })
+    );
+
     return {
       mainList,
       withList,
+      involvementMap: involvementMap as ReadonlyMap<number, string[]>,
       getWithListMatching: (x: number) =>
         withList.filter((entry) => x > entry.start && x < entry.end),
       getMainListMatching: (x: number) =>
