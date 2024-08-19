@@ -313,7 +313,7 @@ describe("partitions and compensations", () => {
     expect(beforeRestart).toEqual(afterRestart);
   });
 
-  it.only("does nested compensation from the inside first", async () => {
+  it("does nested compensation from the inside first", async () => {
     const scenario = Logistics.genScenario();
     const {
       findAndRunCommand,
@@ -439,9 +439,12 @@ describe("partitions and compensations", () => {
 
     // src and dst now realize they are in a compensation group
     expect(src.machine.mcomb().t).toBe("off-canon");
-    expect(dst.machine.mcomb().t).toBe("off-canon");
     // but t2 hasn't yet since it is still partitioned
     expect(t2.machine.mcomb().t).toBe("normal");
+    // dst was in the partition that creates the compensateable but it is not
+    // necessary for the compensation, therefore it is normal instead of
+    // off-canon
+    expect(dst.machine.mcomb().t).toBe("normal");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -451,7 +454,7 @@ describe("partitions and compensations", () => {
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
-    expect(dst.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("normal");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");
@@ -461,7 +464,7 @@ describe("partitions and compensations", () => {
 
     expect(t2.machine.mcomb().t).toBe("off-canon");
     expect(src.machine.mcomb().t).toBe("off-canon");
-    expect(dst.machine.mcomb().t).toBe("off-canon");
+    expect(dst.machine.mcomb().t).toBe("normal");
 
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(manager.machine.mcomb().t).toBe("normal");

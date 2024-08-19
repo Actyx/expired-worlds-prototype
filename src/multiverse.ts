@@ -18,6 +18,7 @@ export namespace MultiverseTree {
   export type UnregisteredEvent = typeof UnregisteredEvent;
   export type Type<CType extends CTypeProto> = {
     register: (e: ActyxWFBusiness<CType>) => void;
+    depthOf: (eventId: string) => number;
     /**
      * In the case of parallels, there can be more than one predecessors
      */
@@ -37,6 +38,7 @@ export namespace MultiverseTree {
       infoMap: new Map<EventId, ActyxWFBusiness<CType>>(),
       predecessors: new Map<EventId, Set<EventId>>(),
       next: new Map<EventId, Set<EventId>>(),
+      depth: new Map<EventId, number>(),
     };
 
     const predecessorSetOf = (eventId: string) => {
@@ -66,7 +68,16 @@ export namespace MultiverseTree {
           predecessorSet.add(predecessorId);
           nextSetOf(predecessorId).add(eventId);
         });
+
+        const depth =
+          predecessorIds.reduce(
+            (max, id) => Math.max(max, internal.depth.get(id) || 0),
+            0
+          ) + 1;
+
+        internal.depth.set(eventId, depth);
       },
+      depthOf: (eventId: string) => internal.depth.get(eventId) || 0,
       getRoots: () => Array.from(internal.infoMap.values()).filter(self.isRoot),
       getById: (id) => internal.infoMap.get(id) || null,
       getNextById: (id) =>

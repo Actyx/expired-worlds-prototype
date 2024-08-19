@@ -33,7 +33,6 @@
 import {
   ActyxWFBusiness,
   CTypeProto,
-  InternalTag,
   NestedCodeIndexAddress,
   sortByEventKey,
   WFMarkerCanonAdvrt,
@@ -757,8 +756,7 @@ export const WFMachine = <CType extends CTypeProto>(
       // check for existing forTimeline
       const name = atStack.lastEvent.payload.t;
       const timelineOf = atStack.lastEvent.meta.eventId;
-      // TODO: this depth finding mechanism can be better coded inside the multiverse
-      const depth = createLinearChain(multiverse, atStack.lastEvent).length;
+      const depth = multiverse.depthOf(atStack.lastEvent.meta.eventId);
 
       const matchingCanonizeEvent = swarmStore.canonizationStore
         .getDecisionsForAddress(name, depth)
@@ -1416,8 +1414,7 @@ export const WFMachine = <CType extends CTypeProto>(
           payload: { t: stateName },
         } = atStack.lastEvent;
 
-        // TODO: this depth finding mechanism can be better coded inside the multiverse
-        const depth = createLinearChain(multiverse, atStack.lastEvent).length;
+        const depth = multiverse.depthOf(atStack.lastEvent.meta.eventId);
 
         const existingAdvrt = swarmStore.canonizationStore
           .getAdvertisementsForAddress(stateName, depth)
@@ -1440,7 +1437,7 @@ export const WFMachine = <CType extends CTypeProto>(
     const atStack = data.stack.at(data.evalIndex);
     if (atStack?.t !== "canonize") return false;
     const name = atStack.lastEvent.payload.t;
-    const depth = createLinearChain(multiverse, atStack.lastEvent).length;
+    const depth = multiverse.depthOf(atStack.lastEvent.meta.eventId);
 
     return (
       swarmStore.canonizationStore.getDecisionsForAddress(name, depth)
