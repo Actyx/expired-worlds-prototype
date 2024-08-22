@@ -332,6 +332,8 @@ export const WFMachine = <CType extends CTypeProto>(
         const antiIndex = index + ctimeout.antiOffsetIndex;
         const cconsquenceIndex = gapIndex + 1;
 
+        if (evalIndex >= gapIndex) return null;
+
         const cconsequence = workflow.at(cconsquenceIndex);
 
         if (cconsequence?.t !== "event") {
@@ -353,6 +355,7 @@ export const WFMachine = <CType extends CTypeProto>(
           antiIndex,
         };
       })
+      .filter((x): x is NonNullable<typeof x> => !!x)
       .sort((a, b) => {
         // in case of nested timeouts: sorted by last / outermost timeout
         return b.antiIndex - a.antiIndex;
@@ -1018,12 +1021,14 @@ export const WFMachine = <CType extends CTypeProto>(
     const firstMatching = workflow
       .slice(eventStartIndex, antiIndex) // take the CEvent between the choice and anti-choice
       .map((x, index) => {
+        if (x.t === "choice-barrier") return null;
         if (x.t !== "event") {
           // defensive measure, should not exist
           throw new Event("codes inside are not CEvent");
         }
         return [index, x] as const;
       })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
       .find(([_, x]) => x.name === e.payload.t);
 
     if (firstMatching) {

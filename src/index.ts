@@ -64,11 +64,6 @@ type DataModes<CType extends CTypeProto> = {
 
 export type Machine<CType extends CTypeProto> = ReturnType<typeof run<CType>>;
 
-// TODO:
-// - involve participation into compensation calculation (this depends on
-//   whether we want to block everyone involved in the task into until a
-//   particular compensation is done by a subset of participant)
-
 /**
  * Creates a machine combinator and listens to an actyx node.
  */
@@ -462,7 +457,6 @@ export namespace MachineCombinator {
       );
     };
 
-    // TODO: how to automate this? which one to take? strategy?
     const canonizeWhenPossible = (publish: CollectEvents<CType>) => {
       const canonizables =
         canonizationBarrier.active.activeAdvertisements.filter(

@@ -64,7 +64,8 @@ export type CItem<CType extends CTypeProto> =
   | CCompensateWith
   | CMatch<CType>
   | CMatchCase
-  | CChoice;
+  | CChoice
+  | CChoiceBarrier;
 
 type CAnti =
   | CAntiRetry
@@ -85,6 +86,12 @@ export type Role<Ctype extends CTypeProto> = WrapType.TypeOf<
  * An actor is either a Unique or a Role.
  */
 export type Actor<CType extends CTypeProto> = Unique | Role<CType>;
+export namespace Actor {
+  export const eq = <CType extends CTypeProto>(
+    a: Actor<CType>,
+    b: Actor<CType>
+  ): boolean => a.t === b.t && a.get() === b.get();
+}
 
 export type CCanonize = {
   t: "canonize";
@@ -100,6 +107,7 @@ export type CEvent<CType extends CTypeProto> = {
   control?: Code.Control;
 };
 export type CChoice = { t: "choice"; antiIndexOffset: number };
+export type CChoiceBarrier = { t: "choice-barrier"; antiIndexOffset: number };
 export type CAntiChoice = { t: "anti-choice" };
 export type CMatch<CType extends CTypeProto> = {
   t: "match";
@@ -245,8 +253,11 @@ export namespace Code {
   const choice = <CType extends CTypeProto>(
     events: [CEvent<CType>, CEvent<CType>, ...CEvent<CType>[]]
   ): CItem<CType>[] => [
-    { t: "choice", antiIndexOffset: events.length + 1 },
-    ...events,
+    { t: "choice", antiIndexOffset: events.length * 2 + 1 },
+    ...events.flatMap((e, index): CItem<CType>[] => [
+      e,
+      { t: "choice-barrier", antiIndexOffset: (events.length - index) * 2 - 1 },
+    ]),
     { t: "anti-choice" },
   ];
 
@@ -772,5 +783,259 @@ export namespace CRetryIndexer {
       getListMatching: (x: number) =>
         list.filter((entry) => x > entry.start && x < entry.end),
     };
+  };
+}
+
+export namespace CodeGraph {
+  namespace ActorSet {
+    export type Type = ReturnType<typeof make>;
+    export const make = <CType extends CTypeProto>(
+      inner: Actor<CType>[] = []
+    ) => {
+      return {
+        add: (actor: Actor<CType>) => {
+          const foundIndex = inner.findIndex((x) => Actor.eq(actor, x));
+          if (foundIndex === -1) {
+            inner.push(actor);
+          }
+        },
+        map: ((...params: Parameters<typeof inner.map>) =>
+          inner.map(...params)) as typeof inner.map,
+      };
+    };
+  }
+
+  export const make = <CType extends CTypeProto>(
+    workflow: WFWorkflow<CType>["code"]
+  ) => {
+    const ccompensateIndexer = CCompensationIndexer.make(workflow);
+    const cparallelIndexer = CParallelIndexer.make(workflow);
+    const ctimeoutIndexer = CTimeoutIndexer.make(workflow);
+    const cretryIndexer = CRetryIndexer.make(workflow);
+
+    const determineNexts = (i: number, c: CItem<CType>): number[] => {
+      if (c.t === "anti-choice") {
+        return [i + 1];
+      }
+      if (c.t === "anti-compensate") {
+        return [];
+      }
+      if (c.t === "anti-match-case") {
+        return [i + c.afterIndexOffset];
+      }
+      if (c.t === "anti-par") {
+        return [];
+      }
+      if (c.t === "anti-retry") {
+        return [i + 1];
+      }
+      if (c.t === "anti-timeout") {
+        return [];
+      }
+      if (c.t === "canonize") {
+        return [i + 1];
+      }
+      if (c.t === "choice") {
+        const anti = c.antiIndexOffset;
+        const events: number[] = [];
+        let p = i + 1;
+        while (p < anti) {
+          events.push(p);
+          p += 2;
+        }
+        return events;
+      }
+      if (c.t === "choice-barrier") {
+        return [c.antiIndexOffset + 1];
+      }
+      if (c.t === "compensate") {
+        return [i + 1];
+      }
+      if (c.t === "compensate-end") {
+        return [i + c.antiIndexOffset + 1];
+      }
+      if (c.t === "compensate-with") {
+        return [i + 1];
+      }
+      if (c.t === "match") {
+        return c.casesIndexOffsets.map((offset) => offset + i);
+      }
+      if (c.t === "match-case") {
+        return [i + 1];
+      }
+      if (c.t === "retry") {
+        return [i + 1];
+      }
+      if (c.t === "timeout") {
+        return [i + 1];
+      }
+      if (c.t === "timeout-gap") {
+        return [i + c.antiOffsetIndex + 1];
+      }
+
+      const fromTimeouts: number[] = ctimeoutIndexer
+        .getListMatching(i)
+        .map((pair) => {
+          const timeoutIndex = pair.start;
+          const gapIndexOffset = (workflow.at(pair.start) as CTimeout)
+            .gapOffsetIndex;
+          const gapIndex = timeoutIndex + gapIndexOffset;
+          const afterGapIndex = gapIndex + 1;
+          if (i > gapIndex) return null;
+          return afterGapIndex;
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      const fromCompensation = ccompensateIndexer
+        .getMainListMatching(i)
+        .map((entry) => entry.start)
+        .map((index) => {
+          const ccompensate = workflow.at(index);
+          if (ccompensate?.t !== "compensate") {
+            throw new Error(
+              `compensate query fatal error: ccompensate not found at index ${index}`
+            );
+          }
+
+          const firstCompensationIndex =
+            index + ccompensate.withIndexOffset + 1;
+          const firstCompensation = workflow.at(firstCompensationIndex);
+
+          if (firstCompensation?.t !== "event") {
+            throw new Error(
+              `compensate query fatal error: compensation.with first code is not of type event`
+            );
+          }
+
+          return firstCompensationIndex;
+        });
+
+      if (c.t === "par") {
+        return [i + c.pairOffsetIndex + 1, i + 1]
+          .concat(fromCompensation)
+          .concat(fromTimeouts);
+      }
+
+      // if (c.t === "events")
+      const direct: number[] = (() => {
+        if (c.control === Code.Control.return) {
+          return [];
+        }
+        if (c.control === Code.Control.fail) {
+          const first = cretryIndexer
+            .getListMatching(i)
+            .sort((a, b) => b.start - a.start)
+            .at(0);
+          if (!first) return [];
+          return [first.start];
+        }
+        return [i + 1];
+      })();
+
+      return direct.concat(fromTimeouts).concat(fromCompensation);
+    };
+
+    const patchActorSet = (orig: ActorSet.Type, patch: ActorSet.Type) => {
+      patch.map((x) => orig.add(x));
+    };
+    const actorMap = new Map<number, ActorSet.Type>();
+
+    // forward graph building
+    const nextMap = workflow.map((code, index) => ({
+      code,
+      nexts: determineNexts(index, code)
+        .filter((index) => index < workflow.length)
+        .sort((a, b) => a - b),
+    }));
+
+    const terminuses = new Set(
+      nextMap
+        .map((code, index) => [code, index] as const)
+        .filter(([code, index]) => code.nexts.length === 0)
+        .map(([code, index]) => index)
+    );
+
+    const nextEdges = nextMap.flatMap(({ nexts }, prev) =>
+      nexts.flatMap((next) => ({
+        prev,
+        next,
+      }))
+    );
+
+    const startBackwardLinearExtraction = (
+      index: number,
+      journey: Set<number>,
+      nextActorSet: ActorSet.Type | null
+    ) => {
+      while (true) {
+        if (journey.has(index)) return;
+        journey.add(index);
+
+        nextActorSet = extractActorAtIndex(index, nextActorSet);
+
+        const prevNodes = nextEdges
+          .filter((prog) => prog.next === index)
+          .map((x) => x.prev);
+
+        if (prevNodes.length !== 1) {
+          return prevNodes.forEach((prev) => {
+            startBackwardLinearExtraction(prev, new Set(journey), nextActorSet);
+          });
+        } else {
+          index = prevNodes[0];
+        }
+      }
+    };
+
+    const extractActorAtIndex = (index: number, next: ActorSet.Type | null) => {
+      const thisActorSet = actorMap.get(index) || ActorSet.make();
+      actorMap.set(index, thisActorSet);
+
+      if (next) patchActorSet(thisActorSet, next);
+
+      const code = workflow.at(index);
+      if (code?.t === "event") {
+        thisActorSet.add(code.actor);
+      }
+
+      if (code?.t === "par") {
+        const firstEventIndex = index + 1;
+        const eventsCount = code.pairOffsetIndex - 1;
+        workflow
+          .slice(firstEventIndex, firstEventIndex + eventsCount)
+          .forEach((item) => {
+            if (item.t === "event") {
+              thisActorSet.add(item.actor);
+            }
+          });
+      }
+
+      if (code?.t === "match") {
+        Object.entries(code.args).forEach(([key, value]) => {
+          thisActorSet.add(Unique(value));
+        });
+      }
+
+      return thisActorSet;
+    };
+
+    // backward traversal from the terminus
+    terminuses.forEach((index) => {
+      startBackwardLinearExtraction(index, new Set(), null);
+    });
+
+    const mapped = nextMap.map((item, index) => {
+      const involvement = (() => {
+        const set = actorMap.get(index);
+        if (!set) return [];
+        return set.map((x) => x);
+      })();
+      return {
+        ...item,
+        involvement,
+      };
+    });
+
+    return mapped;
   };
 }
