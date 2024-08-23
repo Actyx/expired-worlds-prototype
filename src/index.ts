@@ -183,6 +183,7 @@ export const run = <CType extends CTypeProto>(
 
   return {
     commands,
+    isInvolved: machineCombinator.isInvolved,
     compensation: machineCombinator.compensation,
     mcomb: () => machineCombinator.internal(),
     multiverseTree: () => multiverseTree,
@@ -540,6 +541,15 @@ export namespace MachineCombinator {
           t: "catching-up",
           wfMachine: internal.data.wfMachine,
         };
+      },
+      isInvolved: () => {
+        const data = internal.data;
+        if (data.t === "catching-up") return true;
+        return (
+          data.wfMachine.isInvolved(params.self) ||
+          (data.t === "off-canon" &&
+            data.canonWFMachine.isInvolved(params.self))
+        );
       },
       pipe: (
         e: EventsMsg<WFBusinessOrMarker<CType>>,

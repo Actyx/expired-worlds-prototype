@@ -1125,3 +1125,116 @@ describe("canonization", () => {
     });
   });
 });
+
+describe("involvement tracking", () => {
+  it("works in logistic scenario", async () => {
+    const { Ev } = Logistics;
+    const scenario = Logistics.genScenario();
+    const { findAndRunCommand } = scenario;
+    const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+
+    await findAndRunCommand(manager, Ev.request, {
+      from: src.identity.id,
+      to: dst.identity.id,
+      manager: manager.identity.id,
+    });
+
+    await findAndRunCommand(t1, Ev.bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t2, Ev.bid, { bidder: t2.identity.id });
+    await findAndRunCommand(t3, Ev.bid, { bidder: t3.identity.id });
+
+    // assert base state at request
+    // and there are 3 bids in parallel
+
+    // t1 self assign and accept
+    const winner = (() => {
+      const state = t1.machine.state().state;
+      const winner =
+        state &&
+        state[0] === Parallel &&
+        state[2].find((x) => x.payload.payload.bidder === t1.identity.id)
+          ?.payload.payload.bidder;
+      if (!winner) throw new Error("no winner");
+      return winner;
+    })();
+    await findAndRunCommand(t1, Ev.assign, { robotID: winner });
+    await findAndRunCommand(t1, Ev.accept);
+
+    // docking t1 -> src and loading
+    await findAndRunCommand(t1, Ev.atSrc);
+    await findAndRunCommand(t1, Ev.reqEnter);
+    await findAndRunCommand(src, Ev.doEnter);
+    await findAndRunCommand(t1, Ev.inside);
+
+    await findAndRunCommand(t1, Ev.reqLeave);
+    await findAndRunCommand(src, Ev.doLeave);
+    await findAndRunCommand(t1, Ev.success);
+
+    // load
+    await findAndRunCommand(t1, Ev.loaded);
+
+    // docking t1 -> dst and loading
+    await findAndRunCommand(t1, Ev.atDst);
+    await findAndRunCommand(t1, Ev.reqEnter);
+    await findAndRunCommand(dst, Ev.doEnter);
+    await findAndRunCommand(t1, Ev.inside);
+    await findAndRunCommand(t1, Ev.reqLeave);
+    expect(dst.machine.isInvolved()).toBe(true);
+    await findAndRunCommand(dst, Ev.doLeave);
+    // TODO: dst is technically not involved at this point but this point is
+    // under a match and codegraph doesn't operate in this level of detail yet.
+    await findAndRunCommand(t1, Ev.success);
+
+    // at this point only src manager and t1 is involved because the remaining
+    // possible path is that in the event of compensation,
+    // those three are responsible for compensating
+    expect(src.machine.isInvolved()).toBe(true);
+    expect(manager.machine.isInvolved()).toBe(true);
+    expect(t1.machine.isInvolved()).toBe(true);
+    expect(t2.machine.isInvolved()).toBe(false);
+    expect(t3.machine.isInvolved()).toBe(false);
+    expect(dst.machine.isInvolved()).toBe(false);
+
+    // unload
+    await findAndRunCommand(t1, Ev.unloaded);
+
+    expect(t1.machine.isInvolved()).toBe(false);
+    expect(t2.machine.isInvolved()).toBe(false);
+    expect(t3.machine.isInvolved()).toBe(false);
+    expect(src.machine.isInvolved()).toBe(false);
+    expect(manager.machine.isInvolved()).toBe(true);
+
+    // done
+    // await findAndRunCommand(manager, Ev.done);
+  });
+
+  it("works in choice scenario", async () => {
+    const scenario = Choices.genScenario();
+    const {
+      findAndRunCommand,
+      network,
+      agents: { client, t1, t2, t3 },
+    } = scenario;
+    const { Ev: Evs } = Choices;
+
+    expect(t1.machine.isInvolved()).toBe(true);
+    expect(t2.machine.isInvolved()).toBe(true);
+    expect(t3.machine.isInvolved()).toBe(true);
+    expect(client.machine.isInvolved()).toBe(true);
+
+    await findAndRunCommand(client, Evs.start);
+    expect(client.machine.isInvolved()).toBe(false);
+
+    await findAndRunCommand(t1, Evs.L1Bid, { bidder: t1.identity.id });
+    await findAndRunCommand(t1, Evs.L1Accept, { assignee: t1.identity.id });
+
+    await findAndRunCommand(t2, Evs.L2Bid, { bidder: t2.identity.id });
+    // t3 can still accept even at this point
+    expect(t3.machine.isInvolved()).toBe(true);
+    await findAndRunCommand(t2, Evs.L2Accept, { assignee: t2.identity.id });
+
+    expect(t3.machine.isInvolved()).toBe(false);
+    expect(t1.machine.isInvolved()).toBe(true);
+    expect(t2.machine.isInvolved()).toBe(true);
+  });
+});

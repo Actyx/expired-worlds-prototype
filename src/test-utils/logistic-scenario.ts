@@ -225,4 +225,5 @@ export namespace Logistics {
   export type Ev = Evs;
   export const Ev = Evs;
   export type Scenario = LogisticScenario;
+  export const main = logistic;
 }

@@ -786,32 +786,58 @@ export namespace CRetryIndexer {
   };
 }
 
-export namespace CodeGraph {
-  namespace ActorSet {
-    export type Type = ReturnType<typeof make>;
-    export const make = <CType extends CTypeProto>(
-      inner: Actor<CType>[] = []
-    ) => {
-      return {
-        add: (actor: Actor<CType>) => {
-          const foundIndex = inner.findIndex((x) => Actor.eq(actor, x));
-          if (foundIndex === -1) {
-            inner.push(actor);
-          }
-        },
-        map: ((...params: Parameters<typeof inner.map>) =>
-          inner.map(...params)) as typeof inner.map,
-      };
-    };
-  }
+export namespace ActorSet {
+  export type Type<CType extends CTypeProto> = {
+    add: (actor: Actor<CType>) => void;
+    map: Actor<CType>[]["map"];
+    forEach: Actor<CType>[]["forEach"];
+    appendPatch: (patch: Type<CType>) => void;
+    clone: () => Type<CType>;
+    toArray: () => Actor<CType>[];
+  };
 
   export const make = <CType extends CTypeProto>(
-    workflow: WFWorkflow<CType>["code"]
+    input: Actor<CType>[] = []
+  ): Type<CType> => {
+    const inner = [] as Actor<CType>[];
+
+    const self: Type<CType> = {
+      add: (actor: Actor<CType>) => {
+        const foundIndex = inner.findIndex((x) => Actor.eq(actor, x));
+        if (foundIndex === -1) {
+          inner.push(actor);
+        }
+      },
+      map: (...params) => inner.map(...params),
+      forEach: (...params) => inner.forEach(...params),
+      appendPatch: (patch) => patch.forEach((x) => self.add(x)),
+      clone: () => make(inner),
+      toArray: () => [...inner],
+    };
+
+    input.forEach((x) => self.add(x));
+
+    return self;
+  };
+}
+
+export namespace CodeGraph {
+  export type Type<CType extends CTypeProto> = ReturnType<typeof make<CType>>;
+
+  export const make = <CType extends CTypeProto>(
+    workflow: WFWorkflow<CType>["code"],
+    indices?: {
+      ctimeoutIndexer?: ReturnType<typeof CTimeoutIndexer.make<CType>>;
+      ccompensateIndexer?: ReturnType<typeof CCompensationIndexer.make<CType>>;
+      cretryIndexer?: ReturnType<typeof CRetryIndexer.make<CType>>;
+    }
   ) => {
-    const ccompensateIndexer = CCompensationIndexer.make(workflow);
-    const cparallelIndexer = CParallelIndexer.make(workflow);
-    const ctimeoutIndexer = CTimeoutIndexer.make(workflow);
-    const cretryIndexer = CRetryIndexer.make(workflow);
+    const ccompensateIndexer =
+      indices?.ccompensateIndexer || CCompensationIndexer.make(workflow);
+    const ctimeoutIndexer =
+      indices?.ctimeoutIndexer || CTimeoutIndexer.make(workflow);
+    const cretryIndexer =
+      indices?.cretryIndexer || CRetryIndexer.make(workflow);
 
     const determineNexts = (i: number, c: CItem<CType>): number[] => {
       if (c.t === "anti-choice") {
@@ -935,10 +961,7 @@ export namespace CodeGraph {
       return direct.concat(fromTimeouts).concat(fromCompensation);
     };
 
-    const patchActorSet = (orig: ActorSet.Type, patch: ActorSet.Type) => {
-      patch.map((x) => orig.add(x));
-    };
-    const actorMap = new Map<number, ActorSet.Type>();
+    const actorMap = new Map<number, ActorSet.Type<CType>>();
 
     // forward graph building
     const nextMap = workflow.map((code, index) => ({
@@ -965,7 +988,7 @@ export namespace CodeGraph {
     const startBackwardLinearExtraction = (
       index: number,
       journey: Set<number>,
-      nextActorSet: ActorSet.Type | null
+      nextActorSet: ActorSet.Type<CType> | null
     ) => {
       while (true) {
         if (journey.has(index)) return;
@@ -987,11 +1010,14 @@ export namespace CodeGraph {
       }
     };
 
-    const extractActorAtIndex = (index: number, next: ActorSet.Type | null) => {
+    const extractActorAtIndex = (
+      index: number,
+      next: ActorSet.Type<CType> | null
+    ) => {
       const thisActorSet = actorMap.get(index) || ActorSet.make();
       actorMap.set(index, thisActorSet);
 
-      if (next) patchActorSet(thisActorSet, next);
+      if (next) thisActorSet.appendPatch(next);
 
       const code = workflow.at(index);
       if (code?.t === "event") {
@@ -1025,17 +1051,26 @@ export namespace CodeGraph {
     });
 
     const mapped = nextMap.map((item, index) => {
-      const involvement = (() => {
-        const set = actorMap.get(index);
-        if (!set) return [];
-        return set.map((x) => x);
-      })();
       return {
         ...item,
-        involvement,
+        involvement: actorMap.get(index) || ActorSet.make(),
       };
     });
 
     return mapped;
   };
+
+  export const toString = <CType extends CTypeProto>(cg: Type<CType>): string =>
+    cg
+      .map((code, index) =>
+        [
+          `${index}:${JSON.stringify(code.code)}`,
+          `  nexts: ${code.nexts.join(", ")}`,
+          `  involved: ${code.involvement
+            .toArray()
+            .map((x) => `${x.t}:${x.get()}`)
+            .join(", ")}`,
+        ].join("\n")
+      )
+      .join("\n");
 }

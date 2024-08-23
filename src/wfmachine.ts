@@ -42,6 +42,7 @@ import { CanonizationStore, MultiverseTree } from "./multiverse.js";
 import { Logger, makeLogger, Ord } from "./utils.js";
 import {
   Actor,
+  ActorSet,
   CAntiCompensate,
   CAntiParallel,
   CCanonize,
@@ -58,6 +59,7 @@ import {
   CTimeout,
   CTimeoutIndexer,
   Code,
+  CodeGraph,
   Exact,
   Unique,
   WFWorkflow,
@@ -211,6 +213,8 @@ export type WFMachine<CType extends CTypeProto> = {
   advanceToMostCanon: () => void;
   resetAndAdvanceToMostCanon: () => void;
   resetAndAdvanceToEventId: (eventId: string) => void;
+  codegraph: () => CodeGraph.Type<CType>;
+  isInvolved: (identity: { role: CType["role"]; id: string }) => boolean;
   logger: Logger;
 };
 
@@ -245,6 +249,11 @@ export const WFMachine = <CType extends CTypeProto>(
   const cparallelIndexer = CParallelIndexer.make(workflow);
   const ctimeoutIndexer = CTimeoutIndexer.make(workflow);
   const cretryIndexer = CRetryIndexer.make(workflow);
+  const codegraph = CodeGraph.make(workflow, {
+    ccompensateIndexer,
+    ctimeoutIndexer,
+    cretryIndexer,
+  });
 
   const mapUniqueActorOnNext = (res: UnnamedNext<CType>): Next<CType> => ({
     control: res.control,
@@ -1547,6 +1556,29 @@ export const WFMachine = <CType extends CTypeProto>(
       advanceToMostCanon();
     },
     resetAndAdvanceToEventId,
+    isInvolved: (paramId) => {
+      const context = innerstate.context;
+      const involvements =
+        codegraph.at(data.evalIndex)?.involvement || ActorSet.make();
+
+      return (
+        involvements.toArray().findIndex((involvement) => {
+          if (
+            involvement.t === "Unique" &&
+            context[involvement.get()] === paramId.id
+          ) {
+            return true;
+          }
+
+          if (involvement.t === "Role" && involvement.get() === paramId.role) {
+            return true;
+          }
+
+          return false;
+        }) !== -1
+      );
+    },
+    codegraph: () => codegraph,
     logger,
   };
 
