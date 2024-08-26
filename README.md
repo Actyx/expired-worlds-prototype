@@ -106,3 +106,19 @@ points of divergence (e.g. PARALLEL, TIMEOUT, RETRY-FAIL) and let this
 "canon-dictator" dictates a canon timeline when the business needs it.
 
 ![mechanics of canon-override](ideas-assets\canon-override.png)
+
+## [2024-08-26] Important bits
+
+In hindsight the important bits of this computation model are:
+
+- The workflow code.
+- The multiverse tree and meta log.
+- Multiple instantiations of WFMachines.
+
+A WFMachine takes a workflow code and form a state machine. This state machine can determine the `nexts`, the set of expected events for one particular state among all possible states in the machine-code combination. Each next-event is a path where the machine can go. Partition in the system can cause machines to go in two different direction, this is what makes the branches in the tree.
+
+The meta log is a classic Actyx's one-log-per-subscription append log. Events in this special log is used to determine how the swarm should interpret the multiverse tree. By default, the canon branch in the multiverse tree is chosen by comparing the events' EventKey (especially the Stream ID part, since the lamport timestamp is I think always the same). The meta log allows an actor to "canonize" a branch in the swarm, overriding the EventKey ordering mechanism.
+
+The meta log is also useful for notating owned responsibility. In the case of compensations, the actors publish an event as a note to state that "I should compensate for the decanonization from this particular branch", but an actor doesn't publish an event that states "my neighbor should compensate for ...". This works because with Actyx one can know if an event is published by yourself or another.
+
+One particular aspect in compensations that I just realized not being implemented is that an actor can calculate whether members in the swarm can resolve a compensation. For example, three actors are supposed to be involved in a compensation scheme, but one of them, due to an accident such as power outage, does not publish a `compensation:needed` event. The other party can see the list of `compensation:needed` events and determine if the currently present members in the swarm can solve the scheme or not. It will not, however, be able to determine if a scheme is finishable or unfinishable in the infinitely distant future.
