@@ -10,7 +10,7 @@ import {
   Tags,
 } from "@actyx/sdk";
 import * as Reality from "./multiverse.js";
-import { SwarmData, WFMachine } from "./wfmachine.js";
+import { BranchOfWithNamedActor, SwarmData, WFMachine } from "./wfmachine.js";
 export { Reality };
 import { Node, XEventKey } from "./ax-mock/index.js";
 import {
@@ -287,6 +287,59 @@ export namespace MachineCombinator {
     const currentCompensation = () =>
       internal.data.t === "off-canon" ? internal.data.compensationInfo : null;
 
+    const currentCompensationInvolvementIsEnoughForCompletion = (): boolean => {
+      const comp = currentCompensation();
+      if (!comp) return false;
+
+      const terminatingBranches =
+        internal.data.wfMachine.codegraphBranchesFromCompensation();
+      if (!terminatingBranches) return false;
+
+      const isActorWillinglyInvolved = (actor: string) => {
+        const matchingComps = compensationMap
+          .getByActor(actor)
+          .find(
+            (x) =>
+              x.fromTimelineOf === comp.fromTimelineOf &&
+              x.toTimelineOf === comp.toTimelineOf
+          );
+        return matchingComps !== undefined;
+      };
+
+      const branchHasAllActorsWilling = (branch: BranchOfWithNamedActor) => {
+        const nonWillingActor = Array.from(branch.involved).find(
+          (actor) => !isActorWillinglyInvolved(actor)
+        );
+        return nonWillingActor === undefined;
+      };
+
+      // find at least 1 branch where all involved actors are "willingly involved"
+      const involvedActorsArePresent = terminatingBranches
+        .filter((branch) => branch.terminating)
+        .find(branchHasAllActorsWilling);
+
+      return involvedActorsArePresent !== undefined;
+    };
+
+    const markCompensationAsDoneForSelf = (
+      publish: CollectEvents<CType>,
+      comp: {
+        fromTimelineOf: string;
+        toTimelineOf: string;
+      }
+    ) => {
+      const directive: WFMarkerCompensationDone = {
+        ax: InternalTag.CompensationDone.write(""),
+        actor: params.self.id,
+        fromTimelineOf: comp.fromTimelineOf,
+        toTimelineOf: comp.toTimelineOf,
+      };
+      if (!compensationMap.hasRegistered(directive)) {
+        compensationMap.register(directive);
+        publish(params.tags.applyTyped(directive));
+      }
+    };
+
     /**
      * Recalculate supposed actual DataModes for this MachineCombinator.
      */
@@ -358,54 +411,30 @@ export namespace MachineCombinator {
             compMachine.latestStateEvent()?.meta.eventId ===
             canonWFMachine.latestStateEvent()?.meta.eventId;
 
-          if (compMachineIsCanon) {
-            const isActive =
-              compMachine
-                .activeCompensation()
-                .find(
-                  (activeComp) =>
-                    activeComp.fromTimelineOf === comp.toTimelineOf
-                ) !== undefined;
+          const matchingActive = compMachine
+            .activeCompensation()
+            .find(
+              (activeComp) => activeComp.fromTimelineOf === comp.toTimelineOf
+            );
 
-            if (!isActive) {
-              const directive: WFMarkerCompensationDone = {
-                ax: InternalTag.CompensationDone.write(""),
-                actor: params.self.id,
-                fromTimelineOf: comp.fromTimelineOf,
-                toTimelineOf: comp.toTimelineOf,
-              };
-              if (!compensationMap.hasRegistered(directive)) {
-                compensationMap.register(directive);
-                publish(params.tags.applyTyped(directive));
-              }
-
-              return null;
-            }
+          if (compMachineIsCanon && matchingActive === undefined) {
+            markCompensationAsDoneForSelf(publish, comp);
+            return null;
           }
 
-          const isDone =
-            compMachine
-              .doneCompensation()
-              .find(
-                (x) =>
-                  NestedCodeIndexAddress.cmp(
-                    x.codeIndex,
-                    comp.directive.codeIndex
-                  ) === Ord.Equal && x.fromTimelineOf === comp.fromTimelineOf
-              ) !== undefined;
+          const matchingDone = compMachine
+            .doneCompensation()
+            .find(
+              (x) =>
+                NestedCodeIndexAddress.cmp(
+                  x.codeIndex,
+                  comp.directive.codeIndex
+                ) === Ord.Equal && x.fromTimelineOf === comp.fromTimelineOf
+            );
 
+          const isDone = matchingDone !== undefined;
           if (isDone) {
-            const directive: WFMarkerCompensationDone = {
-              ax: InternalTag.CompensationDone.write(""),
-              actor: params.self.id,
-              fromTimelineOf: comp.fromTimelineOf,
-              toTimelineOf: comp.toTimelineOf,
-            };
-            if (!compensationMap.hasRegistered(directive)) {
-              compensationMap.register(directive);
-              publish(params.tags.applyTyped(directive));
-            }
-
+            markCompensationAsDoneForSelf(publish, comp);
             return null;
           }
 
@@ -535,6 +564,7 @@ export namespace MachineCombinator {
       internal: () => internal.data,
       wfmachine: () => internal.data.wfMachine,
       compensation: currentCompensation,
+      currentCompensationInvolvementIsEnoughForCompletion,
       last: () => internal.data.wfMachine.latestStateEvent(),
       setToCatchingUp: () => {
         internal.data = {

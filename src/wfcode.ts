@@ -408,6 +408,7 @@ export const validate = <CType extends CTypeProto>(
     .concat(validateCompensationFirstEvent(workflow))
     .concat(validateCompensationWithNotContainingRoleBasedActor(workflow))
     .concat(validateCanonize(workflow));
+  // TODO: validate RETRY and TIMEOUT not jumping outside of compensate-with block
 
   if (errors.length > 0) {
     throw new Error(errors.map((x) => `- ${x.trim()}`).join("\n"));
@@ -822,6 +823,12 @@ export namespace ActorSet {
 }
 
 export namespace CodeGraph {
+  export type BranchOf<CType extends CTypeProto> = {
+    chain: number[];
+    terminating: boolean;
+    involved: ActorSet.Type<CType>;
+  };
+
   export type Type<CType extends CTypeProto> = ReturnType<typeof make<CType>>;
 
   export const make = <CType extends CTypeProto>(
@@ -1057,7 +1064,73 @@ export namespace CodeGraph {
       };
     });
 
-    return mapped;
+    const continueNonLoopBranches = (chain: number[]): number[][] => {
+      while (true) {
+        const last = chain.at(chain.length - 1);
+        // weird as there's no last item in the input array
+        // return empty
+        if (last === undefined) return [chain];
+
+        const infoOfLast = mapped.at(last);
+        if (!infoOfLast) return [chain];
+
+        const nexts = infoOfLast.nexts;
+        if (nexts.length === 1) {
+          const next = nexts[0];
+          if (chain.includes(next)) return [chain]; // is a loop, ignore this branch
+          chain.push(next);
+        } else {
+          return nexts.reduce((acc: number[][], next) => {
+            if (!chain.includes(next)) {
+              acc.push([...chain]);
+            } else {
+              acc.push(...continueNonLoopBranches([...chain, next]));
+            }
+            return acc;
+          }, []);
+        }
+      }
+    };
+    // lazy cache for infomap
+    const lazyBranchInfoMap = new Map<number, BranchOf<CType>[]>();
+
+    const branchesFrom = (index: number) => {
+      const branchInfoArr =
+        lazyBranchInfoMap.get(index) ||
+        continueNonLoopBranches([index])
+          .filter((chain) => chain.length > 0)
+          .map((chain): BranchOf<CType> => {
+            const involved = ActorSet.make<CType>();
+
+            chain.forEach((node) => {
+              const involvedInThisNode = mapped.at(node)?.involvement;
+              if (!involvedInThisNode) return;
+              involved.appendPatch(involvedInThisNode);
+            });
+
+            return {
+              chain,
+              involved,
+              terminating: (() => {
+                const last = chain.at(chain.length - 1);
+                if (last === undefined) return false;
+                return terminuses.has(last);
+              })(),
+            };
+          });
+
+      if (!lazyBranchInfoMap.has(index)) {
+        lazyBranchInfoMap.set(index, branchInfoArr);
+      }
+
+      return branchInfoArr;
+    };
+
+    return {
+      at: (index: number) => mapped.at(index),
+      map: ((...args) => mapped.map(...args)) satisfies typeof mapped.map,
+      branchesFrom,
+    };
   };
 
   export const toString = <CType extends CTypeProto>(cg: Type<CType>): string =>

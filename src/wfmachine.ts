@@ -180,6 +180,38 @@ type PendingCanonizationAdvert<CType extends CTypeProto> = Omit<
   "ax" | "advertiser"
 >;
 
+export type BranchOfWithNamedActor = {
+  chain: number[];
+  terminating: boolean;
+  involved: Set<string>;
+};
+
+export const convertBranchOfToNamed = <CType extends CTypeProto>(
+  context: Record<string, string>,
+  branch: CodeGraph.BranchOf<CType>
+): BranchOfWithNamedActor => {
+  const names = new Set(
+    branch.involved
+      .map((x) => {
+        if (x.t === "Unique") {
+          const uniqueRoleName = x.get();
+          const name = context[uniqueRoleName] || null;
+          if (name) {
+            return [name];
+          }
+        }
+        return [];
+      })
+      .flatMap((x) => x)
+  );
+
+  return {
+    chain: branch.chain,
+    terminating: branch.terminating,
+    involved: names,
+  };
+};
+
 export type WFMachine<CType extends CTypeProto> = {
   tick: (input: ActyxWFBusiness<CType> | null) => boolean;
   state: () => WFMachineState<CType>;
@@ -214,6 +246,7 @@ export type WFMachine<CType extends CTypeProto> = {
   resetAndAdvanceToMostCanon: () => void;
   resetAndAdvanceToEventId: (eventId: string) => void;
   codegraph: () => CodeGraph.Type<CType>;
+  codegraphBranchesFromCompensation: () => null | BranchOfWithNamedActor[];
   isInvolved: (identity: { role: CType["role"]; id: string }) => boolean;
   logger: Logger;
 };
@@ -430,6 +463,7 @@ export const WFMachine = <CType extends CTypeProto>(
         }
 
         const triggeringEvent = sCompensate.lastEvent;
+        const withIndex = compensateIndex + ccompensate.withIndexOffset;
         const firstCompensationIndex =
           compensateIndex + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
@@ -446,6 +480,7 @@ export const WFMachine = <CType extends CTypeProto>(
           firstCompensationIndex,
           fromTimelineOf: triggeringEvent.meta.eventId,
           involvedActors: involvedActorsOfCompensateAt(compensateIndex),
+          withIndex,
         };
       })
       .filter((x): x is Exclude<typeof x, null> => x !== null);
@@ -476,6 +511,7 @@ export const WFMachine = <CType extends CTypeProto>(
         }
 
         const triggeringEvent = sCompensate.lastEvent;
+        const withIndex = index + ccompensate.withIndexOffset;
         const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
         const firstCompensation = workflow.at(firstCompensationIndex);
 
@@ -491,6 +527,7 @@ export const WFMachine = <CType extends CTypeProto>(
           firstCompensationIndex,
           fromTimelineOf: triggeringEvent.meta.eventId,
           involvedActors: involvedActorsOfCompensateAt(index),
+          withIndex,
         };
       })
       .filter((x): x is Exclude<typeof x, null> => x !== null);
@@ -1579,6 +1616,45 @@ export const WFMachine = <CType extends CTypeProto>(
       );
     },
     codegraph: () => codegraph,
+    codegraphBranchesFromCompensation: () => {
+      const match = getSMatchAtIndex(data.evalIndex);
+      if (match?.inner) return match.inner.codegraphBranchesFromCompensation();
+
+      const activeCompensation = selfActiveCompensation().at(0);
+      if (activeCompensation) {
+        const branches = codegraph.branchesFrom(data.evalIndex);
+        return branches.map((branch) =>
+          convertBranchOfToNamed(innerstate.context, branch)
+        );
+      }
+
+      // closes availableCompensateable
+      const availableCompensateable = selfAvailableCompensateable()
+        .sort((a, b) =>
+          Ord.toNum(NestedCodeIndexAddress.cmp(b.codeIndex, a.codeIndex))
+        )
+        .at(0);
+      if (availableCompensateable) {
+        const bounding = ccompensateIndexer.withList.find(
+          (x) => x.start === availableCompensateable.withIndex
+        );
+        if (bounding) {
+          // find branches inside the compensate-with scope
+          const branches = codegraph
+            .branchesFrom(data.evalIndex)
+            .filter((line) => {
+              const lastNode = line.chain.at(line.chain.length - 1);
+              if (!lastNode) return false;
+              return lastNode > bounding.start && lastNode <= bounding.end;
+            });
+          return branches.map((branch) =>
+            convertBranchOfToNamed(innerstate.context, branch)
+          );
+        }
+      }
+
+      return null;
+    },
     logger,
   };
 
