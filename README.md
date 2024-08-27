@@ -122,3 +122,18 @@ The meta log is a classic Actyx's one-log-per-subscription append log. Events in
 The meta log is also useful for notating owned responsibility. In the case of compensations, the actors publish an event as a note to state that "I should compensate for the decanonization from this particular branch", but an actor doesn't publish an event that states "my neighbor should compensate for ...". This works because with Actyx one can know if an event is published by yourself or another.
 
 One particular aspect in compensations that I just realized not being implemented is that an actor can calculate whether members in the swarm can resolve a compensation. For example, three actors are supposed to be involved in a compensation scheme, but one of them, due to an accident such as power outage, does not publish a `compensation:needed` event. The other party can see the list of `compensation:needed` events and determine if the currently present members in the swarm can solve the scheme or not. It will not, however, be able to determine if a scheme is finishable or unfinishable in the infinitely distant future.
+
+## [2024-08-27] Escape Mechanism In Compensation
+
+Compensations are often also a business error handling flow. There are occassions where business error handling isn't defined at design time and instead evolve over time ewhen the software is expected to stay constant. For this, forward compatible code is necessary. This can be achieved by using a syntax that allows alternative flow. For example:
+
+```
+COMPENSATE {
+  ... main workflow
+} WITH {
+  eventA
+  TIMEOUT {
+    resolvedAutomatically
+  } RETURN resolvedManually
+}
+```
