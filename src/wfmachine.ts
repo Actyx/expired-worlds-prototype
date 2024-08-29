@@ -225,13 +225,11 @@ export type WFMachine<CType extends CTypeProto> = {
   }[];
   availableCompensateable: () => {
     codeIndex: NestedCodeIndexAddress.Type;
-    firstCompensation: CEvent<CType>;
     fromTimelineOf: string;
     involvedActors: string[];
   }[];
   activeCompensation: () => {
     codeIndex: NestedCodeIndexAddress.Type;
-    firstCompensation: CEvent<CType>;
     fromTimelineOf: string;
     involvedActors: string[];
   }[];
@@ -440,6 +438,8 @@ export const WFMachine = <CType extends CTypeProto>(
       .filter((x): x is string => !!x);
 
   const selfActiveCompensation = (evalIndex = data.evalIndex) => {
+    if (innerstate.returned) return [];
+
     const res = ccompensateIndexer
       .getWithListMatching(evalIndex)
       .map((entry) => {
@@ -1526,9 +1526,8 @@ export const WFMachine = <CType extends CTypeProto>(
     availableNexts,
     availableCompensateable: () => {
       const res = selfAvailableCompensateable().map(
-        ({ codeIndex, firstCompensation, fromTimelineOf, involvedActors }) => ({
+        ({ codeIndex, fromTimelineOf, involvedActors }) => ({
           codeIndex,
-          firstCompensation,
           fromTimelineOf,
           involvedActors,
         })
@@ -1548,9 +1547,8 @@ export const WFMachine = <CType extends CTypeProto>(
     },
     activeCompensation: () => {
       const res = selfActiveCompensation().map(
-        ({ codeIndex, firstCompensation, fromTimelineOf, involvedActors }) => ({
+        ({ codeIndex, fromTimelineOf, involvedActors }) => ({
           codeIndex,
-          firstCompensation,
           fromTimelineOf,
           involvedActors,
         })

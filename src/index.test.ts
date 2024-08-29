@@ -10,10 +10,11 @@ import {
   expectAllToHaveSameState,
   historyOf,
 } from "./test-utils/scenario-builder.js";
-import { awhile } from "./test-utils/misc.js";
+import { awhile, log } from "./test-utils/misc.js";
 import { Logistics } from "./test-utils/logistic-scenario.js";
 import { Choices } from "./test-utils/choices-scenario.js";
 import { CanonSwitch } from "./test-utils/canon-switch-scenario.js";
+import { ReturnInComp } from "./test-utils/return-in-comp-scenario.js";
 
 describe("no-partitions", () => {
   const { Ev } = Logistics;
@@ -610,6 +611,46 @@ describe("partitions and compensations", () => {
     expect(t1.machine.mcomb().t).toBe("normal");
     expect(t2.machine.mcomb().t).toBe("normal");
     expect(t3.machine.mcomb().t).toBe("normal");
+  });
+
+  it("returns in comp is evaluated correctly", async () => {
+    const scenario = ReturnInComp.genScenario();
+    const { Ev } = ReturnInComp;
+    const { findAndRunCommand, network } = scenario;
+    const { authoritative1, authoritative2, authoritative3, t1, t2, t3, t4 } =
+      scenario.agents;
+
+    await findAndRunCommand(authoritative1, Ev.start);
+    await findAndRunCommand(authoritative1, Ev.assign, {
+      canonizer: authoritative1.identity.id,
+    });
+
+    await network.partitions.group(
+      [authoritative1.node, t1.node, t2.node],
+      [t3.node, t4.node]
+    );
+
+    await findAndRunCommand(t1, Ev.L1Accept, {
+      a: t1.identity.id,
+      b: t2.identity.id,
+    });
+
+    await findAndRunCommand(t3, Ev.L1Accept, {
+      a: t3.identity.id,
+      b: t4.identity.id,
+    });
+
+    await findAndRunCommand(t1, Ev.L1FirstAdvertise);
+    await findAndRunCommand(t3, Ev.L1FirstAdvertise);
+
+    await network.partitions.connectAll();
+
+    // NOTE: "authoritative" needs to be involved in t1's and t3's compensation scheme
+    // but it wasn't in the losing partition in the first place.
+    // This might be the limit of the 2-WFMachine system
+    Object.entries(scenario.agents).forEach(([key, value]) => {
+      log(key, `${value.machine.mcomb().t}`);
+    });
   });
 });
 
