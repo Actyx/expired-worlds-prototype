@@ -31,10 +31,14 @@ export namespace MultiverseTree {
     isHead: (e: ActyxWFBusiness<CType>) => boolean;
     isRoot: (e: ActyxWFBusiness<CType>) => boolean;
     getRoots: () => ActyxWFBusiness<CType>[];
+    ends: () => EventId[];
+    markIneffective: (...args: EventId[]) => void;
+    isIneffective: (e: EventId) => boolean;
   };
 
   export const make = <CType extends CTypeProto>(): Type<CType> => {
     const internal = {
+      markedAsIneffective: new Set<EventId>(),
       infoMap: new Map<EventId, ActyxWFBusiness<CType>>(),
       predecessors: new Map<EventId, Set<EventId>>(),
       next: new Map<EventId, Set<EventId>>(),
@@ -53,6 +57,19 @@ export namespace MultiverseTree {
       return nextSet;
     };
 
+    // TODO: optimize by forming the end set on register
+    const ends = () =>
+      Array.from(internal.infoMap.keys()).filter((key) => {
+        const nextSet = internal.next.get(key);
+        if (!nextSet) return true;
+
+        const effectiveNexts = Array.from(nextSet).filter(
+          (next) => !internal.markedAsIneffective.has(next)
+        );
+
+        return effectiveNexts.length === 0;
+      });
+
     const self: Type<CType> = {
       register: (ev) => {
         const { eventId } = ev.meta;
@@ -60,17 +77,17 @@ export namespace MultiverseTree {
         internal.infoMap.set(eventId, ev);
         const predecessorSet = predecessorSetOf(eventId);
 
-        const predecessorIds = ev.meta.tags
+        const predecessorIdsFromTags = ev.meta.tags
           .map((x) => InternalTag.Predecessor.read(x))
           .filter((x): x is Exclude<typeof x, null> => x !== null);
 
-        predecessorIds.forEach((predecessorId) => {
+        predecessorIdsFromTags.forEach((predecessorId) => {
           predecessorSet.add(predecessorId);
           nextSetOf(predecessorId).add(eventId);
         });
 
         const depth =
-          predecessorIds.reduce(
+          predecessorIdsFromTags.reduce(
             (max, id) => Math.max(max, internal.depth.get(id) || 0),
             0
           ) + 1;
@@ -91,6 +108,10 @@ export namespace MultiverseTree {
           .filter((x): x is Exclude<typeof x, null> => x !== null),
       isHead: (ev) => nextSetOf(ev.meta.eventId).size === 0,
       isRoot: (ev) => predecessorSetOf(ev.meta.eventId).size === 0,
+      ends,
+      markIneffective: (...ids) =>
+        ids.forEach((id) => internal.markedAsIneffective.add(id)),
+      isIneffective: (id) => internal.markedAsIneffective.has(id),
     };
 
     return self;

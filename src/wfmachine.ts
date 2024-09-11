@@ -42,22 +42,17 @@ import { CanonizationStore, MultiverseTree } from "./multiverse.js";
 import { Logger, makeLogger, Ord } from "./utils.js";
 import {
   Actor,
-  ActorSet,
   CAntiCompensate,
   CAntiParallel,
   CCanonize,
   CChoice,
   CCompensate,
-  CCompensationIndexer,
   CEvent,
   CItem,
   CMatch,
   CParallel,
-  CParallelIndexer,
   CRetry,
-  CRetryIndexer,
   CTimeout,
-  CTimeoutIndexer,
   Code,
   CodeGraph,
   Exact,
@@ -260,6 +255,7 @@ export type SwarmData<CType extends CTypeProto> = {
 export const WFMachine = <CType extends CTypeProto>(
   wfWorkflow: WFWorkflow<CType>,
   swarmStore: SwarmData<CType>,
+  compilerCache: CodeGraph.CompilerCache<CType>,
   wfMachineArgs?: {
     context?: Record<string, string>;
     codeIndexPrefix: NestedCodeIndexAddress.Type;
@@ -276,15 +272,11 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const logger = makeLogger();
   const workflow = wfWorkflow.code;
-  const ccompensateIndexer = CCompensationIndexer.make(workflow);
-  const cparallelIndexer = CParallelIndexer.make(workflow);
-  const ctimeoutIndexer = CTimeoutIndexer.make(workflow);
-  const cretryIndexer = CRetryIndexer.make(workflow);
-  const codegraph = CodeGraph.make(workflow, {
-    ccompensateIndexer,
-    ctimeoutIndexer,
-    cretryIndexer,
-  });
+  const ccompensateIndexer = compilerCache.indexer.compensation.get(workflow);
+  const cparallelIndexer = compilerCache.indexer.parallel.get(workflow);
+  const ctimeoutIndexer = compilerCache.indexer.timeout.get(workflow);
+  const cretryIndexer = compilerCache.indexer.retry.get(workflow);
+  const codegraph = compilerCache.codegraph.get(workflow);
 
   const mapUniqueActorOnNext = (res: UnnamedNext<CType>): Next<CType> => ({
     control: res.control,
@@ -301,6 +293,7 @@ export const WFMachine = <CType extends CTypeProto>(
   // pointers and stack
   const data = {
     stateCalcIndex: 0,
+    legIndex: -1,
     evalIndex: 0,
     stack: [] as (StackItem<CType> | null)[],
   };
@@ -316,6 +309,7 @@ export const WFMachine = <CType extends CTypeProto>(
     // set execution back at the index
     data.stack.length = targetIndex;
     data.evalIndex = targetIndex;
+    data.legIndex = -1;
     evalContext.index = targetIndex;
 
     // force recalculate context
@@ -710,6 +704,8 @@ export const WFMachine = <CType extends CTypeProto>(
         });
         innerstate.state = [One, stackItem.event];
 
+        data.legIndex = calcIndex;
+
         if (code.control === Code.Control.return) {
           innerstate.returned = true;
         } else if (code.control === Code.Control.fail) {
@@ -727,6 +723,8 @@ export const WFMachine = <CType extends CTypeProto>(
       }
 
       if (code?.t === "par" && stackItem?.t === "par") {
+        data.legIndex = calcIndex;
+
         innerstate.state = (() => {
           const instances = stackItem.instances.map(
             (instance) => instance.entry[instance.entry.length - 1]
@@ -744,10 +742,14 @@ export const WFMachine = <CType extends CTypeProto>(
         stackItem?.t === "retry" &&
         stackItem.lastState !== null
       ) {
+        data.legIndex = calcIndex;
+
         innerstate.state = stackItem.lastState;
       }
 
       if (code?.t === "match") {
+        data.legIndex = calcIndex;
+
         const inner = getSMatchAtIndex(calcIndex)?.inner;
         if (inner && inner.returned()) {
           innerstate.state = inner.state().state;
@@ -941,10 +943,15 @@ export const WFMachine = <CType extends CTypeProto>(
       Object.entries(code.args).forEach(([assignee, assigner]) => {
         context[assignee] = innerstate.context[assigner];
       });
-      const matchMachine = WFMachine<CType>(code.subworkflow, swarmStore, {
-        context,
-        codeIndexPrefix: [evalContext.index],
-      });
+      const matchMachine = WFMachine<CType>(
+        code.subworkflow,
+        swarmStore,
+        compilerCache,
+        {
+          context,
+          codeIndexPrefix: [evalContext.index],
+        }
+      );
       matchMachine.logger.sub(logger.log);
       const atStack = getSMatchAtIndex(evalContext.index) || {
         t: "match",
@@ -1331,6 +1338,7 @@ export const WFMachine = <CType extends CTypeProto>(
     data.evalIndex = 0;
     // calc index
     data.stateCalcIndex = 0;
+    data.legIndex = -1;
     data.stack.length = 0;
 
     innerstate.context = { ...contextArg };
@@ -1592,26 +1600,25 @@ export const WFMachine = <CType extends CTypeProto>(
     },
     resetAndAdvanceToEventId,
     isInvolved: (paramId) => {
-      const context = innerstate.context;
-      const involvements =
-        codegraph.at(data.evalIndex)?.involvement || ActorSet.make();
+      const actorSet = codegraph.actorSetMap.at(data.legIndex);
+      if (!actorSet) return false;
 
-      return (
-        involvements.toArray().findIndex((involvement) => {
-          if (
-            involvement.t === "Unique" &&
-            context[involvement.get()] === paramId.id
-          ) {
-            return true;
-          }
+      const foundIndex = actorSet.toArray().findIndex((involvement) => {
+        if (
+          involvement.t === "Unique" &&
+          innerstate.context[involvement.get()] === paramId.id
+        ) {
+          return true;
+        }
 
-          if (involvement.t === "Role" && involvement.get() === paramId.role) {
-            return true;
-          }
+        if (involvement.t === "Role" && involvement.get() === paramId.role) {
+          return true;
+        }
 
-          return false;
-        }) !== -1
-      );
+        return false;
+      });
+
+      return foundIndex !== -1;
     },
     codegraph: () => codegraph,
     codegraphBranchesFromCompensation: () => {

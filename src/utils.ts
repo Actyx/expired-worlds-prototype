@@ -266,3 +266,18 @@ export namespace MultihashMap {
     },
   });
 }
+
+export namespace LazyMap {
+  export type Type<Key, Val> = ReturnType<typeof make<Key, Val>>;
+  export const make = <Key, Val>(gen: (key: Key) => Val) => {
+    const map = new Map<Key, Val>();
+
+    return {
+      get: (key: Key) => {
+        const val = map.get(key) || gen(key);
+        map.set(key, val);
+        return val;
+      },
+    };
+  };
+}

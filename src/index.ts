@@ -31,9 +31,17 @@ import {
   extractWFCanonDecideMarker,
   sortByEventKey,
 } from "./consts.js";
-import { WFWorkflow } from "./wfcode.js";
+import {
+  CCompensationIndexer,
+  Code,
+  CodeGraph,
+  CParallelIndexer,
+  CRetryIndexer,
+  CTimeoutIndexer,
+  WFWorkflow,
+} from "./wfcode.js";
 import { createLinearChain } from "./event-utils.js";
-import { Logger, makeLogger, MultihashMap, Ord } from "./utils.js";
+import { LazyMap, Logger, makeLogger, MultihashMap, Ord } from "./utils.js";
 
 export type Params<CType extends CTypeProto> = {
   // actyx: Parameters<(typeof Actyx)["of"]>;
@@ -72,7 +80,22 @@ export const run = <CType extends CTypeProto>(
   node: Node.Type<WFBusinessOrMarker<CType>>,
   workflow: WFWorkflow<CType>
 ) => {
-  const machineCombinator = MachineCombinator.make(params, workflow);
+  const compilerCache: CodeGraph.CompilerCache<CType> = {
+    codegraph: LazyMap.make((x) =>
+      CodeGraph.make(workflow.code, compilerCache)
+    ),
+    indexer: {
+      compensation: LazyMap.make(CCompensationIndexer.make),
+      parallel: LazyMap.make(CParallelIndexer.make),
+      retry: LazyMap.make(CRetryIndexer.make),
+      timeout: LazyMap.make(CTimeoutIndexer.make),
+    },
+  };
+  const machineCombinator = MachineCombinator.make(
+    params,
+    workflow,
+    compilerCache
+  );
   const { canonizationBarrier, multiverseTree } = machineCombinator;
 
   const batchedPublishes = () => {
@@ -242,10 +265,71 @@ export namespace MachineCombinator {
    */
   export const make = <CType extends CTypeProto>(
     params: Params<CType>,
-    workflow: WFWorkflow<CType>
+    workflow: WFWorkflow<CType>,
+    compilerCache: CodeGraph.CompilerCache<CType>
   ) => {
+    // TODO: multiverse tree needs to track the end-of-branches
+    // TODO: machine-tree mimics multiverse tree and creates WFMachines inside
+
     const logger = makeLogger(`mcomb:${params.self.id}`);
     const multiverseTree = Reality.MultiverseTree.make<CType>();
+
+    const machineTree = (() => {
+      const machineMap = new Map<string, WFMachine<CType>>();
+
+      const advanceAll = () =>
+        Array.from(machineMap.entries()).forEach(([eventId, machine]) => {
+          machineMap.delete(eventId);
+          machine.advanceToMostCanon();
+          const state = machine.latestStateEvent();
+          if (!state) return;
+          machineMap.set(state.meta.eventId, machine);
+        });
+
+      const markIneffectiveAfter = (after: string) => ({
+        to: (to: string) => {
+          const toEvent = multiverseTree.getById(to);
+          if (!toEvent) return;
+          const chain = createLinearChain(multiverseTree, toEvent).map(
+            (x) => x.meta.eventId
+          );
+
+          const indexOfStateEvent = chain.indexOf(after);
+          if (indexOfStateEvent === -1) return;
+
+          const startIneffectiveIndex = indexOfStateEvent + 1;
+          multiverseTree.markIneffective(...chain.slice(startIneffectiveIndex));
+        },
+      });
+
+      const populateMissing = () => {
+        const supposed = new Set(multiverseTree.ends());
+        const existing = new Set(machineMap.keys());
+        const missing = Array.from(supposed).filter((x) => !existing.has(x));
+        const deletables = Array.from(existing).filter((x) => !supposed.has(x));
+
+        deletables.forEach((deletable) => machineMap.delete(deletable));
+        missing.forEach((missing) => {
+          if (multiverseTree.isIneffective(missing)) return;
+
+          const machine = WFMachine(workflow, swarmStore, compilerCache);
+          machine.resetAndAdvanceToEventId(missing);
+
+          const state = machine.latestStateEvent();
+          if (!state) return;
+          if (state.meta.eventId !== missing) {
+            markIneffectiveAfter(state.meta.eventId).to(missing);
+          }
+
+          machineMap.set(state.meta.eventId, machine);
+        });
+      };
+
+      return {
+        advanceAll,
+        populateMissing,
+      };
+    })();
     const canonizationStore = Reality.CanonizationStore.make<CType>();
     canonizationStore.logger.sub(logger.log);
     const swarmStore: SwarmData<CType> = {
@@ -253,7 +337,7 @@ export namespace MachineCombinator {
       canonizationStore: canonizationStore,
     };
     const compensationMap = CompensationMap.make();
-    const wfMachine = WFMachine(workflow, swarmStore);
+    const wfMachine = WFMachine(workflow, swarmStore, compilerCache);
     wfMachine.logger.sub(logger.log);
 
     const canonizationBarrier: CanonizationBarrier<CType> = {
@@ -351,13 +435,14 @@ export namespace MachineCombinator {
       const wfMachine = internal.data.wfMachine;
       wfMachine.advanceToMostCanon();
 
-      const canonWFMachine = WFMachine(workflow, swarmStore);
+      const canonWFMachine = WFMachine(workflow, swarmStore, compilerCache);
       canonWFMachine.logger.sub(logger.log);
       canonWFMachine.advanceToMostCanon();
 
       const compensateables = calculateCompensateables(
         params.self,
         workflow,
+        compilerCache,
         swarmStore,
         wfMachine,
         canonWFMachine,
@@ -401,7 +486,7 @@ export namespace MachineCombinator {
           // remembered compensateable can be invalidated if:
           // - it is back to canon and it is not active, or
           // - the compensation is done
-          const compMachine = WFMachine(workflow, swarmStore); // can be optimized further by checking wfmachine's history
+          const compMachine = WFMachine(workflow, swarmStore, compilerCache); // can be optimized further by checking wfmachine's history
           compMachine.logger.sub(logger.log);
           compMachine.resetAndAdvanceToEventId(comp.fromTimelineOf);
           compMachine.advanceToMostCanon();
@@ -575,11 +660,11 @@ export namespace MachineCombinator {
       isInvolved: () => {
         const data = internal.data;
         if (data.t === "catching-up") return true;
-        return (
-          data.wfMachine.isInvolved(params.self) ||
-          (data.t === "off-canon" &&
-            data.canonWFMachine.isInvolved(params.self))
-        );
+        if (data.wfMachine.isInvolved(params.self)) return true;
+        if (data.t === "off-canon") {
+          return data.canonWFMachine.isInvolved(params.self);
+        }
+        return false;
       },
       pipe: (
         e: EventsMsg<WFBusinessOrMarker<CType>>,
@@ -776,6 +861,7 @@ const calculateCompensateables = <CType extends CTypeProto>(
     id: string;
   },
   workflow: WFWorkflow<CType>,
+  compilerCache: CodeGraph.CompilerCache<CType>,
   swarmData: SwarmData<CType>,
   fromWFMachine: WFMachine<CType>,
   toWFMachine: WFMachine<CType>,
@@ -799,7 +885,7 @@ const calculateCompensateables = <CType extends CTypeProto>(
   // fromChain is sub-array of toChain
   if (divergence === fromChain.length - 1) return [];
 
-  const divergenceWFmachine = WFMachine(workflow, swarmData);
+  const divergenceWFmachine = WFMachine(workflow, swarmData, compilerCache);
   divergenceWFmachine.logger.sub(logger.log);
 
   // -1 means not found, similar to .findIndex array returns

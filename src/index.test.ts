@@ -1229,6 +1229,7 @@ describe("involvement tracking", () => {
     // at this point only src manager and t1 is involved because the remaining
     // possible path is that in the event of compensation,
     // those three are responsible for compensating
+    t2.machine.logger.sub(log);
     expect(src.machine.isInvolved()).toBe(true);
     expect(manager.machine.isInvolved()).toBe(true);
     expect(t1.machine.isInvolved()).toBe(true);
