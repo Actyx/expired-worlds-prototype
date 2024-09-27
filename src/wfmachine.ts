@@ -266,7 +266,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const { multiverseTree: multiverse } = swarmStore;
   const contextArg = wfMachineArgs?.context || {};
   const wfMachineCodeIndexPrefix = wfMachineArgs?.codeIndexPrefix || [];
-  type EvalContext = { index: number };
+  type TickContext = { legIndex: number };
   type TickInput = ActyxWFBusiness<CType>;
   type TickRes = { jumpLeg: number | null; fed: boolean };
 
@@ -294,45 +294,28 @@ export const WFMachine = <CType extends CTypeProto>(
 
   // pointers and stack
   const data = {
-    stateCalcIndex: 0,
     legIndex: -1,
     stack: [] as (StackItem<CType> | null)[],
   };
 
   // state-related data
   const innerstate = {
+    stateCalcIndex: 0,
     context: { ...contextArg } as Record<string, string>,
     state: null as State<CType> | null,
-    returned: false,
   };
 
-  const resetIndex = (evalContext: EvalContext, targetIndex: number) => {
-    // set execution back at the index
-    data.stack.length = targetIndex;
-    data.legIndex = -1;
-    evalContext.index = targetIndex;
-
-    // force recalculate context
-    data.stateCalcIndex = 0;
+  const resetRecalc = () => {
+    innerstate.stateCalcIndex = -1;
     innerstate.context = { ...contextArg };
     innerstate.state = null;
   };
 
-  const findRetryOnStack = (indexInput: number) => {
-    const closest = cretryIndexer
-      .getListMatching(indexInput)
-      .sort((a, b) => b.start - a.start)
-      .at(0);
-
-    if (!closest) return null;
-    const index = closest.start;
-
-    const code = workflow.at(index);
-    if (code?.t !== "retry") return null;
-    const stack = data.stack.at(index);
-    if (stack?.t !== "retry") return null;
-
-    return { code, stack, index };
+  const resetIndex = (tickContext: TickContext, targetIndex: number) => {
+    // set execution back at the index
+    data.stack.length = targetIndex;
+    data.legIndex = -1;
+    tickContext.legIndex = targetIndex;
   };
 
   const getSMatchAtIndex = (index: number) => {
@@ -426,7 +409,7 @@ export const WFMachine = <CType extends CTypeProto>(
       .filter((x): x is string => !!x);
 
   const selfActiveCompensation = (legIndex = data.legIndex) => {
-    if (innerstate.returned) return [];
+    if (returned()) return [];
 
     const res = ccompensateIndexer
       .getWithListMatching(legIndex)
@@ -519,6 +502,7 @@ export const WFMachine = <CType extends CTypeProto>(
           firstCompensationIndex,
           fromTimelineOf: triggeringEvent.meta.eventId,
           involvedActors: involvedActorsOfCompensateAt(index),
+          next,
           withIndex,
         };
       })
@@ -563,7 +547,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
       if (code.t === "par") {
         const parallelCriteria = generateParallelCriteria(
-          { index: data.legIndex },
+          { legIndex: data.legIndex },
           code
         );
         const nextLegIndex = parallelCriteria.atStack.nextLegIndex;
@@ -599,7 +583,7 @@ export const WFMachine = <CType extends CTypeProto>(
    * processed when the the WFMachine is in Parallel state.
    */
   const generateParallelCriteria = (
-    evalContext: EvalContext,
+    tickContext: TickContext,
     parallelCode: CParallel
   ) => {
     const {
@@ -613,9 +597,11 @@ export const WFMachine = <CType extends CTypeProto>(
     const maxCriteria = Math.min(max !== undefined ? max : Infinity, Infinity);
 
     const atStack = ((): SParallel<CType> => {
-      const atStack = data.stack.at(evalContext.index);
+      const atStack = data.stack.at(tickContext.legIndex);
       if (atStack?.t !== "par") {
-        throw new Error(`stack type at ${evalContext.index} not par`);
+        throw new Error(
+          `par at ${tickContext.legIndex} is not created during AssignAhead`
+        );
       }
       return atStack;
     })();
@@ -643,7 +629,7 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Catch up with execution index
    */
-  const recalculateState = (evalContext: EvalContext) => {
+  const recalculateState = (tickContext: TickContext) => {
     const calc = (calcIndex: number): Continue => {
       const code = workflow.at(calcIndex);
       const stackItem = data.stack.at(calcIndex);
@@ -659,37 +645,19 @@ export const WFMachine = <CType extends CTypeProto>(
         });
         innerstate.state = [One, stackItem.event];
 
-        data.legIndex = calcIndex;
-
-        if (code.control === Code.Control.return) {
-          innerstate.returned = true;
-        } else if (code.control === Code.Control.fail) {
-          const retry = findRetryOnStack(calcIndex);
-          if (retry === null) {
-            throw new Error("cannot find retry while dealing with fail event");
-          }
-          data.stack[retry.index] = {
-            t: "retry",
-            lastFailState: innerstate.state,
-          };
-          resetIndex(evalContext, retry.index + 1);
-          return true;
-        }
+        return true;
       }
 
       if (code?.t === "par" && stackItem?.t === "par") {
-        data.legIndex = calcIndex;
-
-        innerstate.state = (() => {
-          const instances = stackItem.instances.map(
+        innerstate.state = [
+          Parallel,
+          stackItem.lastEvent,
+          stackItem.instances.map(
             (instance) => instance.entry[instance.entry.length - 1]
-          );
-          if (instances.length === 0) {
-            return [One, stackItem.lastEvent];
-          } else {
-            return [Parallel, stackItem.lastEvent, instances];
-          }
-        })();
+          ),
+        ];
+
+        return true;
       }
 
       if (
@@ -697,300 +665,187 @@ export const WFMachine = <CType extends CTypeProto>(
         stackItem?.t === "retry" &&
         stackItem.lastFailState !== null
       ) {
-        data.legIndex = calcIndex;
+        innerstate.state = [One, stackItem.lastFailState];
 
-        innerstate.state = stackItem.lastFailState;
-      }
-
-      if (code?.t === "match") {
-        data.legIndex = calcIndex;
-
-        const inner = getSMatchAtIndex(calcIndex)?.inner;
-        if (inner && inner.returned()) {
-          innerstate.state = inner.state().state;
-        }
+        return true;
       }
 
       return false;
     };
 
-    while (data.stateCalcIndex < evalContext.index) {
-      if (data.stateCalcIndex >= 0) {
-        if (calc(data.stateCalcIndex)) {
-          continue;
-        }
+    if (innerstate.stateCalcIndex > tickContext.legIndex) {
+      resetRecalc();
+    }
+
+    while (innerstate.stateCalcIndex < tickContext.legIndex) {
+      if (innerstate.stateCalcIndex >= 0) {
+        calc(innerstate.stateCalcIndex);
       }
-      data.stateCalcIndex += 1;
+      innerstate.stateCalcIndex++;
     }
 
     // special case for parallel
-    if (data.stack.at(evalContext.index)?.t === "par") {
-      calc(evalContext.index);
+    if (data.stack.at(tickContext.legIndex)?.t === "par") {
+      calc(tickContext.legIndex);
     }
   };
 
   type Continue = boolean;
   const Continue = true as const;
 
-  const autoEvaluateImpl = (evalContext: EvalContext): Continue => {
-    // Handle Retry Code
-    const code = workflow.at(evalContext.index);
-
-    if (!code) {
-      innerstate.returned = true;
-      return false;
-    }
-
-    if (code.t === "canonize") {
-      const atStack = (() => {
-        const atStack = data.stack.at(evalContext.index);
-        if (!atStack) {
-          const lastEvent = innerstate.state?.[1] || null;
-          if (!lastEvent) {
-            throw new Error("canonize is impossible before any event");
-          }
-          const newAtStack: SCanonize<CType> = { t: "canonize", lastEvent };
-          data.stack[evalContext.index] = newAtStack;
-          return newAtStack;
-        }
-        if (atStack.t === "canonize") {
-          return atStack;
-        }
-        throw new Error(`atStack ${evalContext.index} is not "canonize"`);
-      })();
-
-      // check for existing forTimeline
-      const name = atStack.lastEvent.payload.t;
-      const timelineOf = atStack.lastEvent.meta.eventId;
-      const depth = multiverse.depthOf(atStack.lastEvent.meta.eventId);
-
-      const matchingCanonizeEvent = swarmStore.canonizationStore
-        .getDecisionsForAddress(name, depth)
-        .find((x) => x.payload.timelineOf === timelineOf);
-
-      // resume
-      if (matchingCanonizeEvent) {
-        evalContext.index += 1;
-        return true;
+  const autoEvaluate = (tickContext: TickContext) => {
+    const legSlide = (tickContext: TickContext) => {
+      const legSlide = codegraph.legSlideMap.at(tickContext.legIndex);
+      if (legSlide !== undefined) {
+        tickContext.legIndex = legSlide;
+        return Continue;
       }
-    }
+      return !Continue;
+    };
 
-    if (code.t === "par") {
-      // initialize atStack
-      (() => {
-        const atStack = data.stack.at(evalContext.index);
-        if (!atStack) {
-          const lastEvent = innerstate.state?.[1] || null;
-          // TODO: maybe support parallel at the beginning?
-          // but I don't think that makes sense
-          if (lastEvent === null) {
-            throw new Error(
-              "impossible right now. parallel should have been preceeded with a single event. this should have been prevented at the CCode building and validating"
-            );
-          }
-          const newAtStack: SParallel<CType> = {
-            t: "par",
-            instances: [],
-            lastEvent,
-            nextLegIndex: evalContext.index + code.pairOffsetIndex,
-          };
-          data.stack[evalContext.index] = newAtStack;
-          return;
-        }
-        if (atStack?.t !== "par") {
-          throw new Error("stack type not par");
-        }
-      })();
-
-      readInnerParallelProcessInstances(evalContext, code);
-
-      // recursive autoEvaluate on "par" next
-      const { atStack, minCompletedReached } = generateParallelCriteria(
-        evalContext,
-        code
-      );
-      if (minCompletedReached) {
-        const nextEvalContext = { index: atStack.nextLegIndex };
-        autoEvaluate(nextEvalContext);
-        atStack.nextLegIndex = nextEvalContext.index;
-      }
-
-      return false;
-    }
-
-    if (code.t === "retry") {
-      data.stack[evalContext.index] = {
-        t: "retry",
-        lastFailState: innerstate.state,
-      };
-      evalContext.index += 1;
-      return true;
-    }
-
-    if (code.t === "anti-retry") {
-      const pairIndex = code.pairOffsetIndex + evalContext.index;
-      if (workflow.at(pairIndex)?.t !== "retry") {
-        throw new Error("retry not found");
-      }
-
-      data.stack[pairIndex] = null;
-      evalContext.index += 1;
-      return true;
-    }
-
-    // Handle timeout code
-
-    if (code.t === "timeout") {
-      data.stack[evalContext.index] = {
-        t: "timeout",
-        startedAt: new Date(),
-      };
-      evalContext.index += 1;
-      return true;
-    }
-
-    if (code.t === "timeout-gap") {
-      evalContext.index += code.antiOffsetIndex + 1;
-      return true;
-    }
-
-    if (code.t === "anti-timeout") {
-      return false;
-    }
-
-    if (code.t === "compensate") {
-      const lastEvent = innerstate.state?.[1];
-      if (!lastEvent) throw new Error("entered compensate block without state");
-
-      data.stack[evalContext.index] = {
-        t: "compensate",
-        lastEvent,
-      };
-
-      evalContext.index += 1;
-      return true;
-    }
-
-    if (code.t === "compensate-end") {
-      const rightAfterAntiIndex = evalContext.index + code.antiIndexOffset + 1;
-      evalContext.index = rightAfterAntiIndex;
-      return true;
-    }
-
-    if (code.t === "anti-compensate") {
-      if (data.stack.at(evalContext.index) === undefined) {
-        data.stack[evalContext.index] = { t: "anti-compensate" };
-      }
-      return false;
-    }
-
-    if (code.t === "anti-choice") {
-      // pointing the index into the anti-choice before the next code is
-      // important because it allows the machine to process a new state
-      // recalculation up to this point which may result in a return or a fail,
-      // without continuing with other codes which may be automatic (e.g. retry, timeout, etc)
-      evalContext.index += 1;
-      return true;
-    }
-
-    if (code.t === "match") {
-      const context = {} as Record<string, string>;
-      Object.entries(code.args).forEach(([assignee, assigner]) => {
-        context[assignee] = innerstate.context[assigner];
-      });
-      const matchMachine = WFMachine<CType>(
-        code.subworkflow,
-        swarmStore,
-        compilerCache,
-        {
-          context,
-          codeIndexPrefix: [evalContext.index],
-        }
-      );
-      matchMachine.logger.sub(logger.log);
-      const atStack = getSMatchAtIndex(evalContext.index) || {
-        t: "match",
-        inner: matchMachine,
-      };
-      if (atStack.t !== "match")
-        throw new Error("match stack position filled with non-match");
-      data.stack[evalContext.index] = atStack;
-      if (!atStack.inner.returned()) return false;
-
-      // calculate returned
-      const { state } = atStack.inner.state();
-      if (!state) throw new Error("returned without state");
-      const returnedState = state[1].payload.t;
-
-      const cases = code.casesIndexOffsets.map((offset) => {
-        const index = evalContext.index + offset;
-        const matchCase = workflow.at(index);
-        if (matchCase?.t !== "match-case") {
+    const tryAdvanceCanonize = (tickContext: TickContext) => {
+      const next = selfNextCanonize();
+      if (next) {
+        const atStack = data.stack.at(next.index);
+        if (atStack?.t !== "canonize") {
           throw new Error(
-            `case index offset points to the wrong code type: ${matchCase?.t}`
+            "fatal error canonize is not populated by AssignAhead mechanism"
           );
         }
-        return { offset, matchCase };
-      });
+        // check for existing forTimeline
+        const name = atStack.lastEvent.payload.t;
+        const timelineOf = atStack.lastEvent.meta.eventId;
+        const depth = multiverse.depthOf(atStack.lastEvent.meta.eventId);
 
-      // cases that will not match otherwise
-      const notOtherwises = new Set(
-        cases
-          .map((x) => {
-            if (x.matchCase.case[0] === Exact) return x.matchCase.case[1];
-            return false;
-          })
-          .filter((x): x is Exclude<typeof x, null> => x !== null)
-      );
+        const matchingCanonizeEvent = swarmStore.canonizationStore
+          .getDecisionsForAddress(name, depth)
+          .find((x) => x.payload.timelineOf === timelineOf);
 
-      const firstMatch = cases.find((c) => {
-        if (c.matchCase.case[0] === Exact) {
-          return c.matchCase.case[1] === returnedState;
+        // resume
+        if (matchingCanonizeEvent) {
+          tickContext.legIndex = next.index;
+          return Continue;
         }
-        return !notOtherwises.has(returnedState);
-      });
+      }
+      return !Continue;
+    };
 
-      if (!firstMatch) {
-        throw new Error(`no case matches for ${returnedState} at ${code}`);
+    const tryAdvanceMatch = (tickContext: TickContext) => {
+      const code = workflow.at(tickContext.legIndex);
+      if (code?.t === "match") {
+        const atStack =
+          getSMatchAtIndex(tickContext.legIndex) ||
+          (() => {
+            const context = {} as Record<string, string>;
+            Object.entries(code.args).forEach(([assignee, assigner]) => {
+              context[assignee] = innerstate.context[assigner];
+            });
+            const matchMachine = WFMachine<CType>(
+              code.subworkflow,
+              swarmStore,
+              compilerCache,
+              {
+                context,
+                codeIndexPrefix: [tickContext.legIndex],
+              }
+            );
+            matchMachine.logger.sub(logger.log);
+            return {
+              t: "match",
+              inner: matchMachine,
+            };
+          })();
+
+        if (atStack.t !== "match") {
+          throw new Error("match stack position filled with non-match");
+        }
+
+        data.stack[tickContext.legIndex] = atStack;
+        if (!atStack.inner.returned()) return !Continue;
+
+        // calculate returned
+        const { state } = atStack.inner.state();
+        if (!state) throw new Error("returned without state");
+        const returnedState = state[1].payload.t;
+
+        const cases = code.casesIndexOffsets.map((offset) => {
+          const index = tickContext.legIndex + offset;
+          const matchCase = workflow.at(index);
+          if (matchCase?.t !== "match-case") {
+            throw new Error(
+              `case index offset points to the wrong code type: ${matchCase?.t}`
+            );
+          }
+          return { offset, matchCase };
+        });
+
+        // cases that will not match otherwise
+        const notOtherwises = new Set(
+          cases
+            .map((x) => {
+              if (x.matchCase.case[0] === Exact) return x.matchCase.case[1];
+              return false;
+            })
+            .filter((x): x is Exclude<typeof x, null> => x !== null)
+        );
+
+        const firstMatch = cases.find((c) => {
+          if (c.matchCase.case[0] === Exact) {
+            return c.matchCase.case[1] === returnedState;
+          }
+          return !notOtherwises.has(returnedState);
+        });
+
+        if (!firstMatch) {
+          throw new Error(`no case matches for ${returnedState} at ${code}`);
+        }
+
+        tickContext.legIndex += firstMatch.offset;
+        return Continue;
       }
 
-      evalContext.index += firstMatch.offset + 1;
-      return true;
-    }
+      return !Continue;
+    };
 
-    if (code.t === "anti-match-case") {
-      evalContext.index += code.afterIndexOffset;
-      return true;
-    }
+    const tryAdvancePar = (tickContext: TickContext) => {
+      const code = workflow.at(tickContext.legIndex);
+      if (code?.t === "par") {
+        readInnerParallelProcessInstances(tickContext, code);
 
-    return false;
-  };
+        // recursive autoEvaluate on "par" next
+        const { atStack, minCompletedReached } = generateParallelCriteria(
+          tickContext,
+          code
+        );
+        if (minCompletedReached) {
+          const nextEvalContext: TickContext = {
+            legIndex: atStack.nextLegIndex,
+          };
+          autoEvaluate(nextEvalContext);
+          atStack.nextLegIndex = nextEvalContext.legIndex;
+        }
+      }
+      return !Continue;
+    };
 
-  /**
-   * Some `CItem` auto-moves to the next one, instead of waiting for an input
-   * like `CEvent` or `CParallel`.
-   *
-   * This `autoEvaluate` does this auto-moving.
-   */
-  const autoEvaluate = (evalContext: EvalContext) => {
     while (true) {
-      recalculateState(evalContext);
-      if (innerstate.returned) break;
+      recalculateState(tickContext);
+      const shouldContinue =
+        legSlide(tickContext) ||
+        tryAdvanceCanonize(tickContext) ||
+        tryAdvanceMatch(tickContext) ||
+        tryAdvancePar(tickContext);
 
-      const shouldContinue = autoEvaluateImpl(evalContext);
-
-      if (shouldContinue) continue;
-
-      break;
+      if (!shouldContinue) break;
     }
-    recalculateState(evalContext);
+    recalculateState(tickContext);
   };
 
   const tickTimeout = (
-    evalContext: EvalContext,
+    tickContext: TickContext,
     e: ActyxWFBusiness<CType>
   ): TickRes => {
-    const timeout = selfAvailableTimeouts(evalContext.index).find(
+    const timeout = selfAvailableTimeouts(tickContext.legIndex).find(
       (timeout) => timeout.cconsequence.name === e.payload.t
     );
 
@@ -1087,17 +942,17 @@ export const WFMachine = <CType extends CTypeProto>(
    * Explores the "children" of parallels
    */
   const readInnerParallelProcessInstances = (
-    evalContext: EvalContext,
+    tickContext: TickContext,
     parallelCode: CParallel
   ) => {
     const { atStack, evLength } = generateParallelCriteria(
-      evalContext,
+      tickContext,
       parallelCode
     );
 
     // New instances detection
     const firstEventCode = workflow.at(
-      evalContext.index + parallelCode.firstEventIndex
+      tickContext.legIndex + parallelCode.firstEventIndex
     );
     if (firstEventCode?.t !== "event") {
       throw new Error("parallel.firstEventIndex is not event code");
@@ -1140,7 +995,7 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const tickParallel = (
-    evalContext: EvalContext,
+    tickContext: TickContext,
     parallelCode: CParallel,
     e: TickInput
   ): TickRes => {
@@ -1148,15 +1003,15 @@ export const WFMachine = <CType extends CTypeProto>(
     let fed = false;
 
     const { atStack, minCompletedReached, maxCompletedReached } =
-      generateParallelCriteria(evalContext, parallelCode);
+      generateParallelCriteria(tickContext, parallelCode);
 
     // advance signal from predecessors
     if (minCompletedReached) {
-      const nextEvalContext = { index: atStack.nextLegIndex };
-      if (tickAt(nextEvalContext, e)) {
+      const nextTickContext = { legIndex: atStack.nextLegIndex };
+      if (tickAt(nextTickContext, e)) {
         jumpLeg = atStack.nextLegIndex;
       }
-      atStack.nextLegIndex = nextEvalContext.index;
+      atStack.nextLegIndex = nextTickContext.legIndex;
     }
 
     if (maxCompletedReached) {
@@ -1167,22 +1022,15 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const tickCompensation = (
-    evalContext: EvalContext,
+    tickContext: TickContext,
     e: TickInput
   ): TickRes => {
-    const compensation = selfAvailableCompensateable(evalContext.index).find(
+    const compensation = selfAvailableCompensateable(tickContext.legIndex).find(
       (comp) => comp.firstCompensation.name === e.payload.t
     );
 
     // Compensation can only be triggered by event, not seek
-    if (
-      compensation &&
-      feedEvent(
-        { index: compensation.firstCompensationIndex },
-        compensation.firstCompensation,
-        e
-      )
-    ) {
+    if (compensation && feedEvent(compensation.next, e)) {
       return { fed: true, jumpLeg: compensation.firstCompensationIndex + 1 };
     }
 
@@ -1190,21 +1038,21 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const tickMatch = (
-    evalContext: EvalContext,
+    tickContext: TickContext,
     _: CMatch<CType>,
     e: TickInput
   ): TickRes => {
-    const atStack = getSMatchAtIndex(evalContext.index);
+    const atStack = getSMatchAtIndex(tickContext.legIndex);
     if (!atStack) {
       throw new Error("missing match at stack on evaluation");
     }
-    data.stack[evalContext.index] = atStack;
+    data.stack[tickContext.legIndex] = atStack;
     const fed = atStack.inner.tick(e);
     return { fed, jumpLeg: null };
   };
 
-  const tickRest = (evalContext: EvalContext, e: TickInput): TickRes => {
-    const next = (codegraph.nextMap.at(evalContext.index) || [])
+  const tickRest = (tickContext: TickContext, e: TickInput): TickRes => {
+    const next = (codegraph.nextMap.at(tickContext.legIndex) || [])
       .filter((x): x is CodeGraph.NextCEvent<CType> => x.code.t !== "canonize")
       .find((next) => {
         return (
@@ -1214,49 +1062,49 @@ export const WFMachine = <CType extends CTypeProto>(
         );
       });
 
-    if (next && feedEvent({ index: next.index }, next.code, e)) {
+    if (next && feedEvent(next, e)) {
       return { fed: true, jumpLeg: next.index };
     }
 
     return { fed: false, jumpLeg: null };
   };
 
-  const tickAt = (evalContext: EvalContext, e: TickInput | null): boolean => {
+  const tickAt = (tickContext: TickContext, e: TickInput | null): boolean => {
     let fed = false;
-    const code = workflow.at(evalContext.index);
+    const code = workflow.at(tickContext.legIndex);
 
     if (e) {
       if (code) {
         const res = (() => {
           // Jumps
           // =========
-          const compRes = tickCompensation(evalContext, e);
+          const compRes = tickCompensation(tickContext, e);
           if (compRes.fed) return compRes;
 
-          const timeoutRes = tickTimeout(evalContext, e);
+          const timeoutRes = tickTimeout(tickContext, e);
           if (timeoutRes.fed) return timeoutRes;
 
           // Submachine
           // =========
           const matchRes =
-            code?.t === "match" && tickMatch(evalContext, code, e);
+            code?.t === "match" && tickMatch(tickContext, code, e);
           if (matchRes && matchRes.fed) return matchRes;
 
           // Non Jumps
           // =========
-          if (code?.t === "par") return tickParallel(evalContext, code, e);
-          return tickRest(evalContext, e);
+          if (code?.t === "par") return tickParallel(tickContext, code, e);
+          return tickRest(tickContext, e);
         })();
 
         fed = res.fed;
 
         if (res !== null && res.jumpLeg !== null) {
-          evalContext.index = res.jumpLeg;
+          tickContext.legIndex = res.jumpLeg;
         }
       }
     }
 
-    autoEvaluate(evalContext);
+    autoEvaluate(tickContext);
 
     return fed;
   };
@@ -1266,9 +1114,9 @@ export const WFMachine = <CType extends CTypeProto>(
    * See the rest of `tick*` functions for how it works.
    */
   const tick = (input: TickInput | null): boolean => {
-    let evalContext = { index: data.legIndex };
-    const fed = tickAt(evalContext, input);
-    data.legIndex = evalContext.index;
+    let tickContext: TickContext = { legIndex: data.legIndex };
+    const fed = tickAt(tickContext, input);
+    data.legIndex = tickContext.legIndex;
     return fed;
   };
 
@@ -1286,9 +1134,9 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const state = (): WFMachineState<CType> => {
-    const evalContext = { index: data.legIndex };
+    const tickContext = { index: data.legIndex };
 
-    const matchAtStack = getSMatchAtIndex(evalContext.index);
+    const matchAtStack = getSMatchAtIndex(tickContext.index);
     if (matchAtStack) {
       const state = matchAtStack.inner.state();
       if (state.state) {
@@ -1309,13 +1157,12 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const reset = () => {
     // calc index
-    data.stateCalcIndex = 0;
     data.legIndex = -1;
     data.stack.length = 0;
 
+    innerstate.stateCalcIndex = 0;
     innerstate.context = { ...contextArg };
     innerstate.state = null;
-    innerstate.returned = false;
   };
 
   const getContinuationChainByEventId = (eventId: string) => {
@@ -1434,11 +1281,14 @@ export const WFMachine = <CType extends CTypeProto>(
     advanceToEventId(eventId);
   };
 
+  const selfNextCanonize = () =>
+    (codegraph.nextMap.at(data.legIndex) || [])
+      .filter((x): x is CodeGraph.NextCCanonize => x.code.t === "canonize")
+      .at(0);
+
   const selfPendingCanonizationAdvrt =
     (): PendingCanonizationAdvert<CType> | null => {
-      const nextCanonize = (codegraph.nextMap.at(data.legIndex) || [])
-        .filter((x): x is CodeGraph.NextCCanonize => x.code.t === "canonize")
-        .at(0);
+      const nextCanonize = selfNextCanonize();
 
       if (nextCanonize) {
         const lastEvent = getSelfStateOrThrow(
@@ -1466,16 +1316,23 @@ export const WFMachine = <CType extends CTypeProto>(
     };
 
   const isWaitingForCanonization = () => {
-    const nextCanonize = (codegraph.nextMap.at(data.legIndex) || [])
+    const next = (codegraph.nextMap.at(data.legIndex) || [])
       .filter((x): x is CodeGraph.NextCCanonize => x.code.t === "canonize")
       .at(0);
 
-    if (!nextCanonize) return false;
-    const code = nextCanonize?.code;
-    const atStack = data.stack.at(data.evalIndex);
-    if (atStack?.t !== "canonize") return false;
+    if (!next) return false;
+
+    const atStack = data.stack.at(next.index);
+    if (atStack?.t !== "canonize") {
+      throw new Error(
+        "fatal error canonize is not populated by AssignAhead mechanism"
+      );
+    }
+    // check for existing forTimeline
     const name = atStack.lastEvent.payload.t;
     const depth = multiverse.depthOf(atStack.lastEvent.meta.eventId);
+
+    if (atStack?.t !== "canonize") return false;
 
     return (
       swarmStore.canonizationStore.getDecisionsForAddress(name, depth)
@@ -1601,18 +1458,18 @@ export const WFMachine = <CType extends CTypeProto>(
     },
     codegraph: () => codegraph,
     codegraphBranchesFromCompensation: () => {
-      const match = getSMatchAtIndex(data.evalIndex);
+      const match = getSMatchAtIndex(data.legIndex);
       if (match?.inner) return match.inner.codegraphBranchesFromCompensation();
 
       const activeCompensation = selfActiveCompensation().at(0);
       if (activeCompensation) {
-        const branches = codegraph.branchesFrom(data.evalIndex);
+        const branches = codegraph.branchesFrom(data.legIndex);
         return branches.map((branch) =>
           convertBranchOfToNamed(innerstate.context, branch)
         );
       }
 
-      // closes availableCompensateable
+      // closest availableCompensateable
       const availableCompensateable = selfAvailableCompensateable()
         .sort((a, b) =>
           Ord.toNum(NestedCodeIndexAddress.cmp(b.codeIndex, a.codeIndex))
@@ -1625,7 +1482,7 @@ export const WFMachine = <CType extends CTypeProto>(
         if (bounding) {
           // find branches inside the compensate-with scope
           const branches = codegraph
-            .branchesFrom(data.evalIndex)
+            .branchesFrom(data.legIndex)
             .filter((line) => {
               const lastNode = line.chain.at(line.chain.length - 1);
               if (!lastNode) return false;
