@@ -30,6 +30,7 @@
  *     match. Its value will always be lower than evalIndex.
  */
 
+import { isNonNullChain } from "typescript";
 import {
   ActyxWFBusiness,
   CTypeProto,
@@ -76,7 +77,7 @@ type StackItem<CType extends CTypeProto> =
   | SMatch<CType>
   | SEvent<CType>
   | SRetry<CType>
-  | STimeout
+  | STimeout<CType>
   | SParallel<CType>
   | SAntiParallel;
 
@@ -101,19 +102,20 @@ type SEvent<CType extends CTypeProto> = Pick<CEvent<CType>, "t"> & {
 };
 
 type SRetry<CType extends CTypeProto> = Pick<CRetry, "t"> & {
-  lastState: State<CType> | null;
+  lastFailState: ActyxWFBusiness<CType> | null;
 };
 type SParallel<CType extends CTypeProto> = Pick<CParallel, "t"> & {
+  nextLegIndex: number;
   lastEvent: ActyxWFBusiness<CType>;
-  nextEvalIndex: number;
   instances: SParallelExecution<CType>[];
 };
 type SParallelExecution<CType extends CTypeProto> = {
   entry: ActyxWFBusiness<CType>[];
 };
 
-type STimeout = Pick<CTimeout, "t"> & {
+type STimeout<CType extends CTypeProto> = Pick<CTimeout, "t"> & {
   startedAt: Date;
+  lastTimeoutEvent: ActyxWFBusiness<CType> | null;
 };
 type SAntiParallel = Pick<CAntiParallel, "t"> & {};
 
@@ -266,7 +268,7 @@ export const WFMachine = <CType extends CTypeProto>(
   const wfMachineCodeIndexPrefix = wfMachineArgs?.codeIndexPrefix || [];
   type EvalContext = { index: number };
   type TickInput = ActyxWFBusiness<CType>;
-  type TickRes = { jumpToIndex: number | null; fed: boolean };
+  type TickRes = { jumpLeg: number | null; fed: boolean };
 
   validate(wfWorkflow);
 
@@ -294,7 +296,6 @@ export const WFMachine = <CType extends CTypeProto>(
   const data = {
     stateCalcIndex: 0,
     legIndex: -1,
-    evalIndex: 0,
     stack: [] as (StackItem<CType> | null)[],
   };
 
@@ -308,7 +309,6 @@ export const WFMachine = <CType extends CTypeProto>(
   const resetIndex = (evalContext: EvalContext, targetIndex: number) => {
     // set execution back at the index
     data.stack.length = targetIndex;
-    data.evalIndex = targetIndex;
     data.legIndex = -1;
     evalContext.index = targetIndex;
 
@@ -344,49 +344,43 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Find all active timeouts
    */
-  const selfAvailableTimeouts = (evalIndex: number = data.evalIndex) =>
-    ctimeoutIndexer
-      .getListMatching(evalIndex)
-      .map((entry) => entry.start)
-      .map((index) => {
-        const ctimeout = workflow.at(index);
-        const stimeout = data.stack.at(index);
+  const selfAvailableTimeouts = (legIndex: number = data.legIndex) =>
+    (codegraph.nextMap.at(legIndex) || [])
+      .map((next) => {
+        if (next.code.t === "canonize") return null;
+        next = next as CodeGraph.NextCEvent<CType>;
+        const timeoutTag = next.tags.timeoutJump;
+        if (!timeoutTag) return null;
+        const timeoutIndex = timeoutTag.timeoutIndex;
+        const ctimeout = workflow.at(timeoutTag.timeoutIndex);
         if (ctimeout?.t !== "timeout") {
           throw new Error(
-            `attempt timeout fatal error: ctimeout not found at index ${index}`
+            `attempt timeout fatal error: ctimeout not found at index ${timeoutIndex}`
           );
         }
+        const stimeout = data.stack.at(timeoutIndex);
         if (stimeout?.t !== "timeout") {
           throw new Error(
-            `timeout query fatal error: stimeout not found at index ${index} while inspecting ${data.evalIndex}. s shape is ${stimeout}`
+            `timeout query fatal error: stimeout not found at index ${timeoutIndex} while inspecting ${legIndex}. s shape is ${stimeout}`
           );
         }
 
-        const gapIndex = index + ctimeout.gapOffsetIndex;
-        const antiIndex = index + ctimeout.antiOffsetIndex;
-        const cconsquenceIndex = gapIndex + 1;
-
-        if (evalIndex >= gapIndex) return null;
-
-        const cconsequence = workflow.at(cconsquenceIndex);
-
-        if (cconsequence?.t !== "event") {
-          throw new Error(
-            `timeout query fatal error: cevent consequence not found at index ${cconsquenceIndex} while inspecting ${data.evalIndex}.`
-          );
-        }
+        const antiIndex = timeoutIndex + ctimeout.antiOffsetIndex;
+        const cconsequenceIndex = next.index;
+        const cconsequence = next.code;
 
         const dueDate = stimeout.startedAt.getTime() + ctimeout.duration;
         const lateness = Date.now() - dueDate;
 
         return {
-          codeIndex: wfMachineCodeIndexPrefix.concat([index]),
+          codeIndex: wfMachineCodeIndexPrefix.concat([timeoutIndex]),
           stimeout,
           ctimeout,
-          cconsquenceIndex,
+          cconsequenceIndex,
           cconsequence,
           lateness,
           antiIndex,
+          codeNext: next,
         };
       })
       .filter((x): x is NonNullable<typeof x> => !!x)
@@ -395,47 +389,47 @@ export const WFMachine = <CType extends CTypeProto>(
         return b.antiIndex - a.antiIndex;
       });
 
-  const selfDoneCompensation = () =>
-    data.stack
-      .map((x, i) => [i, x, workflow.at(i)] as const)
-      .filter(
-        (pair): pair is [number, SAntiCompensate, CAntiCompensate] =>
-          pair[1]?.t === "anti-compensate" && pair[2]?.t === "anti-compensate"
-      )
-      .map(([antiIndex, _, cAntiCompensate]) => {
-        const compensateIndex = antiIndex + cAntiCompensate.baseIndexOffset;
-        const ccompensate = workflow.at(compensateIndex);
-        if (ccompensate?.t !== "compensate") {
-          throw new Error(
-            `compensate query fatal error: ccompensate not found at index ${compensateIndex}`
-          );
-        }
+  const selfDoneCompensation = (
+    legIndex: number = data.legIndex
+  ): {
+    codeIndex: NestedCodeIndexAddress.Type;
+    fromTimelineOf: string;
+  }[] => {
+    const anti = workflow.at(legIndex);
+    if (anti?.t !== "anti-compensate") return [];
+    const compensateIndex = legIndex + anti.baseIndexOffset;
+    const ccompensate = workflow.at(compensateIndex);
+    if (ccompensate?.t !== "compensate") {
+      throw new Error(
+        `compensate query fatal error: ccompensate not found at index ${compensateIndex}`
+      );
+    }
 
-        const sCompensate = data.stack.at(compensateIndex);
-        if (sCompensate?.t !== "compensate") {
-          throw new Error(
-            `compensate at ${compensateIndex} not populated when activated at index`
-          );
-        }
-
-        const triggeringEvent = sCompensate.lastEvent;
-
-        return {
-          codeIndex: wfMachineCodeIndexPrefix.concat([compensateIndex]),
-          fromTimelineOf: triggeringEvent.meta.eventId,
-        };
-      });
+    const sCompensate = data.stack.at(compensateIndex);
+    if (sCompensate?.t !== "compensate") {
+      throw new Error(
+        `compensate at ${compensateIndex} not populated when activated at index`
+      );
+    }
+    const triggeringEvent = sCompensate.lastEvent;
+    return [
+      {
+        codeIndex: wfMachineCodeIndexPrefix.concat([compensateIndex]),
+        fromTimelineOf: triggeringEvent.meta.eventId,
+      },
+    ];
+  };
 
   const involvedActorsOfCompensateAt = (index: number) =>
     (ccompensateIndexer.involvementMap.get(index) || [])
       .map((binding) => innerstate.context[binding] || undefined)
       .filter((x): x is string => !!x);
 
-  const selfActiveCompensation = (evalIndex = data.evalIndex) => {
+  const selfActiveCompensation = (legIndex = data.legIndex) => {
     if (innerstate.returned) return [];
 
     const res = ccompensateIndexer
-      .getWithListMatching(evalIndex)
+      .getWithListMatching(legIndex)
       .map((entry) => {
         const withStart = workflow.at(entry.start);
         if (withStart?.t !== "compensate-with") {
@@ -485,11 +479,15 @@ export const WFMachine = <CType extends CTypeProto>(
   /**
    * Find all active compensateable
    */
-  const selfAvailableCompensateable = (evalIndex = data.evalIndex) => {
-    const res = ccompensateIndexer
-      .getMainListMatching(evalIndex)
-      .map((entry) => entry.start)
-      .map((index) => {
+  const selfAvailableCompensateable = (legIndex = data.legIndex) =>
+    (codegraph.nextMap.at(legIndex) || [])
+      .map((next) => {
+        if (next.code.t === "canonize") return null;
+        next = next as CodeGraph.NextCEvent<CType>;
+        const compensateableTag = next.tags.compensationEntry;
+        if (!compensateableTag) return null;
+
+        const index = compensateableTag.compensationIndex;
         const ccompensate = workflow.at(index);
         if (ccompensate?.t !== "compensate") {
           throw new Error(
@@ -506,8 +504,8 @@ export const WFMachine = <CType extends CTypeProto>(
 
         const triggeringEvent = sCompensate.lastEvent;
         const withIndex = index + ccompensate.withIndexOffset;
-        const firstCompensationIndex = index + ccompensate.withIndexOffset + 1;
-        const firstCompensation = workflow.at(firstCompensationIndex);
+        const firstCompensationIndex = next.index;
+        const firstCompensation = next.code;
 
         if (firstCompensation?.t !== "event") {
           throw new Error(
@@ -526,117 +524,74 @@ export const WFMachine = <CType extends CTypeProto>(
       })
       .filter((x): x is Exclude<typeof x, null> => x !== null);
 
-    return res;
-  };
-
-  /**
-   * Extract valid next event types from a code.
-   */
-  const extractValidNext = (
-    index: number,
-    result: ReturnType<WFMachine<CType>["availableNexts"]>,
-    code: CItem<CType>
-  ) => {
-    if (code?.t === "par") {
-      // parStarts
-      (() => {
-        const firstIndex = index + code.firstEventIndex;
-        const firstChildCode = workflow.at(firstIndex);
-        if (!firstChildCode) return;
-        extractValidNext(firstIndex, result, firstChildCode);
-      })();
-
-      const parStack = generateParallelCriteria({ index }, code).atStack;
-      parStack.instances.map((instance) => {
-        const childIndex = index + code.firstEventIndex + instance.entry.length;
-        const childCode = workflow.at(childIndex);
-        if (!childCode) return;
-        extractValidNext(childIndex, result, childCode);
-      });
-
-      // nextOfPar
-      (() => {
-        const maybeCEv = workflow.at(parStack.nextEvalIndex);
-        if (!maybeCEv) return;
-        extractValidNext(parStack.nextEvalIndex, result, maybeCEv);
-      })();
-      return;
-    }
-
-    if (code?.t === "match") {
-      const smatch = data.stack.at(data.evalIndex);
-      if (smatch && smatch.t === "match") {
-        const subNexts = smatch.inner.availableNexts();
-        if (ccompensateIndexer.isInsideWithBlock(index)) {
-          subNexts.forEach((next) => next.reason.add("compensation"));
-        }
-        result.push(...subNexts);
-      }
-      return;
-    }
-
-    if (code?.t === "event") {
-      const { name, control } = code;
-      result.push(
-        mapUniqueActorOnNext({
-          name,
-          unnamedActor: code.actor,
-          control,
-          reason: ((): ReasonSet => {
-            if (ccompensateIndexer.isInsideWithBlock(index))
-              return new Set(["compensation"]);
-            if (cparallelIndexer.isParallelStart(index))
-              return new Set(["parallel"]);
-            return new Set();
-          })(),
-        })
-      );
-      return;
-    }
-
-    if (code?.t === "choice") {
-      const eventStartIndex = data.evalIndex + 1;
-      const antiIndex = data.evalIndex + code.antiIndexOffset;
-      workflow
-        .map((code, line) => ({ code, line }))
-        .slice(eventStartIndex, antiIndex)
-        .forEach(({ code, line }) => extractValidNext(line, result, code));
-      return;
-    }
-  };
-
-  /**
-   * Extract Next[] from current state
-   */
   const availableNexts = (): ReturnType<WFMachine<CType>["availableNexts"]> => {
-    const code = workflow.at(data.evalIndex);
-    const result: ReturnType<WFMachine<CType>["availableNexts"]> = [];
-
-    if (code) {
-      extractValidNext(data.evalIndex, result, code);
-    }
-
-    selfAvailableTimeouts(data.evalIndex).forEach((timeout) => {
-      const { name, control, actor } = timeout.cconsequence;
-      result.push(
-        mapUniqueActorOnNext({
-          name,
-          unnamedActor: actor,
-          control,
-          reason: new Set(["timeout"]),
+    const uniqueCheck = new Set<string>();
+    const convertCodeNextToWFMachineNext = (
+      codeNexts: CodeGraph.Nexts<CType>
+    ): UnnamedNext<CType>[] =>
+      codeNexts
+        .map((next) => {
+          if (next.code.t === "canonize") return null;
+          next = next as CodeGraph.NextCEvent<CType>;
+          return {
+            unnamedActor: next.code.actor,
+            name: next.code.name,
+            control: next.code.control,
+            reason: (() => {
+              const set: ReasonSet = new Set();
+              if (next.tags.compensationEntry) set.add("compensation");
+              if (next.tags.parallelContinuation) set.add("parallel");
+              if (next.tags.parallelInstantiation) set.add("parallel");
+              if (next.tags.timeoutJump) set.add("timeout");
+              return set;
+            })(),
+          };
         })
-      );
-    });
+        .filter((x): x is Exclude<typeof x, null> => x !== null)
+        .filter((x) => {
+          if (uniqueCheck.has(x.name)) return false;
+          uniqueCheck.add(x.name);
+          return true;
+        });
 
-    selfAvailableCompensateable().forEach((compensation) => {
-      extractValidNext(
-        compensation.firstCompensationIndex,
-        result,
-        compensation.firstCompensation
+    if (data.legIndex === -1) {
+      return convertCodeNextToWFMachineNext(codegraph.baseNexts).map(
+        mapUniqueActorOnNext
       );
-    });
+    } else {
+      const code = workflow[data.legIndex];
 
-    return result;
+      if (code.t === "par") {
+        const parallelCriteria = generateParallelCriteria(
+          { index: data.legIndex },
+          code
+        );
+        const nextLegIndex = parallelCriteria.atStack.nextLegIndex;
+        const codeNexts = [
+          // from nexts
+          ...(codegraph.nextMap.at(nextLegIndex) || []),
+          // from children
+          ...parallelCriteria.atStack.instances.flatMap((instance) => {
+            const childIndex =
+              data.legIndex + code.firstEventIndex + instance.entry.length - 1;
+            const codeNexts = codegraph.nextMap.at(childIndex) || [];
+            return codeNexts;
+          }),
+        ];
+
+        return convertCodeNextToWFMachineNext(codeNexts).map(
+          mapUniqueActorOnNext
+        );
+      } else if (code.t === "match") {
+        const inner = getSMatchAtIndex(data.legIndex)?.inner;
+        if (!inner) return [];
+        return inner.availableNexts();
+      } else {
+        return convertCodeNextToWFMachineNext(
+          codegraph.nextMap.at(data.legIndex) || []
+        ).map(mapUniqueActorOnNext);
+      }
+    }
   };
 
   /**
@@ -715,7 +670,7 @@ export const WFMachine = <CType extends CTypeProto>(
           }
           data.stack[retry.index] = {
             t: "retry",
-            lastState: innerstate.state,
+            lastFailState: innerstate.state,
           };
           resetIndex(evalContext, retry.index + 1);
           return true;
@@ -740,11 +695,11 @@ export const WFMachine = <CType extends CTypeProto>(
       if (
         code?.t === "retry" &&
         stackItem?.t === "retry" &&
-        stackItem.lastState !== null
+        stackItem.lastFailState !== null
       ) {
         data.legIndex = calcIndex;
 
-        innerstate.state = stackItem.lastState;
+        innerstate.state = stackItem.lastFailState;
       }
 
       if (code?.t === "match") {
@@ -837,7 +792,7 @@ export const WFMachine = <CType extends CTypeProto>(
             t: "par",
             instances: [],
             lastEvent,
-            nextEvalIndex: evalContext.index + code.pairOffsetIndex + 1,
+            nextLegIndex: evalContext.index + code.pairOffsetIndex,
           };
           data.stack[evalContext.index] = newAtStack;
           return;
@@ -855,9 +810,9 @@ export const WFMachine = <CType extends CTypeProto>(
         code
       );
       if (minCompletedReached) {
-        const nextEvalContext = { index: atStack.nextEvalIndex };
+        const nextEvalContext = { index: atStack.nextLegIndex };
         autoEvaluate(nextEvalContext);
-        atStack.nextEvalIndex = nextEvalContext.index;
+        atStack.nextLegIndex = nextEvalContext.index;
       }
 
       return false;
@@ -866,7 +821,7 @@ export const WFMachine = <CType extends CTypeProto>(
     if (code.t === "retry") {
       data.stack[evalContext.index] = {
         t: "retry",
-        lastState: innerstate.state,
+        lastFailState: innerstate.state,
       };
       evalContext.index += 1;
       return true;
@@ -1035,71 +990,97 @@ export const WFMachine = <CType extends CTypeProto>(
     evalContext: EvalContext,
     e: ActyxWFBusiness<CType>
   ): TickRes => {
-    const lastMatching = selfAvailableTimeouts(evalContext.index).find(
-      (x) => x.cconsequence.name === e.payload.t
+    const timeout = selfAvailableTimeouts(evalContext.index).find(
+      (timeout) => timeout.cconsequence.name === e.payload.t
     );
 
-    if (lastMatching) {
-      const { cconsquenceIndex, cconsequence } = lastMatching;
-      const fed = feedEvent({ index: cconsquenceIndex }, cconsequence, e);
-      if (fed) {
-        return { fed: true, jumpToIndex: cconsquenceIndex + 1 };
-      }
+    if (timeout && feedEvent(timeout.codeNext, e)) {
+      return { fed: true, jumpLeg: timeout.cconsequenceIndex };
     }
-    return { fed: false, jumpToIndex: null };
+
+    return { fed: false, jumpLeg: null };
+  };
+
+  const patchStateOnFeedEvent = (
+    next: CodeGraph.NextCEvent<CType>,
+    e: ActyxWFBusiness<CType>
+  ) => {
+    // Patch State on Feed
+    if (next.tags.retryPatch) {
+      data.stack[next.tags.retryPatch.retryIndex] = {
+        t: "retry",
+        lastFailState: getSelfStateOrThrow(
+          "feedEvent: retryPatch state not found"
+        ),
+      } satisfies SRetry<CType>;
+    }
+
+    if (next.tags.compensationMainEntry) {
+      data.stack[next.tags.compensationMainEntry.compensationIndex] = {
+        t: "compensate",
+        lastEvent: getSelfStateOrThrow(
+          "feedEvent: compensationMainEntry state not found"
+        ),
+      } satisfies SCompensate<CType>;
+    }
+
+    if (next.tags.timeoutEntry) {
+      const timeoutCode = workflow.at(next.tags.timeoutEntry.timeoutIndex);
+      if (timeoutCode?.t !== "timeout") {
+        throw new Error("invalid timeout index while feedEvent:timeoutEntry");
+      }
+      data.stack[next.tags.timeoutEntry.timeoutIndex] = {
+        t: "timeout",
+        startedAt: new Date(),
+        lastTimeoutEvent: null,
+      } satisfies STimeout<CType>;
+    } else if (next.tags.timeoutJump) {
+      const timeoutCode = workflow.at(next.tags.timeoutJump.timeoutIndex);
+      if (timeoutCode?.t !== "timeout") {
+        throw new Error("invalid timeout index while feedEvent:timeoutJump");
+      }
+      data.stack[next.tags.timeoutJump.timeoutIndex] = {
+        t: "timeout",
+        startedAt: new Date(),
+        lastTimeoutEvent: e,
+      } satisfies STimeout<CType>;
+    }
+
+    // patch AssignAhead for parallel and canonize
+    codegraph.assignAheadsMap
+      .at(next.index)
+      ?.forEach(({ index: assignAheadIndex }) => {
+        const code = workflow.at(assignAheadIndex);
+        if (code?.t === "par") {
+          data.stack[assignAheadIndex] = {
+            t: "par",
+            instances: [],
+            lastEvent: e,
+            nextLegIndex: assignAheadIndex + code.pairOffsetIndex,
+          } satisfies SParallel<CType>;
+        }
+        if (code?.t === "canonize") {
+          data.stack[assignAheadIndex] = {
+            t: "canonize",
+            lastEvent: e,
+          } satisfies SCanonize<CType>;
+        }
+      });
   };
 
   const feedEvent = (
-    evalContext: EvalContext,
-    code: CEvent<CType>,
+    next: CodeGraph.NextCEvent<CType>,
     e: ActyxWFBusiness<CType>
   ) => {
-    if (e.payload.t === code.name) {
-      data.stack[evalContext.index] = {
+    if (e.payload.t === next.code.name) {
+      data.stack[next.index] = {
         t: "event",
         event: e,
       };
+      patchStateOnFeedEvent(next, e);
       return true;
     }
     return false;
-  };
-
-  const tickChoice = (
-    evalContext: EvalContext,
-    code: CChoice,
-    e: ActyxWFBusiness<CType>
-  ): TickRes => {
-    const eventStartIndex = evalContext.index + 1;
-    const antiIndex = evalContext.index + code.antiIndexOffset;
-    const firstMatching = workflow
-      .slice(eventStartIndex, antiIndex) // take the CEvent between the choice and anti-choice
-      .map((x, index) => {
-        if (x.t === "choice-barrier") return null;
-        if (x.t !== "event") {
-          // defensive measure, should not exist
-          throw new Event("codes inside are not CEvent");
-        }
-        return [index, x] as const;
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null)
-      .find(([_, x]) => x.name === e.payload.t);
-
-    if (firstMatching) {
-      const [indexOffset, _] = firstMatching;
-      const eventIndex = eventStartIndex + indexOffset;
-      data.stack[eventIndex] = {
-        t: "event",
-        event: e,
-      };
-      return {
-        fed: true,
-        jumpToIndex: antiIndex,
-      };
-    }
-    return {
-      fed: false,
-      jumpToIndex: null,
-    };
   };
 
   /**
@@ -1161,64 +1142,51 @@ export const WFMachine = <CType extends CTypeProto>(
   const tickParallel = (
     evalContext: EvalContext,
     parallelCode: CParallel,
-    input: TickInput
+    e: TickInput
   ): TickRes => {
-    let jumpToIndex: number | null = null;
+    let jumpLeg: number | null = null;
     let fed = false;
 
     const { atStack, minCompletedReached, maxCompletedReached } =
       generateParallelCriteria(evalContext, parallelCode);
 
     // advance signal from predecessors
-
     if (minCompletedReached) {
-      // Can advance, how to advance? It depends if `min` is 0 or not.
-      const nextEvalContext = { index: atStack.nextEvalIndex };
-      fed = tickAt(nextEvalContext, input);
-      atStack.nextEvalIndex = nextEvalContext.index;
-
-      if (fed) {
-        jumpToIndex = Math.max(
-          atStack.nextEvalIndex,
-          evalContext.index + parallelCode.pairOffsetIndex + 1
-        );
+      const nextEvalContext = { index: atStack.nextLegIndex };
+      if (tickAt(nextEvalContext, e)) {
+        jumpLeg = atStack.nextLegIndex;
       }
+      atStack.nextLegIndex = nextEvalContext.index;
     }
 
-    if (!fed && maxCompletedReached) {
-      jumpToIndex = Math.max(
-        atStack.nextEvalIndex,
-        evalContext.index + parallelCode.pairOffsetIndex + 1
-      );
+    if (maxCompletedReached) {
+      jumpLeg = atStack.nextLegIndex;
     }
 
-    return {
-      fed,
-      jumpToIndex: jumpToIndex,
-    };
+    return { fed, jumpLeg };
   };
 
   const tickCompensation = (
     evalContext: EvalContext,
     e: TickInput
   ): TickRes => {
-    // Compensation can only be triggered by event, not seek
-    const firstMatching = selfAvailableCompensateable(evalContext.index).find(
-      (comp) => e.payload.t === comp.firstCompensation.name
+    const compensation = selfAvailableCompensateable(evalContext.index).find(
+      (comp) => comp.firstCompensation.name === e.payload.t
     );
 
-    if (firstMatching) {
-      const fed = feedEvent(
-        { index: firstMatching.firstCompensationIndex },
-        firstMatching.firstCompensation,
+    // Compensation can only be triggered by event, not seek
+    if (
+      compensation &&
+      feedEvent(
+        { index: compensation.firstCompensationIndex },
+        compensation.firstCompensation,
         e
-      );
-      if (fed) {
-        return { fed, jumpToIndex: firstMatching.firstCompensationIndex + 1 };
-      }
+      )
+    ) {
+      return { fed: true, jumpLeg: compensation.firstCompensationIndex + 1 };
     }
 
-    return { fed: false, jumpToIndex: null };
+    return { fed: false, jumpLeg: null };
   };
 
   const tickMatch = (
@@ -1232,23 +1200,25 @@ export const WFMachine = <CType extends CTypeProto>(
     }
     data.stack[evalContext.index] = atStack;
     const fed = atStack.inner.tick(e);
-    return { fed, jumpToIndex: null };
+    return { fed, jumpLeg: null };
   };
 
-  const tickRest = (
-    evalContext: EvalContext,
-    code: CItem<CType>,
-    e: TickInput
-  ): TickRes => {
-    const fed = (() => {
-      if (code?.t === "event") return feedEvent(evalContext, code, e);
-      return false;
-    })();
+  const tickRest = (evalContext: EvalContext, e: TickInput): TickRes => {
+    const next = (codegraph.nextMap.at(evalContext.index) || [])
+      .filter((x): x is CodeGraph.NextCEvent<CType> => x.code.t !== "canonize")
+      .find((next) => {
+        return (
+          !next.tags.parallelInstantiation &&
+          !next.tags.parallelContinuation &&
+          next.code.name === e.payload.t
+        );
+      });
 
-    return {
-      fed,
-      jumpToIndex: fed ? evalContext.index + 1 : null,
-    };
+    if (next && feedEvent({ index: next.index }, next.code, e)) {
+      return { fed: true, jumpLeg: next.index };
+    }
+
+    return { fed: false, jumpLeg: null };
   };
 
   const tickAt = (evalContext: EvalContext, e: TickInput | null): boolean => {
@@ -1258,12 +1228,6 @@ export const WFMachine = <CType extends CTypeProto>(
     if (e) {
       if (code) {
         const res = (() => {
-          // Submachine
-          // =========
-          const matchRes =
-            code?.t === "match" && tickMatch(evalContext, code, e);
-          if (matchRes && matchRes.fed) return matchRes;
-
           // Jumps
           // =========
           const compRes = tickCompensation(evalContext, e);
@@ -1272,17 +1236,22 @@ export const WFMachine = <CType extends CTypeProto>(
           const timeoutRes = tickTimeout(evalContext, e);
           if (timeoutRes.fed) return timeoutRes;
 
+          // Submachine
+          // =========
+          const matchRes =
+            code?.t === "match" && tickMatch(evalContext, code, e);
+          if (matchRes && matchRes.fed) return matchRes;
+
           // Non Jumps
           // =========
-          if (code?.t === "choice") return tickChoice(evalContext, code, e);
           if (code?.t === "par") return tickParallel(evalContext, code, e);
-          return tickRest(evalContext, code, e);
+          return tickRest(evalContext, e);
         })();
 
         fed = res.fed;
 
-        if (res !== null && res.jumpToIndex !== null) {
-          evalContext.index = res.jumpToIndex;
+        if (res !== null && res.jumpLeg !== null) {
+          evalContext.index = res.jumpLeg;
         }
       }
     }
@@ -1297,14 +1266,27 @@ export const WFMachine = <CType extends CTypeProto>(
    * See the rest of `tick*` functions for how it works.
    */
   const tick = (input: TickInput | null): boolean => {
-    let evalContext = { index: data.evalIndex };
+    let evalContext = { index: data.legIndex };
     const fed = tickAt(evalContext, input);
-    data.evalIndex = evalContext.index;
+    data.legIndex = evalContext.index;
     return fed;
   };
 
+  const selfState = () => ({
+    state: innerstate.state,
+    context: innerstate.context,
+  });
+
+  const getSelfStateOrThrow = (reason: string) => {
+    const state = selfState().state?.[1];
+    if (!state) {
+      throw new Error(reason);
+    }
+    return state;
+  };
+
   const state = (): WFMachineState<CType> => {
-    const evalContext = { index: data.evalIndex };
+    const evalContext = { index: data.legIndex };
 
     const matchAtStack = getSMatchAtIndex(evalContext.index);
     if (matchAtStack) {
@@ -1314,10 +1296,7 @@ export const WFMachine = <CType extends CTypeProto>(
       }
     }
 
-    return {
-      state: innerstate.state,
-      context: innerstate.context,
-    };
+    return selfState();
   };
 
   const getLatestStateEvent = () => {
@@ -1326,16 +1305,9 @@ export const WFMachine = <CType extends CTypeProto>(
     return s[1];
   };
 
-  const returned = () => {
-    const evalContext = { index: data.evalIndex };
-    const atStack = getSMatchAtIndex(evalContext.index);
-    if (atStack) return atStack.inner.returned();
-
-    return innerstate.returned;
-  };
+  const returned = () => codegraph.terminuses.has(data.legIndex);
 
   const reset = () => {
-    data.evalIndex = 0;
     // calc index
     data.stateCalcIndex = 0;
     data.legIndex = -1;
@@ -1464,23 +1436,26 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const selfPendingCanonizationAdvrt =
     (): PendingCanonizationAdvert<CType> | null => {
-      const code = workflow.at(data.evalIndex);
-      const atStack = data.stack.at(data.evalIndex);
+      const nextCanonize = (codegraph.nextMap.at(data.legIndex) || [])
+        .filter((x): x is CodeGraph.NextCCanonize => x.code.t === "canonize")
+        .at(0);
 
-      if (code?.t === "canonize" && atStack?.t === "canonize") {
+      if (nextCanonize) {
+        const lastEvent = getSelfStateOrThrow(
+          "fatal error: state is null where next has canonize"
+        );
         const {
           meta: { eventId: timelineOf },
           payload: { t: stateName },
-        } = atStack.lastEvent;
-
-        const depth = multiverse.depthOf(atStack.lastEvent.meta.eventId);
+        } = lastEvent;
+        const depth = multiverse.depthOf(lastEvent.meta.eventId);
 
         const existingAdvrt = swarmStore.canonizationStore
           .getAdvertisementsForAddress(stateName, depth)
           .find((req) => req.payload.timelineOf === timelineOf);
 
         if (!existingAdvrt) {
-          const uniqueActorDesignation = code.actor.get();
+          const uniqueActorDesignation = nextCanonize.code.actor.get();
           const canonizer = innerstate.context[uniqueActorDesignation];
 
           return { canonizer, name: stateName, depth, timelineOf };
@@ -1491,8 +1466,12 @@ export const WFMachine = <CType extends CTypeProto>(
     };
 
   const isWaitingForCanonization = () => {
-    const code = workflow.at(data.evalIndex);
-    if (code?.t !== "canonize") return false;
+    const nextCanonize = (codegraph.nextMap.at(data.legIndex) || [])
+      .filter((x): x is CodeGraph.NextCCanonize => x.code.t === "canonize")
+      .at(0);
+
+    if (!nextCanonize) return false;
+    const code = nextCanonize?.code;
     const atStack = data.stack.at(data.evalIndex);
     if (atStack?.t !== "canonize") return false;
     const name = atStack.lastEvent.payload.t;
@@ -1519,7 +1498,7 @@ export const WFMachine = <CType extends CTypeProto>(
         })
       );
 
-      const match = getSMatchAtIndex(data.evalIndex);
+      const match = getSMatchAtIndex(data.legIndex);
       if (match) {
         const inner = match.inner.availableTimeouts();
         res.push(...inner);
@@ -1533,7 +1512,7 @@ export const WFMachine = <CType extends CTypeProto>(
     },
     availableNexts,
     availableCompensateable: () => {
-      const res = selfAvailableCompensateable().map(
+      const res = selfAvailableCompensateable(data.legIndex).map(
         ({ codeIndex, fromTimelineOf, involvedActors }) => ({
           codeIndex,
           fromTimelineOf,
@@ -1541,7 +1520,7 @@ export const WFMachine = <CType extends CTypeProto>(
         })
       );
 
-      const match = getSMatchAtIndex(data.evalIndex);
+      const match = getSMatchAtIndex(data.legIndex);
       if (match) {
         const inner = match.inner.availableCompensateable();
         res.push(...inner);
@@ -1562,7 +1541,7 @@ export const WFMachine = <CType extends CTypeProto>(
         })
       );
 
-      const match = getSMatchAtIndex(data.evalIndex);
+      const match = getSMatchAtIndex(data.legIndex);
       if (match) {
         const inner = match.inner.activeCompensation();
         res.push(...inner);
@@ -1575,8 +1554,8 @@ export const WFMachine = <CType extends CTypeProto>(
       return res;
     },
     doneCompensation: () => {
-      const res = selfDoneCompensation();
-      const match = getSMatchAtIndex(data.evalIndex);
+      const res = selfDoneCompensation(data.legIndex);
+      const match = getSMatchAtIndex(data.legIndex);
       if (match) {
         const inner = match.inner.doneCompensation();
         res.push(...inner);
@@ -1591,7 +1570,7 @@ export const WFMachine = <CType extends CTypeProto>(
     isWaitingForCanonization,
     pendingCanonizationAdvrt: () =>
       selfPendingCanonizationAdvrt() ||
-      getSMatchAtIndex(data.evalIndex)?.inner.pendingCanonizationAdvrt() ||
+      getSMatchAtIndex(data.legIndex)?.inner.pendingCanonizationAdvrt() ||
       null,
     advanceToMostCanon,
     resetAndAdvanceToMostCanon: () => {
