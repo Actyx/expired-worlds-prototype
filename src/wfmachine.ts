@@ -30,7 +30,7 @@
  *     match. Its value will always be lower than evalIndex.
  */
 
-import { isNonNullChain } from "typescript";
+import { log } from "console";
 import {
   ActyxWFBusiness,
   CTypeProto,
@@ -46,10 +46,8 @@ import {
   CAntiCompensate,
   CAntiParallel,
   CCanonize,
-  CChoice,
   CCompensate,
   CEvent,
-  CItem,
   CMatch,
   CParallel,
   CRetry,
@@ -275,9 +273,6 @@ export const WFMachine = <CType extends CTypeProto>(
   const logger = makeLogger();
   const workflow = wfWorkflow.code;
   const ccompensateIndexer = compilerCache.indexer.compensation.get(workflow);
-  const cparallelIndexer = compilerCache.indexer.parallel.get(workflow);
-  const ctimeoutIndexer = compilerCache.indexer.timeout.get(workflow);
-  const cretryIndexer = compilerCache.indexer.retry.get(workflow);
   const codegraph = compilerCache.codegraph.get(workflow);
 
   const mapUniqueActorOnNext = (res: UnnamedNext<CType>): Next<CType> => ({
@@ -328,14 +323,15 @@ export const WFMachine = <CType extends CTypeProto>(
    * Find all active timeouts
    */
   const selfAvailableTimeouts = (legIndex: number = data.legIndex) =>
-    (codegraph.nextMap.at(legIndex) || [])
+    codegraph
+      .nextOf(legIndex)
       .map((next) => {
         if (next.code.t === "canonize") return null;
         next = next as CodeGraph.NextCEvent<CType>;
         const timeoutTag = next.tags.timeoutJump;
         if (!timeoutTag) return null;
         const timeoutIndex = timeoutTag.timeoutIndex;
-        const ctimeout = workflow.at(timeoutTag.timeoutIndex);
+        const ctimeout = codegraph.codeAt(timeoutIndex);
         if (ctimeout?.t !== "timeout") {
           throw new Error(
             `attempt timeout fatal error: ctimeout not found at index ${timeoutIndex}`
@@ -378,10 +374,10 @@ export const WFMachine = <CType extends CTypeProto>(
     codeIndex: NestedCodeIndexAddress.Type;
     fromTimelineOf: string;
   }[] => {
-    const anti = workflow.at(legIndex);
+    const anti = codegraph.codeAt(legIndex);
     if (anti?.t !== "anti-compensate") return [];
     const compensateIndex = legIndex + anti.baseIndexOffset;
-    const ccompensate = workflow.at(compensateIndex);
+    const ccompensate = codegraph.codeAt(compensateIndex);
     if (ccompensate?.t !== "compensate") {
       throw new Error(
         `compensate query fatal error: ccompensate not found at index ${compensateIndex}`
@@ -414,12 +410,12 @@ export const WFMachine = <CType extends CTypeProto>(
     const res = ccompensateIndexer
       .getWithListMatching(legIndex)
       .map((entry) => {
-        const withStart = workflow.at(entry.start);
+        const withStart = codegraph.codeAt(entry.start);
         if (withStart?.t !== "compensate-with") {
           return null;
         }
         const compensateIndex = entry.start + withStart.baseIndexOffset;
-        const ccompensate = workflow.at(compensateIndex);
+        const ccompensate = codegraph.codeAt(compensateIndex);
         if (ccompensate?.t !== "compensate") {
           throw new Error(
             `compensate query fatal error: ccompensate not found at index ${compensateIndex}`
@@ -437,7 +433,7 @@ export const WFMachine = <CType extends CTypeProto>(
         const withIndex = compensateIndex + ccompensate.withIndexOffset;
         const firstCompensationIndex =
           compensateIndex + ccompensate.withIndexOffset + 1;
-        const firstCompensation = workflow.at(firstCompensationIndex);
+        const firstCompensation = codegraph.codeAt(firstCompensationIndex);
 
         if (firstCompensation?.t !== "event") {
           throw new Error(
@@ -463,7 +459,8 @@ export const WFMachine = <CType extends CTypeProto>(
    * Find all active compensateable
    */
   const selfAvailableCompensateable = (legIndex = data.legIndex) =>
-    (codegraph.nextMap.at(legIndex) || [])
+    codegraph
+      .nextOf(legIndex)
       .map((next) => {
         if (next.code.t === "canonize") return null;
         next = next as CodeGraph.NextCEvent<CType>;
@@ -471,7 +468,7 @@ export const WFMachine = <CType extends CTypeProto>(
         if (!compensateableTag) return null;
 
         const index = compensateableTag.compensationIndex;
-        const ccompensate = workflow.at(index);
+        const ccompensate = codegraph.codeAt(index);
         if (ccompensate?.t !== "compensate") {
           throw new Error(
             `compensate query fatal error: ccompensate not found at index ${index}`
@@ -509,7 +506,9 @@ export const WFMachine = <CType extends CTypeProto>(
       .filter((x): x is Exclude<typeof x, null> => x !== null);
 
   const availableNexts = (): ReturnType<WFMachine<CType>["availableNexts"]> => {
+    logger.log("availableNext", 1);
     const uniqueCheck = new Set<string>();
+
     const convertCodeNextToWFMachineNext = (
       codeNexts: CodeGraph.Nexts<CType>
     ): UnnamedNext<CType>[] =>
@@ -538,27 +537,49 @@ export const WFMachine = <CType extends CTypeProto>(
           return true;
         });
 
+    logger.log("availableNext", 2, data.legIndex);
     if (data.legIndex === -1) {
-      return convertCodeNextToWFMachineNext(codegraph.baseNexts).map(
+      const converted = convertCodeNextToWFMachineNext(codegraph.baseNexts).map(
         mapUniqueActorOnNext
       );
+      logger.log(JSON.stringify(converted, null, 2));
+      return converted;
     } else {
       const code = workflow[data.legIndex];
 
       if (code.t === "par") {
+        logger.log("availableNext", 3, "par");
         const parallelCriteria = generateParallelCriteria(
           { legIndex: data.legIndex },
           code
         );
-        const nextLegIndex = parallelCriteria.atStack.nextLegIndex;
+        logger.log(
+          "availableNext",
+          JSON.stringify(
+            !parallelCriteria.minCompletedReached
+              ? []
+              : codegraph.nextOf(parallelCriteria.atStack.nextLegIndex)
+          )
+        );
         const codeNexts = [
           // from nexts
-          ...(codegraph.nextMap.at(nextLegIndex) || []),
-          // from children
+          ...(!parallelCriteria.minCompletedReached
+            ? []
+            : codegraph.nextOf(parallelCriteria.atStack.nextLegIndex)),
+          // from new child
+          ...(parallelCriteria.maxCreatedReached
+            ? []
+            : codegraph
+                .nextOf(data.legIndex)
+                .filter(
+                  (x): x is CodeGraph.NextCEvent<CType> => x.code.t === "event"
+                )
+          ).filter((x) => x.tags.parallelInstantiation),
+          // from ongoing children
           ...parallelCriteria.atStack.instances.flatMap((instance) => {
             const childIndex =
               data.legIndex + code.firstEventIndex + instance.entry.length - 1;
-            const codeNexts = codegraph.nextMap.at(childIndex) || [];
+            const codeNexts = codegraph.nextOf(childIndex) || [];
             return codeNexts;
           }),
         ];
@@ -572,7 +593,7 @@ export const WFMachine = <CType extends CTypeProto>(
         return inner.availableNexts();
       } else {
         return convertCodeNextToWFMachineNext(
-          codegraph.nextMap.at(data.legIndex) || []
+          codegraph.nextOf(data.legIndex)
         ).map(mapUniqueActorOnNext);
       }
     }
@@ -588,10 +609,8 @@ export const WFMachine = <CType extends CTypeProto>(
   ) => {
     const {
       count: { max, min },
-      pairOffsetIndex,
+      evLength,
     } = parallelCode;
-
-    const evLength = pairOffsetIndex - 1;
 
     const minCriteria = Math.max(min !== undefined ? min : 0, 0);
     const maxCriteria = Math.min(max !== undefined ? max : Infinity, Infinity);
@@ -630,8 +649,9 @@ export const WFMachine = <CType extends CTypeProto>(
    * Catch up with execution index
    */
   const recalculateState = (tickContext: TickContext) => {
+    logger.log("recalculateState", tickContext.legIndex);
     const calc = (calcIndex: number): Continue => {
-      const code = workflow.at(calcIndex);
+      const code = codegraph.codeAt(calcIndex);
       const stackItem = data.stack.at(calcIndex);
 
       if (code?.t === "event" && stackItem?.t === "event") {
@@ -695,8 +715,9 @@ export const WFMachine = <CType extends CTypeProto>(
 
   const autoEvaluate = (tickContext: TickContext) => {
     const legSlide = (tickContext: TickContext) => {
-      const legSlide = codegraph.legSlideMap.at(tickContext.legIndex);
-      if (legSlide !== undefined) {
+      const legSlide = codegraph.legSlideOf(tickContext.legIndex);
+      if (legSlide !== undefined && legSlide !== tickContext.legIndex) {
+        logger.log("legSlide", tickContext.legIndex, legSlide);
         tickContext.legIndex = legSlide;
         return Continue;
       }
@@ -731,7 +752,7 @@ export const WFMachine = <CType extends CTypeProto>(
     };
 
     const tryAdvanceMatch = (tickContext: TickContext) => {
-      const code = workflow.at(tickContext.legIndex);
+      const code = codegraph.codeAt(tickContext.legIndex);
       if (code?.t === "match") {
         const atStack =
           getSMatchAtIndex(tickContext.legIndex) ||
@@ -770,7 +791,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
         const cases = code.casesIndexOffsets.map((offset) => {
           const index = tickContext.legIndex + offset;
-          const matchCase = workflow.at(index);
+          const matchCase = codegraph.codeAt(index);
           if (matchCase?.t !== "match-case") {
             throw new Error(
               `case index offset points to the wrong code type: ${matchCase?.t}`
@@ -808,7 +829,7 @@ export const WFMachine = <CType extends CTypeProto>(
     };
 
     const tryAdvancePar = (tickContext: TickContext) => {
-      const code = workflow.at(tickContext.legIndex);
+      const code = codegraph.codeAt(tickContext.legIndex);
       if (code?.t === "par") {
         readInnerParallelProcessInstances(tickContext, code);
 
@@ -835,6 +856,7 @@ export const WFMachine = <CType extends CTypeProto>(
         tryAdvanceCanonize(tickContext) ||
         tryAdvanceMatch(tickContext) ||
         tryAdvancePar(tickContext);
+      logger.log("tickAt", "shouldContinue", shouldContinue);
 
       if (!shouldContinue) break;
     }
@@ -860,6 +882,7 @@ export const WFMachine = <CType extends CTypeProto>(
     next: CodeGraph.NextCEvent<CType>,
     e: ActyxWFBusiness<CType>
   ) => {
+    logger.log("patchStateOnFeedEvent");
     // Patch State on Feed
     if (next.tags.retryPatch) {
       data.stack[next.tags.retryPatch.retryIndex] = {
@@ -880,7 +903,7 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (next.tags.timeoutEntry) {
-      const timeoutCode = workflow.at(next.tags.timeoutEntry.timeoutIndex);
+      const timeoutCode = codegraph.codeAt(next.tags.timeoutEntry.timeoutIndex);
       if (timeoutCode?.t !== "timeout") {
         throw new Error("invalid timeout index while feedEvent:timeoutEntry");
       }
@@ -889,8 +912,10 @@ export const WFMachine = <CType extends CTypeProto>(
         startedAt: new Date(),
         lastTimeoutEvent: null,
       } satisfies STimeout<CType>;
-    } else if (next.tags.timeoutJump) {
-      const timeoutCode = workflow.at(next.tags.timeoutJump.timeoutIndex);
+    }
+
+    if (next.tags.timeoutJump) {
+      const timeoutCode = codegraph.codeAt(next.tags.timeoutJump.timeoutIndex);
       if (timeoutCode?.t !== "timeout") {
         throw new Error("invalid timeout index while feedEvent:timeoutJump");
       }
@@ -905,7 +930,9 @@ export const WFMachine = <CType extends CTypeProto>(
     codegraph.assignAheadsMap
       .at(next.index)
       ?.forEach(({ index: assignAheadIndex }) => {
-        const code = workflow.at(assignAheadIndex);
+        logger.log("patchStateOnFeedEvent", next.index, assignAheadIndex);
+
+        const code = codegraph.codeAt(assignAheadIndex);
         if (code?.t === "par") {
           data.stack[assignAheadIndex] = {
             t: "par",
@@ -928,6 +955,9 @@ export const WFMachine = <CType extends CTypeProto>(
     e: ActyxWFBusiness<CType>
   ) => {
     if (e.payload.t === next.code.name) {
+      logger.log("feedEvent", "next", JSON.stringify(next, null, 2));
+      logger.log("feedEvent", "e", JSON.stringify(e));
+
       data.stack[next.index] = {
         t: "event",
         event: e,
@@ -951,7 +981,7 @@ export const WFMachine = <CType extends CTypeProto>(
     );
 
     // New instances detection
-    const firstEventCode = workflow.at(
+    const firstEventCode = codegraph.codeAt(
       tickContext.legIndex + parallelCode.firstEventIndex
     );
     if (firstEventCode?.t !== "event") {
@@ -980,7 +1010,7 @@ export const WFMachine = <CType extends CTypeProto>(
       while (true) {
         const index = parallelStack.entry.length;
         if (index >= evLength) return;
-        const code = workflow.at(index);
+        const code = codegraph.codeAt(index);
         if (code?.t !== "event") return;
         const last =
           parallelStack.entry[parallelStack.entry.length - 1].meta.eventId;
@@ -994,11 +1024,10 @@ export const WFMachine = <CType extends CTypeProto>(
     });
   };
 
-  const tickParallel = (
-    tickContext: TickContext,
-    parallelCode: CParallel,
-    e: TickInput
-  ): TickRes => {
+  const tickParallel = (tickContext: TickContext, e: TickInput): TickRes => {
+    const parallelCode = codegraph.codeAt(tickContext.legIndex);
+    if (parallelCode?.t !== "par") return { fed: false, jumpLeg: null };
+
     let jumpLeg: number | null = null;
     let fed = false;
 
@@ -1037,11 +1066,10 @@ export const WFMachine = <CType extends CTypeProto>(
     return { fed: false, jumpLeg: null };
   };
 
-  const tickMatch = (
-    tickContext: TickContext,
-    _: CMatch<CType>,
-    e: TickInput
-  ): TickRes => {
+  const tickMatch = (tickContext: TickContext, e: TickInput): TickRes => {
+    const code = codegraph.codeAt(tickContext.legIndex);
+    if (code?.t !== "match") return { fed: false, jumpLeg: null };
+
     const atStack = getSMatchAtIndex(tickContext.legIndex);
     if (!atStack) {
       throw new Error("missing match at stack on evaluation");
@@ -1052,7 +1080,8 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const tickRest = (tickContext: TickContext, e: TickInput): TickRes => {
-    const next = (codegraph.nextMap.at(tickContext.legIndex) || [])
+    const next = codegraph
+      .nextOf(tickContext.legIndex)
       .filter((x): x is CodeGraph.NextCEvent<CType> => x.code.t !== "canonize")
       .find((next) => {
         return (
@@ -1070,42 +1099,49 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const tickAt = (tickContext: TickContext, e: TickInput | null): boolean => {
+    logger.log("tickAt", 1, tickContext.legIndex);
     let fed = false;
-    const code = workflow.at(tickContext.legIndex);
 
     if (e) {
-      if (code) {
-        const res = (() => {
-          // Jumps
-          // =========
-          const compRes = tickCompensation(tickContext, e);
-          if (compRes.fed) return compRes;
+      const res = (() => {
+        // Jumps
+        // =========
+        logger.log("tickAt", 1);
+        const compRes = tickCompensation(tickContext, e);
+        if (compRes.fed) return compRes;
 
-          const timeoutRes = tickTimeout(tickContext, e);
-          if (timeoutRes.fed) return timeoutRes;
+        logger.log("tickAt", 2);
+        const timeoutRes = tickTimeout(tickContext, e);
+        if (timeoutRes.fed) return timeoutRes;
 
-          // Submachine
-          // =========
-          const matchRes =
-            code?.t === "match" && tickMatch(tickContext, code, e);
-          if (matchRes && matchRes.fed) return matchRes;
+        // Submachine
+        // =========
+        logger.log("tickAt", 3);
+        const matchRes = tickMatch(tickContext, e);
+        if (matchRes.fed) return matchRes;
 
-          // Non Jumps
-          // =========
-          if (code?.t === "par") return tickParallel(tickContext, code, e);
-          return tickRest(tickContext, e);
-        })();
+        // Non Jumps
+        // =========
+        logger.log("tickAt", 4);
+        const parRes = tickParallel(tickContext, e);
+        if (parRes.fed) return parRes;
+        logger.log("tickAt", 5);
+        return tickRest(tickContext, e);
+      })();
 
-        fed = res.fed;
+      fed = res.fed;
+      logger.log("tickAt", 6, fed);
 
-        if (res !== null && res.jumpLeg !== null) {
-          tickContext.legIndex = res.jumpLeg;
-        }
+      if (res !== null && res.jumpLeg !== null) {
+        tickContext.legIndex = res.jumpLeg;
+        logger.log("tickAt", 7, res.jumpLeg);
       }
     }
 
+    logger.log("tickAt", 8, tickContext.legIndex);
     autoEvaluate(tickContext);
 
+    logger.log("tickAt", 9, tickContext.legIndex);
     return fed;
   };
 
@@ -1224,6 +1260,7 @@ export const WFMachine = <CType extends CTypeProto>(
 
     // forward mode
     while (true) {
+      logger.log("forward", 1);
       // get all valid nexts
       // parallel and compensation may lead to dead ends.
       const validNextNames = new Set(
@@ -1232,6 +1269,11 @@ export const WFMachine = <CType extends CTypeProto>(
           .map((x) => x.name)
       );
 
+      logger.log(
+        "forward",
+        "validnextnames",
+        JSON.stringify(Array.from(validNextNames))
+      );
       const allNextEvents = (() => {
         const last = getLatestStateEvent();
         if (!last) return multiverse.getRoots();
@@ -1241,15 +1283,23 @@ export const WFMachine = <CType extends CTypeProto>(
 
         return sorted;
       })().filter((x) => validNextNames.has(x.payload.t));
+      logger.log("forward", 2);
 
       const next = sortByEventKey(allNextEvents).at(0);
 
+      logger.log("forward", 3);
       if (next) {
+        logger.log("forward", 4, JSON.stringify(next));
         const fed = tick(next);
+        logger.log("forward", 5);
         tickHasRun = true;
+        logger.log("forward", 6);
         if (fed === false) return;
+        logger.log("forward", 7);
       } else {
+        logger.log("forward", 8);
         if (!tickHasRun) tick(null);
+        logger.log("forward", 9);
         return;
       }
     }
@@ -1282,7 +1332,8 @@ export const WFMachine = <CType extends CTypeProto>(
   };
 
   const selfNextCanonize = () =>
-    (codegraph.nextMap.at(data.legIndex) || [])
+    codegraph
+      .nextOf(data.legIndex)
       .filter((x): x is CodeGraph.NextCCanonize => x.code.t === "canonize")
       .at(0);
 
@@ -1316,7 +1367,8 @@ export const WFMachine = <CType extends CTypeProto>(
     };
 
   const isWaitingForCanonization = () => {
-    const next = (codegraph.nextMap.at(data.legIndex) || [])
+    const next = codegraph
+      .nextOf(data.legIndex)
       .filter((x): x is CodeGraph.NextCCanonize => x.code.t === "canonize")
       .at(0);
 

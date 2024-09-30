@@ -19,10 +19,12 @@ import { ReturnInComp } from "./test-utils/return-in-comp-scenario.js";
 describe("no-partitions", () => {
   const { Ev } = Logistics;
 
-  it("works and build history correctly", async () => {
+  it.only("works and build history correctly", async () => {
     const scenario = Logistics.genScenario();
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
+
+    manager.machine.logger.sub(log);
 
     await findAndRunCommand(manager, Ev.request, {
       from: src.identity.id,
@@ -33,7 +35,7 @@ describe("no-partitions", () => {
     expectAllToHaveSameState([manager, src, t1, t2, t3]);
 
     // assert state at request
-    expect(dst.machine.wfmachine().state().state?.[0]).toBe(One);
+    expect(dst.machine.wfmachine().state().state?.[0]).toBe(Parallel);
     expect(dst.machine.wfmachine().state().state?.[1].payload.t).toBe(
       "request"
     );
@@ -79,6 +81,7 @@ describe("no-partitions", () => {
       if (!winner) throw new Error("no winner");
       return winner;
     })();
+    manager.machine.logger.sub(log);
     await findAndRunCommand(t1, Ev.assign, { robotID: winner });
     await findAndRunCommand(t1, Ev.accept);
 

@@ -46,6 +46,7 @@
  */
 
 import { CTypeProto, NestedCodeIndexAddress } from "./consts.js";
+import { log } from "./test-utils/misc.js";
 import { Enum, WrapType } from "./utils.js";
 import { LazyMap } from "./utils.js";
 
@@ -151,6 +152,7 @@ export type CCompensateWith = {
 export type CAntiCompensate = { t: "anti-compensate"; baseIndexOffset: number };
 export type CParallel = {
   t: "par";
+  evLength: number;
   count:
     | {
         max: number;
@@ -353,6 +355,7 @@ export namespace Code {
     {
       t: "par",
       count,
+      evLength: workflow.length,
       pairOffsetIndex: workflow.length + 2,
       firstEventIndex: (() => {
         const firstEventIndex = workflow.findIndex((e) => e.t === "event");
@@ -949,8 +952,11 @@ export namespace CodeGraph {
 
   export type Type<CType extends CTypeProto> = {
     code: WFWorkflow<CType>["code"];
+    codeAt: (index: number) => CItem<CType> | undefined;
     baseNexts: Nexts<CType>;
     nextMap: Nexts<CType>[];
+    nextOf: (index: number) => Nexts<CType>;
+    legSlideOf: (index: number) => number | undefined;
     baseLookahead: Lookaheads;
     lookaheadsMap: Lookaheads[];
     baseActorSet: ActorSet.Type<CType>;
@@ -961,27 +967,28 @@ export namespace CodeGraph {
     terminuses: Set<number>;
   };
   export type NextCEvent<CType extends CTypeProto> = {
-    index: number;
-    code: CEvent<CType>;
-    tags: LookaheadTagMap;
+    readonly index: number;
+    readonly code: CEvent<CType>;
+    readonly tags: LookaheadTagMap;
   };
   export type NextCCanonize = {
-    index: number;
-    code: CCanonize;
+    readonly index: number;
+    readonly code: CCanonize;
   };
   export type Next<CType extends CTypeProto> =
     | NextCEvent<CType>
     | NextCCanonize;
 
   export type Nexts<CType extends CTypeProto> = Next<CType>[];
-  export type AssignAheads = { index: number }[];
+  export type AssignAheads = { index: number; tags: LookaheadTagMap }[];
   export type AssignAheadsMap = AssignAheads[];
   type LookbackCEvent<CType extends CTypeProto> = {
     index: number;
     code: CEvent<CType>;
+    tags: LookaheadTagMap;
   };
 
-  type LookaheadTagMap = {
+  export type LookaheadTagMap = {
     compensationMainEntry?: { compensationIndex: number };
     compensationEntry?: { compensationIndex: number };
     compensationExit?: {};
@@ -1231,13 +1238,13 @@ export namespace CodeGraph {
           const gapIndex = timeoutIndex + gapIndexOffset;
           const afterGapIndex = gapIndex + 1;
           if (legIndex > gapIndex) return null;
-          return afterGapIndex;
+          return { timeoutIndex, afterGapIndex };
         })
         .filter((x): x is NonNullable<typeof x> => x !== null)
-        .map((index) => ({
-          index,
+        .map(({ timeoutIndex, afterGapIndex }) => ({
+          index: afterGapIndex,
           tags: {
-            timeoutJump: { timeoutIndex: index },
+            timeoutJump: { timeoutIndex },
           } satisfies LookaheadTagMap,
         }));
 
@@ -1252,17 +1259,26 @@ export namespace CodeGraph {
     lookaheadsMap: Lookaheads[]
   ): AssignAheadsMap => {
     const findEventLookback = (examinedIndex: number) => {
+      const tags: Lookahead["tags"][] = [];
       let findLookbackIndex = examinedIndex - 1;
 
-      while (examinedIndex > 0 && findLookbackIndex > 0) {
+      while (examinedIndex >= 0 && findLookbackIndex >= 0) {
+        log("findEventLookback", examinedIndex, findLookbackIndex);
         const matchingLookahead = lookaheadsMap
           .at(findLookbackIndex)
           ?.find((x) => x.index === examinedIndex);
 
         if (matchingLookahead) {
+          tags.unshift(matchingLookahead.tags);
+
           const codeAtFindLookback = workflow.at(findLookbackIndex);
           if (codeAtFindLookback?.t === "event") {
-            return { index: findLookbackIndex, code: codeAtFindLookback };
+            log("findEventLookback.return", findLookbackIndex);
+            return {
+              index: findLookbackIndex,
+              code: codeAtFindLookback,
+              tags: tags.reduce((acc, x) => ({ ...acc, x }), {}),
+            };
           } else {
             examinedIndex = findLookbackIndex;
             findLookbackIndex = examinedIndex - 1;
@@ -1317,12 +1333,16 @@ export namespace CodeGraph {
     const assignAheadsMap: AssignAheadsMap = new Array(workflow.length).fill(
       []
     );
-    lookbackMapRes.forEach((lookback, assignIndex) => {
+
+    lookbackMapRes.forEach((lookback, lookbackIndex) => {
       if ("value" in lookback) {
         const lookbackValue = lookback.value;
         if (lookbackValue) {
-          const assignAheads = assignAheadsMap[assignIndex];
-          assignAheads.push({ index: lookbackValue.index });
+          const assignAheads = assignAheadsMap[lookbackValue.index];
+          assignAheads.push({
+            index: lookbackIndex,
+            tags: lookbackValue.tags,
+          });
         }
       }
     });
@@ -1340,7 +1360,7 @@ export namespace CodeGraph {
     workflow: WFWorkflow<CType>["code"],
     lookaheadsMap: Lookaheads[]
   ) => {
-    const legSlide = [] as number[];
+    const legSlides = [] as number[];
 
     const canSlideTo = (lookahead: Lookahead) => {
       const { tags } = lookahead;
@@ -1387,16 +1407,16 @@ export namespace CodeGraph {
     };
 
     workflow.forEach((_, index) => {
-      const existingLegslide = legSlide.at(index);
+      const existingLegslide = legSlides.at(index);
       if (existingLegslide === undefined) {
         const extracted = extractLegslideFrom(index);
         extracted.from.forEach((index) => {
-          legSlide[index] = extracted.lastSlidePoint;
+          legSlides[index] = extracted.lastSlidePoint;
         });
       }
     });
 
-    return legSlide;
+    return legSlides;
   };
 
   export const generateNextsMap = <CType extends CTypeProto>(
@@ -1598,10 +1618,28 @@ export namespace CodeGraph {
       return branchInfoArr;
     };
 
+    const nextOf = (x: number) => {
+      if (x === -1) return baseNexts;
+      return nextMap.at(x) || [];
+    };
+
+    const legSlideOf = (x: number) => {
+      if (x === -1) return undefined;
+      return legSlideMap.at(x);
+    };
+
+    const codeAt = (x: number) => {
+      if (x === -1) return undefined;
+      return workflow.at(x);
+    };
+
     const self: CodeGraph.Type<CType> = {
       code: workflow,
+      codeAt,
       baseNexts,
       nextMap,
+      nextOf,
+      legSlideOf,
       baseLookahead: [baseLookahead],
       lookaheadsMap,
       baseActorSet,

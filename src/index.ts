@@ -134,13 +134,16 @@ export const run = <CType extends CTypeProto>(
    * This function body is the definition of commands available to this machine
    */
   const commands = () => {
+    machineCombinator.logger.log("commands", 1);
     const data = machineCombinator.internal();
+    machineCombinator.logger.log("commands", 2);
 
     // We don't do anything while catching up. TODO: There might be a lot of
     // "catching-up" if a lot of partition join happens, should think about this
     // for at large-scale swarm.
     if (data.t === "catching-up") return [];
 
+    machineCombinator.logger.log("commands", 3);
     const commands = data.wfMachine
       .availableNexts()
       .filter((x) => {
@@ -153,6 +156,7 @@ export const run = <CType extends CTypeProto>(
       .map((info) => ({
         info,
         publish: (payloadPatch: Record<string, unknown> = {}) => {
+          machineCombinator.logger.log("publish");
           const payload = { ...payloadPatch };
           let tags = params.tags;
 
@@ -186,7 +190,9 @@ export const run = <CType extends CTypeProto>(
         },
       }));
 
+    machineCombinator.logger.log("commands", 4, commands.length);
     if (data.t === "off-canon") {
+      machineCombinator.logger.log("commands", 5);
       // TODO: examine whether the entire swarm needs to be paused until a
       // canonization is decided, or just partially
       const compensateableIsInvolvedInRequestedCanonization =
@@ -432,12 +438,19 @@ export namespace MachineCombinator {
       // predecessorMap.getBackwardChain(compensationMap.getByActor(...))
       // TODO: return null means something abnormal happens in predecessorMap e.g. missing root, missing event details
       // TODO: think about compensation events tag
+      logger.log("recalc", 1);
       const wfMachine = internal.data.wfMachine;
+      logger.log("recalc", 2);
       wfMachine.advanceToMostCanon();
+      logger.log("recalc", 3);
 
+      logger.log("recalc", 4);
       const canonWFMachine = WFMachine(workflow, swarmStore, compilerCache);
+      logger.log("recalc", 5);
       canonWFMachine.logger.sub(logger.log);
+      logger.log("recalc", 6);
       canonWFMachine.advanceToMostCanon();
+      logger.log("recalc", 7);
 
       const compensateables = calculateCompensateables(
         params.self,
@@ -672,44 +685,63 @@ export namespace MachineCombinator {
       ) => {
         // categorize events
         const wfBusinessEvents = extractWFBusinessEvents(e.events);
-        const compsMarker = extractWFCompensationMarker(e.events);
+        const compsMarkers = extractWFCompensationMarker(e.events);
         const canonMarkers = extractWFCanonMarker(e.events);
         const canonDecisionMarkers = extractWFCanonDecideMarker(canonMarkers);
 
+        logger.log("pipe", 1);
+
         // apply to storage
         wfBusinessEvents.forEach(multiverseTree.register);
-        compsMarker.map((ev) => compensationMap.register(ev.payload));
+        compsMarkers.map((ev) => compensationMap.register(ev.payload));
         canonMarkers.forEach(swarmStore.canonizationStore.register);
+
+        logger.log("pipe", 2);
 
         if (canonMarkers.length > 0) {
           refreshCanonizationbarrier();
           canonizeWhenPossible(publish);
         }
 
+        logger.log("pipe", 3);
         // If a canon decision is triggered, mark as catching-up
         const needRecalc =
-          canonDecisionMarkers.length > 0 || compsMarker.length > 0;
+          canonDecisionMarkers.length > 0 || compsMarkers.length > 0;
 
         const data = internal.data;
 
+        logger.log("pipe", 4);
         if (data.t === "catching-up" && e.caughtUp) {
+          logger.log("pipe", 5);
           recalc(publish);
+          logger.log("pipe", 6);
         } else if (data.t === "normal") {
+          logger.log("pipe", 7);
           data.wfMachine.advanceToMostCanon();
 
+          logger.log("pipe", 8);
           if (data.wfMachine.doneCompensation().length > 0 || needRecalc) {
+            logger.log("pipe", 9);
             recalc(publish);
+            logger.log("pipe", 10);
           }
         } else if (data.t === "off-canon") {
+          logger.log("pipe", 11);
           data.wfMachine.advanceToMostCanon();
+          logger.log("pipe", 12);
           data.canonWFMachine.advanceToMostCanon();
+          logger.log("pipe", 13);
 
           if (data.wfMachine.doneCompensation().length > 0 || needRecalc) {
+            logger.log("pipe", 14);
             recalc(publish);
+            logger.log("pipe", 15);
           }
         }
 
+        logger.log(16);
         emitPendingCanonizationAdvertisements(publish);
+        logger.log(17);
       },
     };
   };
