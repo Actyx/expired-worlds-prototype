@@ -714,11 +714,53 @@ export const WFMachine = <CType extends CTypeProto>(
   const Continue = true as const;
 
   const autoEvaluate = (tickContext: TickContext) => {
+    const legSlidePatch = (legSlide: CodeGraph.LegSlide) => {
+      logger.log("legSlidePatch", 1);
+      if (legSlide.tags.retryPatch) {
+        logger.log("legSlidePatch", 2);
+        data.stack[legSlide.tags.retryPatch.retryIndex] = {
+          t: "retry",
+          lastFailState: getSelfStateOrThrow(
+            "feedEvent: retryPatch state not found"
+          ),
+        } satisfies SRetry<CType>;
+      }
+
+      if (legSlide.tags.compensationMainEntry) {
+        logger.log("legSlidePatch", 3);
+        data.stack[legSlide.tags.compensationMainEntry.compensationIndex] = {
+          t: "compensate",
+          lastEvent: getSelfStateOrThrow(
+            "feedEvent: compensationMainEntry state not found"
+          ),
+        } satisfies SCompensate<CType>;
+      }
+
+      if (legSlide.tags.timeoutEntry) {
+        logger.log("legSlidePatch", 3);
+        const timeoutCode = codegraph.codeAt(
+          legSlide.tags.timeoutEntry.timeoutIndex
+        );
+        if (timeoutCode?.t !== "timeout") {
+          throw new Error("invalid timeout index while feedEvent:timeoutEntry");
+        }
+        data.stack[legSlide.tags.timeoutEntry.timeoutIndex] = {
+          t: "timeout",
+          startedAt: new Date(),
+          lastTimeoutEvent: null,
+        } satisfies STimeout<CType>;
+        logger.log(
+          JSON.stringify(data.stack.at(legSlide.tags.timeoutEntry.timeoutIndex))
+        );
+      }
+    };
+
     const legSlide = (tickContext: TickContext) => {
       const legSlide = codegraph.legSlideOf(tickContext.legIndex);
-      if (legSlide !== undefined && legSlide !== tickContext.legIndex) {
-        logger.log("legSlide", tickContext.legIndex, legSlide);
-        tickContext.legIndex = legSlide;
+      if (legSlide !== undefined && legSlide.index !== tickContext.legIndex) {
+        logger.log("legSlide", tickContext.legIndex, JSON.stringify(legSlide));
+        tickContext.legIndex = legSlide.index;
+        legSlidePatch(legSlide);
         return Continue;
       }
       return !Continue;
@@ -867,6 +909,11 @@ export const WFMachine = <CType extends CTypeProto>(
     tickContext: TickContext,
     e: ActyxWFBusiness<CType>
   ): TickRes => {
+    logger.log(
+      "tickTimeout",
+      tickContext.legIndex,
+      JSON.stringify(codegraph.codeAt(tickContext.legIndex), null, 2)
+    );
     const timeout = selfAvailableTimeouts(tickContext.legIndex).find(
       (timeout) => timeout.cconsequence.name === e.payload.t
     );
@@ -882,7 +929,7 @@ export const WFMachine = <CType extends CTypeProto>(
     next: CodeGraph.NextCEvent<CType>,
     e: ActyxWFBusiness<CType>
   ) => {
-    logger.log("patchStateOnFeedEvent");
+    logger.log("patchStateOnFeedEvent", JSON.stringify(next.tags));
     // Patch State on Feed
     if (next.tags.retryPatch) {
       data.stack[next.tags.retryPatch.retryIndex] = {
@@ -912,9 +959,7 @@ export const WFMachine = <CType extends CTypeProto>(
         startedAt: new Date(),
         lastTimeoutEvent: null,
       } satisfies STimeout<CType>;
-    }
-
-    if (next.tags.timeoutJump) {
+    } else if (next.tags.timeoutJump) {
       const timeoutCode = codegraph.codeAt(next.tags.timeoutJump.timeoutIndex);
       if (timeoutCode?.t !== "timeout") {
         throw new Error("invalid timeout index while feedEvent:timeoutJump");
@@ -930,7 +975,17 @@ export const WFMachine = <CType extends CTypeProto>(
     codegraph.assignAheadsMap
       .at(next.index)
       ?.forEach(({ index: assignAheadIndex }) => {
-        logger.log("patchStateOnFeedEvent", next.index, assignAheadIndex);
+        logger.log(
+          "patchStateOnFeedEvent.next.index",
+          next.index,
+          JSON.stringify(codegraph.codeAt(next.index))
+        );
+
+        logger.log(
+          "patchStateOnFeedEvent.assignAheadIndex",
+          assignAheadIndex,
+          JSON.stringify(codegraph.codeAt(assignAheadIndex))
+        );
 
         const code = codegraph.codeAt(assignAheadIndex);
         if (code?.t === "par") {
@@ -1028,14 +1083,19 @@ export const WFMachine = <CType extends CTypeProto>(
     const parallelCode = codegraph.codeAt(tickContext.legIndex);
     if (parallelCode?.t !== "par") return { fed: false, jumpLeg: null };
 
+    logger.log("tickParallel", 1);
+
     let jumpLeg: number | null = null;
     let fed = false;
 
     const { atStack, minCompletedReached, maxCompletedReached } =
       generateParallelCriteria(tickContext, parallelCode);
 
+    logger.log("tickParallel", 2);
+
     // advance signal from predecessors
     if (minCompletedReached) {
+      logger.log("tickParallel", 3);
       const nextTickContext = { legIndex: atStack.nextLegIndex };
       if (tickAt(nextTickContext, e)) {
         jumpLeg = atStack.nextLegIndex;
@@ -1044,6 +1104,7 @@ export const WFMachine = <CType extends CTypeProto>(
     }
 
     if (maxCompletedReached) {
+      logger.log("tickParallel", 4);
       jumpLeg = atStack.nextLegIndex;
     }
 

@@ -24,6 +24,14 @@ describe("no-partitions", () => {
     const { findAndRunCommand } = scenario;
     const { dst, manager, src, t1, t2, t3 } = scenario.agents;
 
+    manager.machine
+      .mcomb()
+      .wfMachine.codegraph()
+      .lookaheadsMap.forEach((x, i) => {
+        log(">>", i);
+        x.forEach((x) => log(`-${JSON.stringify(x)}`));
+      });
+
     manager.machine.logger.sub(log);
 
     await findAndRunCommand(manager, Ev.request, {
@@ -31,6 +39,8 @@ describe("no-partitions", () => {
       to: dst.identity.id,
       manager: manager.identity.id,
     });
+
+    manager.machine.logger.unsub(log);
 
     expectAllToHaveSameState([manager, src, t1, t2, t3]);
 

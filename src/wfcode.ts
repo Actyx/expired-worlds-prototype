@@ -956,12 +956,12 @@ export namespace CodeGraph {
     baseNexts: Nexts<CType>;
     nextMap: Nexts<CType>[];
     nextOf: (index: number) => Nexts<CType>;
-    legSlideOf: (index: number) => number | undefined;
+    legSlideOf: (index: number) => LegSlide | undefined;
     baseLookahead: Lookaheads;
     lookaheadsMap: Lookaheads[];
     baseActorSet: ActorSet.Type<CType>;
     actorSetMap: ActorSet.Type<CType>[];
-    legSlideMap: number[];
+    legSlideMap: LegSlide[];
     branchesFrom: (index: number) => BranchOf<CType>[];
     assignAheadsMap: AssignAheadsMap;
     terminuses: Set<number>;
@@ -1350,6 +1350,8 @@ export namespace CodeGraph {
     return assignAheadsMap;
   };
 
+  export type LegSlide = { index: number; tags: LookaheadTagMap };
+
   /**
    * LegSlide is a index to index mapping where the leg of a WFMachine can
    * "slide" into the next index. For example a leg on a CEvent can "slide"
@@ -1360,7 +1362,7 @@ export namespace CodeGraph {
     workflow: WFWorkflow<CType>["code"],
     lookaheadsMap: Lookaheads[]
   ) => {
-    const legSlides = [] as number[];
+    const legSlides = [] as LegSlide[];
 
     const canSlideTo = (lookahead: Lookahead) => {
       const { tags } = lookahead;
@@ -1380,29 +1382,51 @@ export namespace CodeGraph {
 
     const extractLegslideFrom = (
       legIndex: number
-    ): { from: number[]; lastSlidePoint: number } => {
-      const from = [] as number[];
+    ): {
+      from: { index: number; tags: LookaheadTagMap }[];
+      lastSlidePoint: number;
+    } => {
+      const from = [] as { index: number; links: Lookahead[] }[];
+      const links: Lookahead[] = [];
 
       let lastSlidePoint = legIndex;
       while (true) {
-        from.push(lastSlidePoint);
-
         const lookaheads = lookaheadsMap.at(lastSlidePoint);
-        if (!lookaheads) return { from, lastSlidePoint };
-
         const validRightAfterLookahead = lookaheads
-          .filter(
+          ?.filter(
             (lahead) =>
               lahead.index === lastSlidePoint + 1 && canSlideTo(lahead)
           )
           .at(0);
 
+        from.push({ index: lastSlidePoint, links: links.slice() });
         if (validRightAfterLookahead) {
+          links.push(validRightAfterLookahead);
           lastSlidePoint = validRightAfterLookahead.index;
           continue;
         }
 
-        return { from, lastSlidePoint };
+        return {
+          from: from.map((from) => ({
+            index: from.index,
+            tags: (() => {
+              const totalLinks = links;
+              const tracedLinks = new Set(from.links);
+
+              const linksBetweenJumps = totalLinks.filter(
+                (link) => !tracedLinks.has(link)
+              );
+
+              const tags = linksBetweenJumps.reduce(
+                (tags, link) => ({ ...tags, ...link.tags }),
+                {} as LookaheadTagMap
+              );
+
+              return tags;
+            })(),
+          })),
+          lastSlidePoint,
+        };
       }
     };
 
@@ -1410,8 +1434,11 @@ export namespace CodeGraph {
       const existingLegslide = legSlides.at(index);
       if (existingLegslide === undefined) {
         const extracted = extractLegslideFrom(index);
-        extracted.from.forEach((index) => {
-          legSlides[index] = extracted.lastSlidePoint;
+        extracted.from.forEach((from) => {
+          legSlides[from.index] = {
+            index: extracted.lastSlidePoint,
+            tags: from.tags,
+          };
         });
       }
     });
